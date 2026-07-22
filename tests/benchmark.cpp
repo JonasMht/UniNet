@@ -1,18 +1,26 @@
-// UniNet benchmark — measures encode/decode, compression (none/zlib/lz4), and
-// loopback pub/sub throughput so the README performance matrix can compare codecs.
+// UniNet benchmark — complete pipeline diagnostic. Mirrors UniVox's approach
+// (operation-level ScopedOp instrumentation + an opt-in profiler report) but
+// exercises the *whole* path (encode → compress → frame → deliver → unframe →
+// decode) so the report pinpoints the dominant cost — the lever for the next
+// "massive improvement".
 //
-// One build (LZ4 auto-detected at configure time); all compression methods are
-// runtime-selectable. Run: ./benchmark [verts] [reps]  (defaults: 4096 verts, 200 reps).
+// It also logs every run to a CSV (append) and dumps the latest profiler report
+// to a file, so results accumulate across runs for before/after comparison.
+//
+//   ./build/benchmark [reps=300] [profile_msgs=2000]
 #include "uninet/cbor.h"
 #include "uninet/codec.h"
 #include "uninet/loopback.h"
 #include "uninet/node.h"
 #include "uninet/profiler.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -39,14 +47,24 @@ static double mean_ns(F&& f, int reps) {
     return std::chrono::duration<double, std::nano>(t1 - t0).count() / reps;
 }
 
-// A realistic ThermoNav "mesh update" payload: points (float32 x3, fast path) +
-// flat triangle indices packed as little-endian uint32 bytes (the audit's "flat
-// triangle-index list", packed — faster than per-element CBOR ints) + a 4x4
-// transform. This is the kind of message the audit flagged as bandwidth-heavy.
+// CSV row logger — appends to `path`, writing the header on first creation.
+static void log_row(const std::string& path, const std::string& run,
+                    int verts, double payload_kib, const std::string& op,
+                    double mean_us, double mbps, double extra) {
+    std::ifstream test(path);
+    bool empty = !test.good();
+    std::ofstream out(path, std::ios::app);
+    if (empty) out << "run,verts,payload_kib,op,mean_us,mbps,extra\n";
+    out << run << ',' << verts << ',' << payload_kib << ',' << op << ','
+        << mean_us << ',' << mbps << ',' << extra << '\n';
+}
+
+// A realistic ThermoNav "mesh update": points (float32 x3) + flat triangle
+// indices packed as little-endian uint32 bytes + a 4x4 transform.
 static Cbor make_mesh_payload(int verts, Bytes& polys_out) {
     std::vector<float> pts(size_t(verts) * 3);
     for (size_t i = 0; i < pts.size(); ++i) pts[i] = float(i) * 0.123f;
-    int tris = verts;  // one triangle per vertex (illustrative)
+    int tris = verts;
     polys_out.resize(size_t(tris) * 3 * 4);
     for (int i = 0; i < tris; ++i)
         for (int j = 0; j < 3; ++j) {
@@ -66,75 +84,107 @@ static Cbor make_mesh_payload(int verts, Bytes& polys_out) {
 }
 
 int main(int argc, char** argv) {
-    const int verts = (argc > 1) ? std::atoi(argv[1]) : 4096;
-    const int reps  = (argc > 2) ? std::atoi(argv[2]) : 200;
+    const int reps = (argc > 1) ? std::atoi(argv[1]) : 300;
+    const int profile_msgs = (argc > 2) ? std::atoi(argv[2]) : 2000;
+    const std::string log_path = (argc > 3) ? argv[3] : "uninet_bench_log.csv";
 
-    Bytes polys_scratch;
-    Cbor payload = make_mesh_payload(verts, polys_scratch);
-    Envelope env;
-    env.subject = "domain.D1";
-    env.src_uuid = "bench";
-    env.data = payload;
+    const std::string run = caps();
+    std::printf("# UniNet benchmark  caps=%s  reps=%d\n", run.c_str(), reps);
+    std::printf("# logging to: %s   (append; header on first write)\n", log_path.c_str());
+    std::printf("verts,payload_kib,op,mean_us,mbps,extra\n");
 
-    // Warm up.
-    Bytes enc = encode(to_cbor(env));
-    decode(enc.data(), enc.size());
-
-    double enc_ns = mean_ns([&] { (void)encode(to_cbor(env)); }, reps);
-    double dec_ns = mean_ns([&] { (void)decode(enc.data(), enc.size()); }, reps);
-    const double payload_mb = double(enc.size()) / (1024.0 * 1024.0);
-
-    std::printf("CAPS %s\n", caps().c_str());
-    std::printf("payload: %d verts, %.2f KiB uncompressed CBOR\n", verts, enc.size() / 1024.0);
-    std::printf("op,reps,mean_us,throughput\n");
-    std::printf("encode,%d,%.3f,%.1f MB/s\n", reps, enc_ns / 1000.0,
-                payload_mb / (enc_ns / 1e9));
-    std::printf("decode,%d,%.3f,%.1f MB/s\n", reps, dec_ns / 1000.0,
-                payload_mb / (dec_ns / 1e9));
-
-    // ── compression matrix ──
-    Compression methods[] = {Compression::None, Compression::Zlib, Compression::Lz4};
-    const char* names[] = {"none", "zlib", "lz4"};
-    for (size_t i = 0; i < 3; ++i) {
-        Compression m = methods[i];
+    const int sizes[] = {512, 4096, 16384};
+    Compression pm = Compression::Lz4;
 #ifdef UNINET_HAS_LZ4
 #else
-        if (m == Compression::Lz4) { std::printf("%s,skipped (not built),,\n", names[i]); continue; }
+    pm = Compression::Zlib;
 #endif
-        double c_ns = mean_ns([&] { (void)compress(enc, m); }, reps);
-        Bytes comp = compress(enc, m);
-        double d_ns = mean_ns([&] { (void)decompress(comp, m); }, reps);
-        double ratio = comp.empty() ? 0.0 : double(enc.size()) / double(comp.size());
-        std::printf("compress_%s,%d,%.3f,%.1f MB/s (ratio %.2fx, wire %.1f KiB)\n",
-                    names[i], reps, c_ns / 1000.0,
-                    payload_mb / (c_ns / 1e9), ratio, comp.size() / 1024.0);
-        std::printf("decompress_%s,%d,%.3f,%.1f MB/s\n",
-                    names[i], reps, d_ns / 1000.0, payload_mb / (d_ns / 1e9));
+
+    for (int verts : sizes) {
+        Bytes polys;
+        Cbor payload = make_mesh_payload(verts, polys);
+        Envelope env; env.subject = "domain.D1"; env.src_uuid = "bench"; env.data = payload;
+        env.compression = pm;
+
+        Bytes enc = encode(to_cbor(env));                 // warm up
+        decode(enc.data(), enc.size());
+        const double kib = double(enc.size()) / 1024.0;
+        const double mb = double(enc.size()) / (1024.0 * 1024.0);
+
+        auto out = [&](const char* op, double ns, double extra = 0.0) {
+            double us = ns / 1000.0, mbps = mb / (ns / 1e9);
+            std::printf("%d,%.1f,%s,%.3f,%.1f,%.3f\n", verts, kib, op, us, mbps, extra);
+            log_row(log_path, run, verts, kib, op, us, mbps, extra);
+        };
+
+        out("encode",    mean_ns([&] { (void)encode(to_cbor(env)); }, reps));
+        out("decode",    mean_ns([&] { (void)decode(enc.data(), enc.size()); }, reps));
+        out("frame",     mean_ns([&] { (void)frame(env); }, reps));
+
+        Bytes wire = frame(env);
+        out("unframe",   mean_ns([&] { (void)unframe(wire); }, reps));
+
+        // compression tiers
+        Compression methods[] = {Compression::None, Compression::Zlib, Compression::Lz4};
+        const char* mname[] = {"none", "zlib", "lz4"};
+        for (size_t i = 0; i < 3; ++i) {
+            Compression m = methods[i];
+#ifndef UNINET_HAS_LZ4
+            if (m == Compression::Lz4) continue;
+#endif
+            double c_ns = mean_ns([&] { (void)compress(enc, m); }, reps);
+            Bytes comp = compress(enc, m);
+            double ratio = comp.empty() ? 0.0 : double(enc.size()) / double(comp.size());
+            char op[32]; std::snprintf(op, sizeof(op), "compress_%s", mname[i]);
+            out(op, c_ns, ratio);
+            double d_ns = mean_ns([&] { (void)decompress(comp, m); }, reps);
+            std::snprintf(op, sizeof(op), "decompress_%s", mname[i]);
+            out(op, d_ns, ratio);
+        }
+
+        // end-to-end loopback pub/sub (one publisher, one subscriber)
+        LoopbackTransport bus; bus.connect();
+        Node pub("pub", &bus); pub.connect();
+        Node sub("sub", &bus); sub.connect();
+        long got = 0;
+        sub.subscribe("domain.D1", [&](const Envelope&) { ++got; });
+        const int msgs = 4000;
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < msgs; ++i) pub.publish("domain.D1", payload);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double sec = std::chrono::duration<double>(t1 - t0).count();
+        out("loopback_pubsub", sec / msgs * 1e9, double(msgs) / sec);  // ns/msg; extra = msgs/s
+        if (got != msgs) std::fprintf(stderr, "WARN: %ld/%d messages delivered\n", got, msgs);
     }
 
-    // ── end-to-end loopback pub/sub (one publisher, one subscriber) ──
-    LoopbackTransport bus;
-    bus.connect();
-    Node pub("pub", &bus); pub.connect();
-    Node sub("sub", &bus); sub.connect();
-    long got = 0;
-    sub.subscribe("domain.D1", [&](const Envelope&) { ++got; });
-
-    const int msgs = 5000;
-    auto t0 = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < msgs; ++i)
-        pub.publish("domain.D1", payload);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double sec = std::chrono::duration<double>(t1 - t0).count();
-    std::printf("loopback_pubsub,%d,%.3f us/msg,%.0f msgs/s %.1f MB/s\n",
-                msgs, sec * 1e6 / msgs, msgs / sec,
-                (double(msgs) * enc.size()) / (1024.0 * 1024.0) / sec);
-
-    // Profile one LZ4-framed publish for the codec/compress breakdown.
+    // ── PROFILE: exercise the whole pipeline, then read the breakdown ──
+    Bytes polys;
+    Cbor payload = make_mesh_payload(4096, polys);
     profiler::enable(true);
     profiler::reset();
-    env.compression = Compression::Lz4;
-    (void)frame(env);
-    std::fprintf(stderr, "%s", profiler::report().c_str());
-    return got == msgs ? 0 : 1;
+    {
+        LoopbackTransport bus; bus.connect();
+        Node pub("pub", &bus, pm); pub.connect();
+        Node sub("sub", &bus); sub.connect();
+        long got = 0;
+        sub.subscribe("domain.D1", [&](const Envelope&) { ++got; });
+        for (int i = 0; i < profile_msgs; ++i) pub.publish("domain.D1", payload);
+        std::printf("\n# profiled %d %s-framed pub/sub messages @ 4096 verts (got %ld)\n",
+                    profile_msgs, pm == Compression::Lz4 ? "lz4" : "zlib", got);
+    }
+    std::string rep = profiler::report();
+    std::printf("%s", rep.c_str());
+    { std::ofstream f("uninet_profile.txt"); f << "# UniNet profiler — " << caps() << "\n" << rep; }
+    std::printf("# saved profiler report -> uninet_profile.txt\n");
+
+    // Dominant-op callout (the next thing to optimize).
+    auto snap = profiler::snapshot();
+    std::string worst; double worst_t = 0, grand = 0;
+    for (auto& [op, s] : snap.ops) { grand += s.total_seconds; if (s.total_seconds > worst_t) { worst_t = s.total_seconds; worst = op; } }
+    if (grand > 0)
+        std::printf("# DOMINANT op: '%s' = %.1f%% of profiled time  -> the next lever to pull\n",
+                    worst.c_str(), 100.0 * worst_t / grand);
+
+    profiler::enable(false);
+    return 0;
 }

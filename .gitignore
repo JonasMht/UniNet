@@ -21,5 +21,7 @@ dist/
 wheelhouse/
 .cmake/
 DCMAKE_BUILD*/
+uninet_bench_log.csv
+uninet_profile.txt
 bin/
 obj/

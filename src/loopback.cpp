@@ -1,5 +1,6 @@
 // UniNet — in-process transport implementation.
 #include "uninet/loopback.h"
+#include "uninet/profiler.h"
 
 namespace uninet {
 
@@ -17,6 +18,7 @@ bool LoopbackTransport::publish(const std::string& subject, const uint8_t* data,
                 targets.push_back(s.handler);
         ++delivered_;
     }
+    profiler::ScopedOp _("loopback.deliver", len, len);
     for (auto& h : targets) h(subject, payload);
     return true;
 }

@@ -122,16 +122,20 @@ Bytes decompress(const Bytes& comp, Compression method) {
 
 // ── wire framing ──
 Bytes frame(const Envelope& e) {
+    profiler::ScopedOp _("frame");
     Bytes cbor = encode(to_cbor(e));
     Bytes payload = (e.compression == Compression::None) ? cbor : compress(cbor, e.compression);
     Bytes wire;
     wire.reserve(payload.size() + 1);
     wire.push_back(uint8_t(e.compression));
     wire.insert(wire.end(), payload.begin(), payload.end());
+    _.set_bytes_in(cbor.size());
+    _.set_bytes_out(wire.size());
     return wire;
 }
 
 std::optional<Envelope> unframe(const Bytes& wire) {
+    profiler::ScopedOp _("unframe", wire.size(), wire.size());
     if (wire.size() < 2) return std::nullopt;   // 1 header byte + >=1 payload byte
     Compression method = Compression(wire[0]);
     if (uint8_t(method) > 2) return std::nullopt;

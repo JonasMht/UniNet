@@ -2,6 +2,8 @@
 // by default with indefinite-length input accepted.
 #include "uninet/cbor.h"
 
+#include "uninet/profiler.h"
+
 #include <cstring>
 
 namespace uninet {
@@ -76,25 +78,32 @@ void encode_into(const Cbor& c, Bytes& out) {
             break;
         }
         case Cbor::Kind::F32Array: {
+            // Bulk-write path (profiler-flagged: per-float push_back was 86% of
+            // framing). Pre-size the buffer once and write directly — no per-element
+            // size check / reallocation in the hot loop.
             const auto& v = c.f32_items();
             put_head(out, 4, v.size());
-            const uint8_t head = uint8_t((7 << 5) | 26);  // float32
-            for (float f : v) {
-                uint32_t bits; std::memcpy(&bits, &f, 4);
-                out.push_back(head);
-                out.push_back(uint8_t(bits >> 24)); out.push_back(uint8_t(bits >> 16));
-                out.push_back(uint8_t(bits >> 8));  out.push_back(uint8_t(bits));
+            const size_t base = out.size();
+            out.resize(base + v.size() * 5);
+            uint8_t* p = out.data() + base;
+            for (size_t i = 0; i < v.size(); ++i) {
+                uint32_t bits; std::memcpy(&bits, &v[i], 4);
+                *p++ = 0xFA;
+                *p++ = uint8_t(bits >> 24); *p++ = uint8_t(bits >> 16);
+                *p++ = uint8_t(bits >> 8);  *p++ = uint8_t(bits);
             }
             break;
         }
         case Cbor::Kind::F64Array: {
             const auto& v = c.f64_items();
             put_head(out, 4, v.size());
-            const uint8_t head = uint8_t((7 << 5) | 27);  // float64
-            for (double f : v) {
-                uint64_t bits; std::memcpy(&bits, &f, 8);
-                out.push_back(head);
-                for (int shift = 56; shift >= 0; shift -= 8) out.push_back(uint8_t(bits >> shift));
+            const size_t base = out.size();
+            out.resize(base + v.size() * 9);
+            uint8_t* p = out.data() + base;
+            for (size_t i = 0; i < v.size(); ++i) {
+                uint64_t bits; std::memcpy(&bits, &v[i], 8);
+                *p++ = 0xFB;
+                for (int shift = 56; shift >= 0; shift -= 8) *p++ = uint8_t(bits >> shift);
             }
             break;
         }
@@ -129,8 +138,11 @@ void encode_into(const Cbor& c, Bytes& out) {
 }  // namespace
 
 Bytes encode(const Cbor& c) {
+    profiler::ScopedOp _("cbor.encode");
     Bytes out;
     encode_into(c, out);
+    _.set_bytes_in(out.size());
+    _.set_bytes_out(out.size());
     return out;
 }
 
@@ -314,6 +326,7 @@ Cbor decode_one(Cursor& c) {
 }  // namespace
 
 Cbor decode(const uint8_t* data, size_t len, bool* ok) {
+    profiler::ScopedOp _("cbor.decode", len, len);
     if (!data || len == 0) { if (ok) *ok = false; return Cbor::null(); }
     Cursor c{data, len, 0, true};
     Cbor v = decode_one(c);

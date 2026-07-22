@@ -129,51 +129,72 @@ docs/             PROTOCOL.md (canonical wire spec) · benchmark_*.png
 tools/            plot_benchmark.py
 ```
 
-## Performance
+## Performance & diagnostics
 
-UniNet ships a built-in profiler (`uninet.profiler`) and an auto-detected LZ4 tier.
-Benchmark: `tests/benchmark.cpp` (4096-vert mesh update — points + flat triangle
-indices + transform, ~108 KiB uncompressed CBOR; mean of 300 reps on a 32-core box;
-reproduce via the commands below).
+UniNet ships the same opt-in profiler UniVox uses (`uninet.profiler`): a zero-cost
+`ScopedOp` RAII timer placed at the **operation** level of every hot path
+(`cbor.encode`, `cbor.decode`, `compress.*`, `decompress.*`, `frame`, `unframe`,
+`node.publish`, `loopback.deliver`). Enable it, run a workload, read the per-op
+breakdown sorted by total time — the dominant cost is always at the top.
+
+The benchmark is a **collect-then-plot pipeline**: it runs the full pipeline matrix
+(encode → compress → frame → deliver → unframe → decode) at three mesh sizes,
+**appends every run to `uninet_bench_log.csv`** (so runs accumulate for before/after
+comparison), and dumps the profiler report to `uninet_profile.txt` with a
+`DOMINANT op` callout pointing at the next lever to pull.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j --target benchmark
+./build/benchmark 200 2000          # CSV to stdout + uninet_bench_log.csv + uninet_profile.txt
+python3 tools/plot_benchmark.py     # reads the CSV -> regenerates docs/benchmark_*.png
+```
 
 ![Codec + transport throughput](docs/benchmark_throughput.png)
 
 ![Compression tiers](docs/benchmark_compression.png)
 
+4096-vert mesh (~108 KiB uncompressed CBOR, mean of 200 reps, 32-core box):
+
 | op | throughput | notes |
 |---|---|---|
-| **decode** | **7.8 GB/s** | memory-bandwidth-bound (bulk float-array fast path) |
-| **encode** | **1.3 GB/s** | |
-| **LZ4 compress** | **14.5 GB/s** (ratio 1.42×) | 108 KiB → 76 KiB on the wire |
-| **LZ4 decompress** | **11.1 GB/s** | |
-| zlib compress | 35 MB/s (ratio 2.29×) | 108 KiB → 47 KiB — best ratio, too slow for live |
+| **decode** | **9.4 GB/s** | memory-bandwidth-bound (bulk float-array fast path) |
+| **encode** | **7.9 GB/s** | bulk-write fast path (was 1.3 GB/s — see below) |
+| **frame** | 4.9 GB/s | encode + compress |
+| **unframe** | 4.4 GB/s | decompress + decode |
+| **LZ4 compress** | **14.6 GB/s** (ratio 1.42×) | 108 KiB → 76 KiB on the wire |
+| **LZ4 decompress** | **11.9 GB/s** | |
+| zlib compress | 36 MB/s (ratio 2.29×) | 108 KiB → 47 KiB — best ratio, too slow for live |
 | zlib decompress | 503 MB/s | |
-| **loopback pub/sub** | **8,500 msgs/s · 900 MB/s** | end-to-end (encode + 2× unframe + dispatch) |
+| **loopback pub/sub** | **17.7k msgs/s · 1.77 GB/s** | full encode→unframe→dispatch round-trip |
 
-**What the numbers say:**
-- **Decode is memory-bandwidth-bound** (~7.8 GB/s) thanks to the contiguous
-  float-array fast path — homogeneous arrays (mesh points, transforms, safety
-  textures) never allocate a per-element node.
-- **LZ4 is the big win, and it's essentially free** — 14.5 GB/s with a real 1.4×
-  cut. This is exactly the lever the three ThermoNav peers *already coded* but
-  force-disabled to `NONE` everywhere, because no peer could tell how a frame was
-  encoded. UniNet's 1-byte compression header fixes that negotiation: LZ4 can stay
-  **on for every frame**.
-- **zlib's better ratio (2.3×) isn't worth it live** — 35 MB/s compress is ~400×
+**How the profiler found a 6× win (and a 2× loopback win).** The first profiled run
+flagged `cbor.encode` as the dominant cost — encoding ran at **1.3 GB/s vs decode's
+7.8 GB/s (6× slower)**, and it was 86% of framing time. The report showed why
+immediately: the float-array path did one `push_back` per byte (61k calls + repeated
+reallocs) while decode read the same data in a tight bulk loop. Switching encode to
+pre-size the buffer and write directly into it (no per-byte check) lifted encode to
+**7.9 GB/s** and **doubled end-to-end loopback throughput** (8.5k → 17.7k msgs/s) —
+because every publish pays the encode cost. The win came directly from the breakdown,
+not from guessing.
+
+**The next lever the profiler now surfaces** (staged): in the loopback profile
+`unframe`/`cbor.decode`/`decompress.lz4` run **4000× for 2000 publishes** — each
+publisher decodes its *own echo* and then discards it. A cheap sender peek in
+`Node::on_raw_` would roughly halve receive-side work. The diagnostic shows exactly
+where; the fix is a separate change.
+
+**What the tier numbers say:**
+- **LZ4 is essentially free and should stay on for every frame** — 14.6 GB/s with a
+  real 1.4× cut. This is the lever the three ThermoNav peers *already coded* but
+  force-disabled to `NONE` everywhere (no peer could tell how a frame was encoded);
+  UniNet's 1-byte compression header fixes that.
+- **zlib's better ratio (2.3×) isn't worth it live** — 36 MB/s compress is ~400×
   slower than LZ4. Reserve zlib for archival/batch, LZ4 for the OR.
-- The loopback sustains **8.5k msgs/s** with the full encode→unframe→dispatch
-  round-trip, so the protocol layer is not the bottleneck at any realistic rate
-  (the MR peer throttles to ~20 Hz today).
+- The protocol layer is not the bottleneck at any realistic rate (the MR peer
+  throttles to ~20 Hz today; UniNet sustains ~17k pub/sub round-trips/s).
 
 Compression level is tunable at runtime (`uninet.set_compression_level(1..9)` for
 zlib; default 6).
-
-Reproduce:
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j --target benchmark
-./build/benchmark 4096 300          # CSV to stdout, profiler breakdown to stderr
-python3 tools/plot_benchmark.py     # regenerate docs/benchmark_*.png
-```
 
 ## Status (v0.1)
 

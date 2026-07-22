@@ -71,8 +71,10 @@ void Node::publish(const std::string& subject, Cbor data, const std::string& dst
     env.dst_uuid = dst_uuid;
     env.subject = subject;
     env.data = std::move(data);
+    profiler::ScopedOp _("node.publish");
     Bytes wire = frame(env);
-    profiler::ScopedOp _("node.publish", wire.size(), wire.size());
+    _.set_bytes_in(wire.size());
+    _.set_bytes_out(wire.size());
     transport_->publish(subject, wire.data(), wire.size());
 }
 
