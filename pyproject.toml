@@ -1,0 +1,26 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "uninet"
+version = "0.1.0"
+description = "UniNet — Unified Networking transport. Compiled C++ core (CBOR codec, compression, pluggable transport, pub/sub Node) with Python bindings."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+license = { text = "MIT" }
+authors = [{ name = "JonasMht" }]
+keywords = ["networking", "pubsub", "cbor", "nats", "transport", "medical"]
+
+[project.optional-dependencies]
+test = ["pytest", "numpy>=1.24"]
+
+[tool.scikit-build]
+# Loopback + zlib + lz4 wheel by default (portable). NATS variant is a build profile.
+cmake.args = ["-DUNINET_BUILD_PYTHON=ON", "-DUNINET_NATS=OFF"]
+wheel.packages = ["python/uninet"]
+build-dir = "build/py"
+
+[tool.cibuildwheel]
+test-command = "python -c \"import uninet; print('uninet', uninet.__version__, 'protocol', uninet.PROTOCOL_VERSION, 'lz4', uninet.HAS_LZ4)\""
