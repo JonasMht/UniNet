@@ -1,0 +1,25 @@
+build/
+build-*/
+build-cache/          # Windows vcpkg clone (bootstrap.ps1)
+out/
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exp
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+wheelhouse/
+.cmake/
+DCMAKE_BUILD*/
+bin/
+obj/
