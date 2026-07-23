@@ -30,6 +30,9 @@ public:
     bool publish(const std::string& subject, const uint8_t* data, size_t len) override;
     void subscribe(const std::string& subject, MessageHandler handler) override;
     void unsubscribe(const std::string& subject) override;
+    // Block until the broker has acked all buffered publishes (pace a burst so a
+    // slow consumer isn't dropped). No-op for non-NATS transports.
+    void flush();
     std::string name() const override { return "nats"; }
 
 private:

@@ -46,10 +46,12 @@ private:
     std::string uuid_;
     Transport* transport_;
     Compression compress_;
+    bool watching_ = false;   // internal ">" subscription established once connected
 
     std::mutex handlers_mu_;
     std::vector<std::pair<std::string, DataHandler>> handlers_;
 
+    void ensure_watching_();   // create the internal ">" subscription once the transport is up
     void on_raw_(const std::string& subject, const Bytes& payload);
 };
 

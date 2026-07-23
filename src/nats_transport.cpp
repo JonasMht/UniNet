@@ -94,6 +94,10 @@ void NatsTransport::unsubscribe(const std::string& subject) {
     }
 }
 
+void NatsTransport::flush() {
+    if (impl_->conn) natsConnection_FlushTimeout(impl_->conn, 5000);
+}
+
 #else  // !UNINET_HAS_NATS — stubs so the symbol set is stable either way.
 
 struct NatsTransport::Impl {};
@@ -105,6 +109,7 @@ bool NatsTransport::connected() const                          { return false; }
 bool NatsTransport::publish(const std::string&, const uint8_t*, size_t) { return false; }
 void  NatsTransport::subscribe(const std::string&, MessageHandler)      {}
 void  NatsTransport::unsubscribe(const std::string&)                    {}
+void  NatsTransport::flush()                                            {}
 
 #endif  // UNINET_HAS_NATS
 

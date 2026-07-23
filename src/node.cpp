@@ -30,17 +30,24 @@ std::string make_uuid(const std::string& name) {
 
 Node::Node(std::string name, Transport* transport, Compression compress)
     : name_(std::move(name)), uuid_(make_uuid(name_)), transport_(transport), compress_(compress) {
-    if (transport_) {
-        // One raw subscription per Node: it unfames every frame and applies the
-        // protocol-level filters (echo suppression, dst targeting) once, here.
-        transport_->subscribe(">", [this](const std::string& subject, const Bytes& payload) {
-            this->on_raw_(subject, payload);
-        });
-    }
+    ensure_watching_();   // covers the common pattern where the transport was connected first
+}
+
+void Node::ensure_watching_() {
+    if (watching_ || !transport_ || !transport_->connected()) return;
+    transport_->subscribe(">", [this](const std::string& subject, const Bytes& payload) {
+        this->on_raw_(subject, payload);
+    });
+    watching_ = true;
 }
 
 bool Node::connect() {
-    return transport_ && transport_->connect();
+    if (!transport_) return false;
+    if (transport_->connect() && transport_->connected()) {
+        ensure_watching_();
+        return true;
+    }
+    return false;
 }
 
 bool Node::connected() const {
@@ -79,6 +86,7 @@ void Node::publish(const std::string& subject, Cbor data, const std::string& dst
 }
 
 void Node::subscribe(const std::string& subject, DataHandler handler) {
+    ensure_watching_();   // app subscribe implies "I want to receive" — make sure we're watching
     std::lock_guard<std::mutex> lk(handlers_mu_);
     handlers_.emplace_back(subject, std::move(handler));
 }
