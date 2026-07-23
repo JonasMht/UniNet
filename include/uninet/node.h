@@ -20,7 +20,7 @@ public:
     // Delivered to the application after framing/echo/dst filtering.
     using DataHandler = std::function<void(const Envelope& env)>;
 
-    Node(std::string name, Transport* transport, Compression compress = Compression::None);
+    Node(std::string name, Transport* transport, Compression compress = DEFAULT_COMPRESSION);
 
     const std::string& uuid() const { return uuid_; }
     const std::string& name() const { return name_; }

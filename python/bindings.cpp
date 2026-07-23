@@ -11,6 +11,10 @@
 #include "uninet/node.h"
 #include "uninet/profiler.h"
 
+#ifdef UNINET_HAS_NATS
+#include "uninet/nats_transport.h"
+#endif
+
 #include <memory>
 #include <string>
 
@@ -72,6 +76,8 @@ PYBIND11_MODULE(_uninet, m) {
         })
         .def("as_int",  &Cbor::as_int)
         .def("as_float", &Cbor::as_f64)
+        .def("f32_items", [](const Cbor& c) { return c.f32_items(); })  // contiguous float array
+        .def("f64_items", [](const Cbor& c) { return c.f64_items(); })
         .def("size", &Cbor::size);
 
     m.def("encode", [](const Cbor& c) {
@@ -110,11 +116,26 @@ PYBIND11_MODULE(_uninet, m) {
         .def("connected", &LoopbackTransport::connected)
         .def("delivered", &LoopbackTransport::delivered);
 
+#ifdef UNINET_HAS_NATS
+    // ── NatsTransport (the production brokered backend) ──
+    py::class_<NatsTransport, std::unique_ptr<NatsTransport>>(m, "NatsTransport")
+        .def(py::init([](const std::string& url) { return new NatsTransport(url); }),
+             py::arg("url") = "nats://127.0.0.1:4222")
+        .def("connect", &NatsTransport::connect)
+        .def("disconnect", &NatsTransport::disconnect)
+        .def("connected", &NatsTransport::connected);
+#endif
+
     // ── Node (accepts a LoopbackTransport; NATS-backed variant staged) ──
     py::class_<Node, std::unique_ptr<Node>>(m, "Node")
         .def(py::init([](const std::string& name, LoopbackTransport* t, Compression c) {
             return new Node(name, t, c);
-        }), py::arg("name"), py::arg("transport"), py::arg("compression") = Compression::None)
+        }), py::arg("name"), py::arg("transport"), py::arg("compression") = DEFAULT_COMPRESSION)
+#ifdef UNINET_HAS_NATS
+        .def(py::init([](const std::string& name, NatsTransport* t, Compression c) {
+            return new Node(name, t, c);
+        }), py::arg("name"), py::arg("transport"), py::arg("compression") = DEFAULT_COMPRESSION)
+#endif
         .def_property_readonly("uuid", &Node::uuid)
         .def("connect", &Node::connect)
         .def("connected", &Node::connected)

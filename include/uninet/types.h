@@ -35,4 +35,16 @@ inline const char* compression_name(Compression m) {
     return "?";
 }
 
+// The recommended compression for LIVE traffic (the OR, ~20 Hz mesh streaming): LZ4
+// when liblz4 is present (~14.8 GB/s, ~1.4x ratio — cheap enough to leave on for
+// every frame). zlib is kept for archival/batch (better ratio, ~400x slower) and as
+// the dependency-free fallback when liblz4 is absent; see docs/PROTOCOL.md.
+#ifdef UNINET_HAS_LZ4
+constexpr Compression DEFAULT_COMPRESSION = Compression::Lz4;
+#elif defined(UNINET_HAS_ZLIB)
+constexpr Compression DEFAULT_COMPRESSION = Compression::Zlib;
+#else
+constexpr Compression DEFAULT_COMPRESSION = Compression::None;
+#endif
+
 }  // namespace uninet
