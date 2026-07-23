@@ -115,6 +115,7 @@ PYBIND11_MODULE(_uninet, m) {
         .def("connect", &LoopbackTransport::connect)
         .def("disconnect", &LoopbackTransport::disconnect)
         .def("connected", &LoopbackTransport::connected)
+        .def("unsubscribe", &LoopbackTransport::unsubscribe)
         .def("delivered", &LoopbackTransport::delivered);
 
 #ifdef UNINET_HAS_NATS
@@ -124,7 +125,9 @@ PYBIND11_MODULE(_uninet, m) {
              py::arg("url") = "nats://127.0.0.1:4222")
         .def("connect", &NatsTransport::connect)
         .def("disconnect", &NatsTransport::disconnect)
-        .def("connected", &NatsTransport::connected);
+        .def("connected", &NatsTransport::connected)
+        .def("unsubscribe", &NatsTransport::unsubscribe)
+        .def("flush", &NatsTransport::flush);
 #endif
 
     // ── Node (accepts a LoopbackTransport; NATS-backed variant staged) ──
