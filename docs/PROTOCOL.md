@@ -13,33 +13,46 @@ and LZ4 code that nobody could enable. UniNet is that bus, written once.
 - **One contract** shared by every peer (server, MR headset, Slicer, future mesh node).
 - **Transport-agnostic:** the framing/codec are independent of how bytes travel
   (NATS today; loopback for tests; mesh/BLE staged) via a `Transport` interface.
-- **Negotiated compression:** a 1-byte header tells a receiver how the frame was
-  encoded, so LZ4 can finally be turned on without breaking peers.
+- **Routing in the clear, content compressed:** `src`/`dst`/compression ride in a
+  binary header *before* the (possibly compressed) payload, so a receiver can drop
+  its own echo and frames not addressed to it **without decompressing or decoding**.
+- **Negotiated compression:** the header tells a receiver how the core was encoded,
+  so LZ4 can finally be turned on without breaking peers.
 - **Forward-compatible:** a protocol version gates every frame.
 
 ## Wire frame
 
 ```
-frame = [ 1 byte: compression ][ payload ]
-payload = compression==None ? CBOR(envelope) : compress(CBOR(envelope))
+frame = [ comp:1 ][ flags:1 ][ srclen:2 BE ][ src ][ dstlen:2 BE ][ dst ][ payload ]
+payload = comp==None ? CBOR(core) : compress(CBOR(core))
+core    = { "pv": uint, "sub": text, "data": <any> }     # routing is NOT here
 ```
 
-`compression` is an unsigned byte: `0`=None, `1`=Zlib (deflate), `2`=LZ4 frame.
-This single header byte is the field the ThermoNav peers lacked — each shipped LZ4
-code force-disabled to None because no peer could tell how a frame was encoded.
+`comp` is an unsigned byte: `0`=None, `1`=Zlib (deflate), `2`=LZ4 frame. `flags`
+is reserved (0). Lengths are 2-byte big-endian. `src`/`dst` are the sender /
+intended-receiver UUIDs (`dst` empty = broadcast).
 
-## Envelope (CBOR map)
+This split is what the old single-byte-header design couldn't do: with compression
+on, `src`/`dst` would be trapped inside the compressed blob, forcing every receiver
+(including the sender hearing its own echo) to decompress + decode just to decide
+whether to keep the frame. Keeping routing in the clear makes echo suppression and
+unicast targeting nearly free — the profiler showed `unframe` running 4000× for
+2000 publishes before this change; it now runs 2000×.
+
+## Envelope core (CBOR map)
 
 ```
 {
   "pv":  uint    protocol version (uint16; CURRENT_PROTOCOL_VERSION = 1)
-  "cp":  uint    compression byte used for THIS frame (0/1/2; mirrors the header)
-  "src": text    sender UUID
-  "dst": text    "" = broadcast; else a targeted peer UUID (unicast)
   "sub": text    subject, e.g. "domain.D1" (NATS-style; ">" wildcard for subs)
   "data": <any>  the message payload (see "Message payloads")
 }
 ```
+
+`src`, `dst` and `compression` are reconstructed by `unframe()` from the binary
+header — they are not in the CBOR core. (They were in v0.1's single-header form;
+the split is the only in-place evolution since then and is wire-incompatible with
+that early internal revision, which no deployed peer used.)
 
 A receiver accepts a frame when `src != self` (echo suppression) **and**
 (`dst == ""` or `dst == self`). Addressing is by UUID in the envelope, not by
