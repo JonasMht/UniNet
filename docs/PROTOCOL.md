@@ -73,9 +73,12 @@ spawning many subjects — matching the existing `domain.D1` deployment.
 
 ## Message payloads
 
-`data` is an arbitrary CBOR value. The ThermoNav application schema (the string
-tags currently duplicated across the three peers) is migrated into
-`include/uninet/schema.h` as the single source of truth:
+`data` is an arbitrary CBOR value. UniNet's transport and codec layers are
+**schema-agnostic** — they carry any `Cbor` payload and impose no application
+taxonomy. The ThermoNav application schema (the `code`/`*_type` string tags) is a
+*consumer* concern, owned by a single IDL, `ThermoNavServer/prototypes/comm_standard/schema.toml`,
+whose `gen_schema.py` emits the C++/Python/C# bindings for every peer. That IDL is
+the one source of truth for the tags; UniNet does not duplicate it. The shape:
 
 ```
 data = { "code": <code>, "<code>_type": <type>, ...fields }
@@ -90,6 +93,8 @@ data = { "code": <code>, "<code>_type": <type>, ...fields }
 | `request_type`  | applicator · sync · reset · new_case · volume · solve · metrics ·      |
 |                 | start/stop/next/previous_procedure · start_experiment                  |
 | `object_type`   | surface · applicator · volume                                          |
+| `solver_type`   | fdm · fdm_multi_res · c_nca                                            |
+| `information_type` | simulation                                                          |
 
 Mesh geometry rides as `{ "polydata": { "points": float32[], "polys": uint[] },
 "transform": float64[16] }` — the shape `ThermoNavMR/SurfaceObject.cs` and
