@@ -91,6 +91,24 @@ void Node::subscribe(const std::string& subject, DataHandler handler) {
     handlers_.emplace_back(subject, std::move(handler));
 }
 
+std::optional<Cbor> Node::request(const std::string& subject, Cbor data,
+                                  const std::string& dst_uuid, int timeout_ms) {
+    if (!transport_ || !transport_->connected()) return std::nullopt;
+    Envelope env;
+    env.compression = compress_;
+    env.src_uuid = uuid_;
+    env.dst_uuid = dst_uuid;
+    env.subject = subject;
+    env.data = std::move(data);
+    Bytes wire = frame(env);
+    Bytes reply;
+    if (!transport_->request(subject, wire.data(), wire.size(), timeout_ms, reply))
+        return std::nullopt;
+    auto r = unframe(reply);
+    if (!r) return std::nullopt;
+    return std::move(r->data);
+}
+
 void Node::on_raw_(const std::string& subject, const Bytes& payload) {
     // Cheap routing filter BEFORE any decompress/decode: read src/dst from the
     // clear header and drop this peer's own echo (and frames not addressed to it)

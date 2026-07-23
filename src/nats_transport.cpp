@@ -98,6 +98,21 @@ void NatsTransport::flush() {
     if (impl_->conn) natsConnection_FlushTimeout(impl_->conn, 5000);
 }
 
+bool NatsTransport::request(const std::string& subject, const uint8_t* data, size_t len,
+                            int timeout_ms, Bytes& reply) {
+    if (!connected()) return false;
+    natsMsg* msg = nullptr;
+    natsStatus s = natsConnection_Request(&msg, impl_->conn, subject.c_str(),
+                                          data, len, timeout_ms);
+    if (s != NATS_OK || !msg) { if (msg) natsMsg_Destroy(msg); return false; }
+    const char* d = natsMsg_GetData(msg);
+    int n = natsMsg_GetDataLength(msg);
+    reply.assign(reinterpret_cast<const uint8_t*>(d),
+                 reinterpret_cast<const uint8_t*>(d) + n);
+    natsMsg_Destroy(msg);
+    return true;
+}
+
 #else  // !UNINET_HAS_NATS — stubs so the symbol set is stable either way.
 
 struct NatsTransport::Impl {};
@@ -110,6 +125,7 @@ bool NatsTransport::publish(const std::string&, const uint8_t*, size_t) { return
 void  NatsTransport::subscribe(const std::string&, MessageHandler)      {}
 void  NatsTransport::unsubscribe(const std::string&)                    {}
 void  NatsTransport::flush()                                            {}
+bool  NatsTransport::request(const std::string&, const uint8_t*, size_t, int, Bytes&) { return false; }
 
 #endif  // UNINET_HAS_NATS
 

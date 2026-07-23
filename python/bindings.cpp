@@ -150,7 +150,18 @@ PYBIND11_MODULE(_uninet, m) {
                 py::gil_scoped_acquire gil;
                 cb(env);
             });
-        });
+        })
+        .def("request", [](Node& n, const std::string& subject, const Cbor& data,
+                           const std::string& dst_uuid, int timeout_ms) -> py::object {
+            std::optional<Cbor> r;
+            {
+                py::gil_scoped_release nogil;   // block on the broker without holding the GIL
+                r = n.request(subject, data, dst_uuid, timeout_ms);
+            }
+            if (!r) return py::none();
+            return py::cast(*r);
+        }, py::arg("subject"), py::arg("data"), py::arg("dst_uuid") = "",
+           py::arg("timeout_ms") = 2000);
 
     // ── profiler ──
     py::module_ pf = m.def_submodule("profiler");

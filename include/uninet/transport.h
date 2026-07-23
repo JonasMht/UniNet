@@ -30,6 +30,15 @@ public:
     virtual void subscribe(const std::string& subject, MessageHandler handler) = 0;
     virtual void unsubscribe(const std::string& subject) = 0;
 
+    // Synchronous request-reply (NATS request semantics): send `len` bytes on
+    // `subject`, wait up to `timeout_ms` for one responder's framed reply into
+    // `reply`. Default: unsupported (returns false) — only brokered transports
+    // that can correlate an inbox implement it.
+    virtual bool request(const std::string& subject, const uint8_t* data, size_t len,
+                         int timeout_ms, Bytes& reply) {
+        (void)subject; (void)data; (void)len; (void)timeout_ms; (void)reply; return false;
+    }
+
     virtual std::string name() const = 0;   // "loopback" / "nats" / ...
 };
 

@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,13 @@ public:
     // Subscribe to a subject (exact or wildcard). The handler receives accepted
     // envelopes only (own echoes and non-matching dst_uuids are filtered).
     void subscribe(const std::string& subject, DataHandler handler);
+
+    // Synchronous request-reply: publish `data` on `subject` and block up to
+    // `timeout_ms` for one responder's framed reply. `dst_uuid` targets a
+    // specific peer. Returns the reply payload, or nullopt on timeout / on a
+    // transport that doesn't support request-reply (e.g. loopback).
+    std::optional<Cbor> request(const std::string& subject, Cbor data,
+                                const std::string& dst_uuid = "", int timeout_ms = 2000);
 
 private:
     std::string name_;
