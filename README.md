@@ -157,31 +157,38 @@ python3 tools/plot_benchmark.py     # reads the CSV -> regenerates docs/benchmar
 
 | op | throughput | notes |
 |---|---|---|
-| **decode** | **9.4 GB/s** | memory-bandwidth-bound (bulk float-array fast path) |
-| **encode** | **7.9 GB/s** | bulk-write fast path (was 1.3 GB/s — see below) |
-| **frame** | 4.9 GB/s | encode + compress |
-| **unframe** | 4.4 GB/s | decompress + decode |
-| **LZ4 compress** | **14.6 GB/s** (ratio 1.42×) | 108 KiB → 76 KiB on the wire |
-| **LZ4 decompress** | **11.9 GB/s** | |
+| **encode** | **8.1 GB/s** | bulk-write fast path (was 1.3 GB/s — see below) |
+| **decode** | **7.9 GB/s** | memory-bandwidth-bound (bulk float-array fast path) |
+| **frame** | 5.0 GB/s | encode + compress |
+| **unframe** | 4.2 GB/s | decompress + decode |
+| **LZ4 compress** | **14.8 GB/s** (ratio 1.42×) | 108 KiB → 76 KiB on the wire |
+| **LZ4 decompress** | **12.3 GB/s** | |
 | zlib compress | 36 MB/s (ratio 2.29×) | 108 KiB → 47 KiB — best ratio, too slow for live |
-| zlib decompress | 503 MB/s | |
-| **loopback pub/sub** | **17.7k msgs/s · 1.77 GB/s** | full encode→unframe→dispatch round-trip |
+| zlib decompress | 504 MB/s | |
+| **loopback pub/sub** | **27.8k msgs/s · 2.93 GB/s** | full encode→unframe→dispatch round-trip |
 
-**How the profiler found a 6× win (and a 2× loopback win).** The first profiled run
-flagged `cbor.encode` as the dominant cost — encoding ran at **1.3 GB/s vs decode's
-7.8 GB/s (6× slower)**, and it was 86% of framing time. The report showed why
-immediately: the float-array path did one `push_back` per byte (61k calls + repeated
-reallocs) while decode read the same data in a tight bulk loop. Switching encode to
-pre-size the buffer and write directly into it (no per-byte check) lifted encode to
-**7.9 GB/s** and **doubled end-to-end loopback throughput** (8.5k → 17.7k msgs/s) —
-because every publish pays the encode cost. The win came directly from the breakdown,
-not from guessing.
+**Two profiler-driven wins so far (loopback 8.5k → 27.8k msgs/s = 3.3×):**
 
-**The next lever the profiler now surfaces** (staged): in the loopback profile
-`unframe`/`cbor.decode`/`decompress.lz4` run **4000× for 2000 publishes** — each
-publisher decodes its *own echo* and then discards it. A cheap sender peek in
-`Node::on_raw_` would roughly halve receive-side work. The diagnostic shows exactly
-where; the fix is a separate change.
+1. **`cbor.encode` 6× win.** The first profile flagged encoding as the dominant cost —
+   1.3 GB/s vs decode's 7.8 (6× slower), 86% of framing time. Cause: the float-array
+   path did one `push_back` per byte (61k calls + reallocs) while decode read bulk.
+   Switching encode to pre-size and write directly lifted it to **8.1 GB/s** and
+   doubled loopback (every publish pays the encode cost).
+
+2. **Echo suppression without decompress.** The next profile showed
+   `unframe`/`decode`/`decompress` running **4000× for 2000 publishes** — each
+   publisher was decoding its *own echo* then discarding it, and with compression on
+   it had to decompress first just to read `src`. Fix: put `src`/`dst`/compression in
+   a **clear binary header** before the compressed core (`peek_routing`), so
+   `Node::on_raw_` drops echoes *before* touching the payload. `unframe` calls halved
+   (4k → 2k) and loopback rose another **+45%** (17.7k → 27.8k).
+
+Both wins came straight from the breakdown — total profiled time dropped 65% over
+the two changes, and the per-op table now shows the cost is **balanced** (no single
+dominant leaf: `node.publish` 30% aggregate, `loopback.deliver`/`unframe` ~16% each,
+`frame` ~14%). That balance is the signal that the easy wins are exhausted and the
+remaining work is a design trade-off (the `loopback.deliver` safety copy, async
+dispatch) rather than a bug.
 
 **What the tier numbers say:**
 - **LZ4 is essentially free and should stay on for every frame** — 14.6 GB/s with a

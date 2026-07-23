@@ -84,12 +84,17 @@ void Node::subscribe(const std::string& subject, DataHandler handler) {
 }
 
 void Node::on_raw_(const std::string& subject, const Bytes& payload) {
+    // Cheap routing filter BEFORE any decompress/decode: read src/dst from the
+    // clear header and drop this peer's own echo (and frames not addressed to it)
+    // without touching the compressed payload. With LZ4/zlib on, this is what
+    // keeps a publisher from decoding every frame it sends.
+    auto route = peek_routing(payload);
+    if (!route) return;
+    if (route->src == uuid_) return;                          // own echo
+    if (!route->dst.empty() && route->dst != uuid_) return;   // not addressed to me
+
     auto env = unframe(payload);
     if (!env) return;
-    // Protocol-level filters — the logic each peer hand-rolls today, written once.
-    if (env->src_uuid == uuid_) return;                       // drop own echo
-    if (!env->dst_uuid.empty() && env->dst_uuid != uuid_)     // not addressed to me
-        return;
     if (env->protocol_version != CURRENT_PROTOCOL_VERSION) {
         // Forward-compatible policy: accept the major, ignore unrecognized fields.
     }

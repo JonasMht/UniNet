@@ -22,29 +22,58 @@ void set_compression_level(int level) {
     g_zlib_level = level;
 }
 
-// ── envelope <-> cbor ──
+// ── envelope core <-> cbor (subject/data/version only; routing is in the header) ──
 Cbor to_cbor(const Envelope& e) {
     return Cbor::map()
         .set("pv", Cbor::uint(e.protocol_version))
-        .set("cp", Cbor::uint(uint8_t(e.compression)))
-        .set("src", Cbor::text(e.src_uuid))
-        .set("dst", Cbor::text(e.dst_uuid))
         .set("sub", Cbor::text(e.subject))
         .set("data", e.data);
 }
 
 std::optional<Envelope> from_cbor(const Cbor& c) {
-    if (!c.is_map() || !c.has("src") || !c.has("sub") || !c.has("data"))
+    if (!c.is_map() || !c.has("sub") || !c.has("data"))
         return std::nullopt;
     Envelope e;
     e.protocol_version = c.has("pv") ? uint16_t(c["pv"].as_uint()) : 1;
-    e.compression = c.has("cp") ? Compression(uint8_t(c["cp"].as_uint())) : Compression::None;
-    if (uint8_t(e.compression) > 2) return std::nullopt;
-    e.src_uuid = c["src"].as_text();
-    e.dst_uuid = c.has("dst") ? c["dst"].as_text() : std::string{};
     e.subject  = c["sub"].as_text();
     e.data     = c["data"];
+    // src_uuid / dst_uuid / compression are filled by unframe() from the header.
     return e;
+}
+
+// ── wire header (routing in the clear) ──
+//   [ comp:1 ][ flags:1 ][ srclen:2 BE ][ src ][ dstlen:2 BE ][ dst ]
+namespace {
+struct Header {
+    Compression compression = Compression::None;
+    std::string src, dst;
+    size_t payload_offset = 0;
+    bool ok = false;
+};
+inline uint16_t rd_be16(const uint8_t* p) { return uint16_t((uint16_t(p[0]) << 8) | p[1]); }
+Header parse_header(const uint8_t* p, size_t n) {
+    Header h;
+    if (n < 4) return h;                       // comp + flags + srclen minimum
+    h.compression = Compression(p[0]);
+    if (uint8_t(h.compression) > 2) return h;  // unknown codec
+    size_t i = 2;                              // skip comp + flags
+    uint16_t sl = rd_be16(p + i); i += 2;
+    if (i + sl > n) return h;
+    h.src.assign(reinterpret_cast<const char*>(p + i), sl); i += sl;
+    if (i + 2 > n) return h;
+    uint16_t dl = rd_be16(p + i); i += 2;
+    if (i + dl > n) return h;
+    h.dst.assign(reinterpret_cast<const char*>(p + i), dl); i += dl;
+    h.payload_offset = i;
+    h.ok = (i < n);                            // need at least one payload byte
+    return h;
+}
+}  // namespace
+
+std::optional<Routing> peek_routing(const Bytes& wire) {
+    Header h = parse_header(wire.data(), wire.size());
+    if (!h.ok) return std::nullopt;
+    return Routing{h.compression, h.src, h.dst};
 }
 
 // ── compression ──
@@ -120,32 +149,45 @@ Bytes decompress(const Bytes& comp, Compression method) {
     return {};
 }
 
-// ── wire framing ──
+// ── wire framing (clear routing header + compressed core) ──
+namespace {
+inline void wr_be16(Bytes& b, uint16_t v) { b.push_back(uint8_t(v >> 8)); b.push_back(uint8_t(v)); }
+}
+
 Bytes frame(const Envelope& e) {
     profiler::ScopedOp _("frame");
-    Bytes cbor = encode(to_cbor(e));
-    Bytes payload = (e.compression == Compression::None) ? cbor : compress(cbor, e.compression);
+    Bytes core = encode(to_cbor(e));
+    Bytes payload = (e.compression == Compression::None) ? core : compress(core, e.compression);
     Bytes wire;
-    wire.reserve(payload.size() + 1);
-    wire.push_back(uint8_t(e.compression));
+    wire.reserve(payload.size() + 2 + 2 + e.src_uuid.size() + 2 + e.dst_uuid.size() + 1);
+    wire.push_back(uint8_t(e.compression));   // comp
+    wire.push_back(0);                          // flags (reserved)
+    wr_be16(wire, uint16_t(e.src_uuid.size())); wire.insert(wire.end(), e.src_uuid.begin(), e.src_uuid.end());
+    wr_be16(wire, uint16_t(e.dst_uuid.size())); wire.insert(wire.end(), e.dst_uuid.begin(), e.dst_uuid.end());
     wire.insert(wire.end(), payload.begin(), payload.end());
-    _.set_bytes_in(cbor.size());
+    _.set_bytes_in(core.size());
     _.set_bytes_out(wire.size());
     return wire;
 }
 
 std::optional<Envelope> unframe(const Bytes& wire) {
-    profiler::ScopedOp _("unframe", wire.size(), wire.size());
-    if (wire.size() < 2) return std::nullopt;   // 1 header byte + >=1 payload byte
-    Compression method = Compression(wire[0]);
-    if (uint8_t(method) > 2) return std::nullopt;
-    Bytes payload(wire.begin() + 1, wire.end());
-    Bytes cbor = (method == Compression::None) ? payload : decompress(payload, method);
-    if (cbor.empty()) return std::nullopt;
+    profiler::ScopedOp _("unframe");
+    Header h = parse_header(wire.data(), wire.size());
+    if (!h.ok) return std::nullopt;
+    Bytes payload(wire.begin() + h.payload_offset, wire.end());
+    Bytes core = (h.compression == Compression::None) ? payload : decompress(payload, h.compression);
+    if (core.empty()) return std::nullopt;
     bool ok = false;
-    Cbor root = decode(cbor.data(), cbor.size(), &ok);
+    Cbor root = decode(core.data(), core.size(), &ok);
     if (!ok) return std::nullopt;
-    return from_cbor(root);
+    auto env = from_cbor(root);
+    if (!env) return std::nullopt;
+    env->compression = h.compression;
+    env->src_uuid = std::move(h.src);
+    env->dst_uuid = std::move(h.dst);
+    _.set_bytes_in(wire.size());
+    _.set_bytes_out(core.size());
+    return env;
 }
 
 }  // namespace uninet
