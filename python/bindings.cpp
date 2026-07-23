@@ -78,6 +78,7 @@ PYBIND11_MODULE(_uninet, m) {
         .def("as_float", &Cbor::as_f64)
         .def("f32_items", [](const Cbor& c) { return c.f32_items(); })  // contiguous float array
         .def("f64_items", [](const Cbor& c) { return c.f64_items(); })
+        .def("map_items", [](const Cbor& c) { return c.map_items(); })  // (key,value) pairs for dict decode
         .def("size", &Cbor::size);
 
     m.def("encode", [](const Cbor& c) {
