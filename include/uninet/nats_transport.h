@@ -1,18 +1,18 @@
 // UniNet — NATS transport. The production brokered backend, mirroring the bus the
-// three ThermoNav peers share today (nats://10.0.0.10:4222 over WireGuard). Gated
-// behind UNINET_NATS=ON (FetchContent cnats), like UniVox's optional CUDA tier.
+// three ThermoNav peers share today (nats://…:4222). Gated behind UNINET_NATS=ON
+// (FetchContent cnats), like UniVox's optional CUDA tier.
+//
+// PImpl: the header layout is identical whether or not the consumer is built with
+// UNINET_HAS_NATS, so a NATS-enabled libuninet can be linked from code compiled
+// without the define (the Python extension, the future ThermoNav consumers) without
+// an ABI mismatch. When UNINET_NATS=OFF the methods are link-time stubs (connect()
+// returns false) — NatsTransport exists everywhere, works where built.
 #pragma once
 
 #include "uninet/transport.h"
 
-#ifdef UNINET_HAS_NATS
-#include <nats/nats.h>
-#endif
-
-#include <map>
-#include <mutex>
+#include <memory>
 #include <string>
-#include <vector>
 
 namespace uninet {
 
@@ -32,25 +32,10 @@ public:
     void unsubscribe(const std::string& subject) override;
     std::string name() const override { return "nats"; }
 
-#ifdef UNINET_HAS_NATS
 private:
-    // cnats delivers on its own thread; we route each subject's frames to its handler.
-    struct Sub {
-        MessageHandler handler;
-#ifdef UNINET_HAS_NATS
-        natsSubscription* sub = nullptr;
-#endif
-    };
-    static void on_msg_(natsConnection* /*nc*/, natsSubscription* /*sub*/, natsMsg* msg, void* closure);
-
+    struct Impl;                       // cnats state, defined in nats_transport.cpp
     std::string url_;
-    natsConnection* conn_ = nullptr;
-    mutable std::mutex mu_;
-    std::map<std::string, Sub> subs_;
-#else
-private:
-    std::string url_;
-#endif
+    std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace uninet

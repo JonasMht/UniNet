@@ -31,6 +31,12 @@ __version__ = "0.1.0"
 HAS_LZ4 = bool(HAS_LZ4)
 HAS_NATS = bool(HAS_NATS)
 
+# NatsTransport only exists in a NATS-enabled build.
+try:  # pragma: no cover - depends on build flags
+    from ._uninet import NatsTransport  # noqa: F401
+except ImportError:
+    NatsTransport = None
+
 __all__ = [
     "Compression",
     "Cbor",
