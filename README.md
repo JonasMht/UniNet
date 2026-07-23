@@ -119,7 +119,7 @@ a.Publish("domain.D1", "hello from C# over UniNet");
 ```
 include/uninet/   types.h · cbor.h (codec) · codec.h (envelope+compression)
                   · transport.h · loopback.h · node.h · nats_transport.h
-                  · cabi.h (C ABI) · profiler.h · schema.h (ThermoNav tags)
+                  · cabi.h (C ABI) · profiler.h
 src/              cbor · codec · loopback · node · profiler · nats_transport · cabi
 python/           bindings.cpp (pybind11) · uninet/ (package)
 csharp/           UniNet/ (P/Invoke wrapper) · UniNetDemo/ (demo)
@@ -207,15 +207,23 @@ zlib; default 6).
 
 **Verified:** CBOR round-trips (all kinds, incl. fast float arrays), zlib + LZ4
 compression round-trips, envelope frame/unframe, loopback pub/sub (echo suppression,
-dst targeting, wildcard), reconnect-with-backoff, profiler, Python bindings
+dst targeting, wildcard), reconnect-with-backoff, synchronous request-reply
+(`Node::request` over a request-capable transport), profiler, Python bindings
 (`pip install`), C ABI + C# wrapper, builds CPU-only with no broker required.
 
-**Staged (documented, not in v0.1):** the `NatsTransport` wired into a live
+**Deployed:** all three ThermoNav peers now consume UniNet instead of their
+hand-rolled buses — ThermoNavServer (vendored C++ core + `networking.cpp`),
+ThermoNavSlicer (Python extension + `networking.py`), ThermoNavMR (C ABI /
+P-Invoke + `Networking.cs`). Each kept a `.legacy` copy of the code it replaced.
+The application message taxonomy is **not** owned here — it lives in one IDL
+(`ThermoNavServer/prototypes/comm_standard/schema.toml`), which generates the
+bindings for every peer; UniNet stays schema-agnostic.
+
+**Staged (documented, not yet in-tree):** the `NatsTransport` wired into a live
 benchmark against a broker; mesh discovery + BLE backends behind the `Transport`
-interface; a managed CBOR surface for C# (today the C ABI exchanges text/bytes);
-cross-platform wheels via CI (`cibuildwheel`) and a NuGet package; and migrating
-ThermoNavMR / ThermoNavServer / ThermoNavSlicer off their in-tree copies onto this
-package — the same staged migration UniVox used for its on-disk format.
+interface; request-reply exposed through the C ABI / C# wrapper (today it is C++
+and Python only); a managed CBOR surface for C#; and cross-platform wheels via CI
+(`cibuildwheel`) plus a NuGet package.
 
 ## License
 
