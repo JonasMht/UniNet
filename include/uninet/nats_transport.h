@@ -30,6 +30,10 @@ public:
     bool publish(const std::string& subject, const uint8_t* data, size_t len) override;
     void subscribe(const std::string& subject, MessageHandler handler) override;
     void unsubscribe(const std::string& subject) override;
+    // NATS-native request-reply (natsConnection_Request handles the inbox,
+    // correlation id and timeout). Returns false if not connected or on timeout.
+    bool request(const std::string& subject, const uint8_t* data, size_t len,
+                 int timeout_ms, Bytes& reply) override;
     // Block until the broker has acked all buffered publishes (pace a burst so a
     // slow consumer isn't dropped). No-op for non-NATS transports.
     void flush();
