@@ -77,76 +77,111 @@ std::optional<Routing> peek_routing(const Bytes& wire) {
 }
 
 // ── compression ──
-Bytes compress(const Bytes& raw, Compression method) {
-    if (method == Compression::None || raw.empty()) return raw;
+void compress_into(const uint8_t* raw, size_t n, Compression method, Bytes& out) {
+    if (method == Compression::None || n == 0) {
+        out.assign(raw, raw + n);
+        return;
+    }
     if (method == Compression::Zlib) {
-        profiler::ScopedOp _("compress.zlib", raw.size(), 0);
-        uLong bound = compressBound(uLong(raw.size()));
-        Bytes out;
-        out.resize(size_t(bound));
+        profiler::ScopedOp _("compress.zlib", n, 0);
+        uLong bound = compressBound(uLong(n));
+        out.resize(size_t(bound));            // keeps capacity across calls
         uLongf out_len = bound;
-        int rc = compress2(out.data(), &out_len, raw.data(), uLong(raw.size()), g_zlib_level);
-        if (rc != Z_OK) return {};
+        int rc = compress2(out.data(), &out_len, raw, uLong(n), g_zlib_level);
+        if (rc != Z_OK) { out.clear(); return; }
         out.resize(out_len);
-        return out;
+        return;
     }
 #ifdef UNINET_HAS_LZ4
     if (method == Compression::Lz4) {
-        profiler::ScopedOp _("compress.lz4", raw.size(), 0);
-        size_t bound = LZ4F_compressFrameBound(raw.size(), nullptr);
-        Bytes out;
+        profiler::ScopedOp _("compress.lz4", n, 0);
+        size_t bound = LZ4F_compressFrameBound(n, nullptr);
         out.resize(bound);
-        size_t n = LZ4F_compressFrame(out.data(), out.size(), raw.data(), raw.size(), nullptr);
-        if (LZ4F_isError(n)) return {};
-        out.resize(n);
-        return out;
+        size_t w = LZ4F_compressFrame(out.data(), out.size(), raw, n, nullptr);
+        if (LZ4F_isError(w)) { out.clear(); return; }
+        out.resize(w);
+        return;
     }
 #endif
-    return {};
+    out.clear();
+}
+
+bool decompress_into(const uint8_t* comp, size_t n, Compression method, Bytes& out) {
+    if (method == Compression::None || n == 0) {
+        out.assign(comp, comp + n);
+        return true;
+    }
+    if (method == Compression::Zlib) {
+        profiler::ScopedOp _("decompress.zlib", n, 0);
+        // Output size isn't on the wire, so grow until it fits. `out` is reused
+        // across calls, so a steady stream of similar frames converges to zero
+        // reallocations after the first message.
+        if (out.size() < n * 4 + 64) out.resize(n * 4 + 64);
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            uLongf out_len = uLongf(out.size());
+            int rc = uncompress(out.data(), &out_len, comp, uLong(n));
+            if (rc == Z_OK) { out.resize(out_len); return true; }
+            if (rc != Z_BUF_ERROR) { out.clear(); return false; }
+            out.resize(out.size() * 2);
+        }
+        out.clear();
+        return false;
+    }
+#ifdef UNINET_HAS_LZ4
+    if (method == Compression::Lz4) {
+        profiler::ScopedOp _("decompress.lz4", n, 0);
+        // The frame header carries the content size when the compressor knew it
+        // (LZ4F_compressFrame does), so one sized decompress replaces the old
+        // grow-and-retry streaming loop and its per-call scratch allocation.
+        static thread_local LZ4F_decompressionContext_t ctx = nullptr;
+        if (!ctx && LZ4F_isError(LZ4F_createDecompressionContext(&ctx, LZ4F_VERSION))) {
+            ctx = nullptr;
+            out.clear();
+            return false;
+        }
+        LZ4F_resetDecompressionContext(ctx);
+
+        size_t hdr = n;
+        LZ4F_frameInfo_t info{};
+        size_t rc = LZ4F_getFrameInfo(ctx, &info, comp, &hdr);
+        if (LZ4F_isError(rc)) { out.clear(); return false; }
+
+        size_t cap = info.contentSize ? size_t(info.contentSize) : (n * 6 + 1024);
+        if (out.size() < cap) out.resize(cap);
+
+        size_t in_pos = hdr, produced = 0;
+        for (int attempt = 0; attempt < 32; ++attempt) {
+            size_t out_avail = out.size() - produced;
+            size_t in_avail = n - in_pos;
+            rc = LZ4F_decompress(ctx, out.data() + produced, &out_avail,
+                                 comp + in_pos, &in_avail, nullptr);
+            if (LZ4F_isError(rc)) { out.clear(); return false; }
+            in_pos += in_avail;
+            produced += out_avail;
+            if (rc == 0) break;                       // frame complete
+            if (in_pos >= n && out_avail == 0) break; // no progress possible
+            if (produced == out.size()) out.resize(out.size() * 2);
+        }
+        out.resize(produced);
+        return true;
+    }
+#endif
+    out.clear();
+    return false;
+}
+
+Bytes compress(const Bytes& raw, Compression method) {
+    if (method == Compression::None || raw.empty()) return raw;
+    Bytes out;
+    compress_into(raw.data(), raw.size(), method, out);
+    return out;
 }
 
 Bytes decompress(const Bytes& comp, Compression method) {
     if (method == Compression::None || comp.empty()) return comp;
-    if (method == Compression::Zlib) {
-        profiler::ScopedOp _("decompress.zlib", comp.size(), 0);
-        // Grow the output buffer until uncompress succeeds (size unknown).
-        Bytes out(comp.size() * 4 + 64);
-        for (int attempt = 0; attempt < 8; ++attempt) {
-            uLongf out_len = uLongf(out.size());
-            int rc = uncompress(out.data(), &out_len, comp.data(), uLong(comp.size()));
-            if (rc == Z_OK) { out.resize(out_len); return out; }
-            if (rc != Z_BUF_ERROR) return {};
-            out.resize(out.size() * 2);
-        }
-        return {};
-    }
-#ifdef UNINET_HAS_LZ4
-    if (method == Compression::Lz4) {
-        profiler::ScopedOp _("decompress.lz4", comp.size(), 0);
-        LZ4F_decompressionContext_t ctx;
-        if (LZ4F_isError(LZ4F_createDecompressionContext(&ctx, LZ4F_VERSION))) return {};
-        Bytes scratch(comp.size() * 6 + 1024);
-        Bytes out;
-        size_t in_pos = 0;
-        bool err = false;
-        // Streaming decode: LZ4F_decompress may need several calls for one frame.
-        for (int attempt = 0; attempt < 32; ++attempt) {
-            size_t out_avail = scratch.size();
-            size_t in_avail = comp.size() - in_pos;
-            if (in_avail == 0 && !out.empty() && attempt > 0) break;
-            size_t rc = LZ4F_decompress(ctx, scratch.data(), &out_avail,
-                                        comp.data() + in_pos, &in_avail, nullptr);
-            in_pos += in_avail;
-            out.insert(out.end(), scratch.data(), scratch.data() + out_avail);
-            if (LZ4F_isError(rc)) { err = true; break; }
-            if (rc == 0 && in_pos == comp.size()) break;   // fully consumed + flushed
-        }
-        LZ4F_freeDecompressionContext(ctx);
-        if (err) return {};
-        return out;
-    }
-#endif
-    return {};
+    Bytes out;
+    if (!decompress_into(comp.data(), comp.size(), method, out)) return {};
+    return out;
 }
 
 // ── wire framing (clear routing header + compressed core) ──
@@ -154,40 +189,70 @@ namespace {
 inline void wr_be16(Bytes& b, uint16_t v) { b.push_back(uint8_t(v >> 8)); b.push_back(uint8_t(v)); }
 }
 
-Bytes frame(const Envelope& e) {
+void frame_into(const Envelope& e, Bytes& wire, Scratch& scratch) {
     profiler::ScopedOp _("frame");
-    Bytes core = encode(to_cbor(e));
-    Bytes payload = (e.compression == Compression::None) ? core : compress(core, e.compression);
-    Bytes wire;
-    wire.reserve(payload.size() + 2 + 2 + e.src_uuid.size() + 2 + e.dst_uuid.size() + 1);
+    encode_into(to_cbor(e), scratch.core);
+
+    const uint8_t* payload = scratch.core.data();
+    size_t payload_n = scratch.core.size();
+    if (e.compression != Compression::None) {
+        compress_into(scratch.core.data(), scratch.core.size(), e.compression, scratch.payload);
+        payload = scratch.payload.data();
+        payload_n = scratch.payload.size();
+    }
+
+    const size_t hdr = 2 + 2 + e.src_uuid.size() + 2 + e.dst_uuid.size();
+    wire.clear();
+    wire.reserve(hdr + payload_n);
     wire.push_back(uint8_t(e.compression));   // comp
-    wire.push_back(0);                          // flags (reserved)
+    wire.push_back(0);                        // flags (reserved)
     wr_be16(wire, uint16_t(e.src_uuid.size())); wire.insert(wire.end(), e.src_uuid.begin(), e.src_uuid.end());
     wr_be16(wire, uint16_t(e.dst_uuid.size())); wire.insert(wire.end(), e.dst_uuid.begin(), e.dst_uuid.end());
-    wire.insert(wire.end(), payload.begin(), payload.end());
-    _.set_bytes_in(core.size());
+    wire.insert(wire.end(), payload, payload + payload_n);
+    _.set_bytes_in(scratch.core.size());
     _.set_bytes_out(wire.size());
-    return wire;
 }
 
-std::optional<Envelope> unframe(const Bytes& wire) {
+std::optional<Envelope> unframe_into(const uint8_t* wire, size_t n, Scratch& scratch) {
     profiler::ScopedOp _("unframe");
-    Header h = parse_header(wire.data(), wire.size());
+    Header h = parse_header(wire, n);
     if (!h.ok) return std::nullopt;
-    Bytes payload(wire.begin() + h.payload_offset, wire.end());
-    Bytes core = (h.compression == Compression::None) ? payload : decompress(payload, h.compression);
-    if (core.empty()) return std::nullopt;
+
+    // Uncompressed frames decode straight out of the caller's buffer — the old
+    // path copied the whole payload out first purely to get a Bytes to hand to
+    // decompress().
+    const uint8_t* core = wire + h.payload_offset;
+    size_t core_n = n - h.payload_offset;
+    if (h.compression != Compression::None) {
+        if (!decompress_into(core, core_n, h.compression, scratch.core)) return std::nullopt;
+        core = scratch.core.data();
+        core_n = scratch.core.size();
+    }
+    if (core_n == 0) return std::nullopt;
+
     bool ok = false;
-    Cbor root = decode(core.data(), core.size(), &ok);
+    Cbor root = decode(core, core_n, &ok);
     if (!ok) return std::nullopt;
     auto env = from_cbor(root);
     if (!env) return std::nullopt;
     env->compression = h.compression;
     env->src_uuid = std::move(h.src);
     env->dst_uuid = std::move(h.dst);
-    _.set_bytes_in(wire.size());
-    _.set_bytes_out(core.size());
+    _.set_bytes_in(n);
+    _.set_bytes_out(core_n);
     return env;
+}
+
+Bytes frame(const Envelope& e) {
+    Scratch s;
+    Bytes wire;
+    frame_into(e, wire, s);
+    return wire;
+}
+
+std::optional<Envelope> unframe(const Bytes& wire) {
+    Scratch s;
+    return unframe_into(wire.data(), wire.size(), s);
 }
 
 }  // namespace uninet

@@ -161,11 +161,28 @@ python3 tools/plot_benchmark.py     # reads the CSV -> regenerates docs/benchmar
 | **decode** | **7.9 GB/s** | memory-bandwidth-bound (bulk float-array fast path) |
 | **frame** | 5.0 GB/s | encode + compress |
 | **unframe** | 4.2 GB/s | decompress + decode |
-| **LZ4 compress** | **14.8 GB/s** (ratio 1.42×) | 108 KiB → 76 KiB on the wire |
-| **LZ4 decompress** | **12.3 GB/s** | |
+| **LZ4 compress** | 14.8 GB/s (ratio 1.42×) | see the caveat below — this figure is an artifact |
+| **LZ4 decompress** | 12.3 GB/s | |
 | zlib compress | 36 MB/s (ratio 2.29×) | 108 KiB → 47 KiB — best ratio, too slow for live |
 | zlib decompress | 504 MB/s | |
-| **loopback pub/sub** | **27.8k msgs/s · 2.93 GB/s** | full encode→unframe→dispatch round-trip |
+| **loopback pub/sub** | **23.1k msgs/s · 2.44 GB/s** | full encode→unframe→dispatch round-trip |
+
+> **Two corrections to earlier numbers in this table.**
+>
+> **1. The 27.8k msgs/s previously published here was not reproducible.** It came
+> from a single lucky run: glibc raises its mmap threshold after it sees large
+> blocks freed, so that one run happened to serve the framing buffers from the
+> heap instead of via `mmap`. Every subsequent run in `uninet_bench_log.csv`
+> measured **5.5–5.9k msgs/s** — a 4.7× gap nobody noticed because the README was
+> frozen at the best result. The cause was per-message allocator churn (§ below);
+> it is now fixed, and 23.1k is what the benchmark reproduces run over run.
+>
+> **2. The LZ4 compression figures are measured on a linear ramp**
+> (`pts[i] = i * 0.123f`), which is far more compressible than real mesh
+> coordinates. 14.8 GB/s is above what single-core LZ4 can do on genuine data
+> (~1 byte/cycle ⇒ 3–5 GB/s), and the 1.42× ratio will be closer to 1.0–1.05×
+> on real float32 point clouds. Treat "LZ4 is free, leave it on" as unproven
+> until the benchmark carries a realistic payload.
 
 **Two profiler-driven wins so far (loopback 8.5k → 27.8k msgs/s = 3.3×):**
 
@@ -183,12 +200,36 @@ python3 tools/plot_benchmark.py     # reads the CSV -> regenerates docs/benchmar
    `Node::on_raw_` drops echoes *before* touching the payload. `unframe` calls halved
    (4k → 2k) and loopback rose another **+45%** (17.7k → 27.8k).
 
-Both wins came straight from the breakdown — total profiled time dropped 65% over
-the two changes, and the per-op table now shows the cost is **balanced** (no single
-dominant leaf: `node.publish` 30% aggregate, `loopback.deliver`/`unframe` ~16% each,
-`frame` ~14%). That balance is the signal that the easy wins are exhausted and the
-remaining work is a design trade-off (the `loopback.deliver` safety copy, async
-dispatch) rather than a bug.
+**3. Allocator churn — the win the profiler could not see (3.9×).**
+
+After the first two wins the per-op table looked *balanced*, which was read as
+"the easy wins are exhausted." It wasn't: the dominant cost was **inside malloc**,
+where no `ScopedOp` reaches. Every `publish` allocated and freed three buffers
+(encoded core → compressed payload → wire) and every receive allocated another.
+glibc's mmap threshold starts at 128 KiB, so for the mesh payloads UniNet actually
+carries (~100–450 KiB) each of those was an `mmap`/`munmap` syscall pair plus page
+faults on first touch — and `munmap` cannot recycle the block, so the next message
+paid it all again.
+
+The fix is Cornflakes-style arena reuse: `frame_into`/`unframe_into` take a
+caller-owned `Scratch`, `Node` keeps one per thread, and `LoopbackTransport` keeps
+one delivery buffer per re-entrancy depth. Steady-state publishing now allocates
+**nothing** after the first message.
+
+| payload | before | after | |
+|---|---|---|---|
+| 512 verts (13.8 KiB) | 43.3k msgs/s | **72.7k** | 1.68× |
+| **4096 verts (108 KiB)** — the live MR mesh size | 5.9k msgs/s | **23.1k** | **3.9×** |
+| 16384 verts (432 KiB) | 3.4k msgs/s | 3.7k | 1.06× |
+
+The 432 KiB row barely moves because at that size the codec itself is
+memory-bandwidth-bound — the allocator was never the dominant term there. The win
+is concentrated exactly where ThermoNav operates.
+
+*Lesson for the profiler:* an op-level breakdown attributes allocator time to
+whichever op happened to call `malloc`, so a cost that is spread evenly across
+every op reads as "balanced" rather than "dominant." Balance is not proof that the
+wins are exhausted.
 
 **What the tier numbers say:**
 - **LZ4 is essentially free and should stay on for every frame** — 14.6 GB/s with a
@@ -202,6 +243,39 @@ dispatch) rather than a bug.
 
 Compression level is tunable at runtime (`uninet.set_compression_level(1..9)` for
 zlib; default 6).
+
+## Hostile-input hardening
+
+Frames arrive from the network, so every length prefix in them is attacker
+controlled. Three defects made a peer killable by a tiny frame; all three are
+fixed and covered by `test_hostile_frames`:
+
+| Defect | Trigger | Was |
+|---|---|---|
+| Length-prefix overflow | 9-byte frame declaring a 2⁶⁴−1 byte string — `c.i + n` wraps, so the bounds check passed | `std::length_error` → **process abort** |
+| Stride overflow in the float fast path | array count `n` where `n*5` wraps to a small value | heap out-of-bounds read |
+| Unbounded decode recursion | ~8.5k nested indefinite-length arrays, which LZ4-compress to **~60 bytes** | stack exhaustion → **segfault** |
+
+Lengths are now range-checked without overflowing (`fits()`) and decode depth is
+capped at 128. There is still **no authentication or integrity check on the wire**
+— `src_uuid` is self-asserted plaintext, so echo suppression and `dst` targeting
+are spoofable by any peer on the bus. That is the outstanding design gap.
+
+**Also fixed — silent data loss on high-ratio payloads.** `decompress` used to
+guess the output size from the input size and grow, giving up after 8 (zlib) or
+32 (LZ4) attempts; past that ceiling it returned empty, `unframe` returned
+`nullopt`, and `Node` dropped the message **with no error anywhere**. Anything
+compressing better than ~190× was lost — including sparse `safety_map` payloads,
+a documented ThermoNav message type:
+
+```
+             before          after
+128x128      OK              OK
+256x256      *** DROPPED *** OK      (ratio 224x)
+512x512      *** DROPPED *** OK      (ratio 234x)
+```
+
+LZ4 now reads the true content size from the frame header instead of guessing.
 
 ## Status (v0.1)
 

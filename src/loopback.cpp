@@ -2,12 +2,33 @@
 #include "uninet/loopback.h"
 #include "uninet/profiler.h"
 
+#include <deque>
+
 namespace uninet {
 
 bool LoopbackTransport::publish(const std::string& subject, const uint8_t* data, size_t len) {
     if (!online_) return false;
-    // Copy the payload so handlers can publish re-entrantly without aliasing.
-    Bytes payload(data, data + len);
+
+    // The payload must be copied: `data` normally points at the publisher's
+    // reusable framing buffer, so a handler that publishes re-entrantly would
+    // otherwise clobber the bytes still being delivered. Allocating that copy
+    // fresh each time costs an mmap/munmap pair per message once frames pass
+    // glibc's ~128 KiB threshold, so keep one buffer per re-entrancy depth and
+    // reuse it — depth 0 is the steady state and allocates nothing after the
+    // first message.
+    // A deque, because a re-entrant publish grows the pool while an outer frame
+    // still holds a reference into it — deque keeps existing elements pinned.
+    static thread_local std::deque<Bytes> pool;
+    static thread_local size_t depth = 0;
+    while (depth >= pool.size()) pool.emplace_back();
+    Bytes& payload = pool[depth];
+    payload.assign(data, data + len);
+
+    struct DepthGuard {   // restore the depth even if a handler throws
+        size_t& d;
+        ~DepthGuard() { --d; }
+    };
+
     // Snapshot matching handlers under the lock; deliver outside it so a handler
     // may publish/subscribe without deadlocking.
     std::vector<MessageHandler> targets;
@@ -19,6 +40,8 @@ bool LoopbackTransport::publish(const std::string& subject, const uint8_t* data,
         ++delivered_;
     }
     profiler::ScopedOp _("loopback.deliver", len, len);
+    ++depth;
+    DepthGuard guard{depth};
     for (auto& h : targets) h(subject, payload);
     return true;
 }

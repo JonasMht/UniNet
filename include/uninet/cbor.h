@@ -126,6 +126,10 @@ private:
 
 // Serialize a Cbor value to canonical definite-length CBOR bytes.
 Bytes encode(const Cbor& c);
+// Same, into a caller-owned buffer (cleared, capacity retained). Hot paths reuse
+// one buffer across calls instead of allocating+freeing a fresh Bytes per message
+// — above glibc's 128 KiB mmap threshold that allocation is an mmap/munmap pair.
+void encode_into(const Cbor& c, Bytes& out);
 // Parse CBOR bytes. Sets *ok=false (if ok != nullptr) on any malformed input and
 // returns Cbor::null(). Indefinite-length containers are accepted.
 Cbor decode(const uint8_t* data, size_t len, bool* ok = nullptr);

@@ -161,12 +161,31 @@ static void test_hostile_frames() {
     CHECK(ok);
 }
 
+// A payload that compresses better than the decompressor's old size guess was
+// silently dropped: unframe() returned nullopt and Node discarded the message.
+// Sparse safety maps (a documented ThermoNav payload) compress ~220x.
+static void test_high_ratio_payload_survives() {
+    for (int side : {128, 256, 512}) {
+        std::vector<float> grid(size_t(side) * size_t(side), 0.0f);
+        for (size_t i = 0; i < grid.size(); i += 997) grid[i] = 1.0f;
+        Envelope env;
+        env.subject = "thermonav.v1.safety_map";
+        env.src_uuid = "srv";
+        env.compression = DEFAULT_COMPRESSION;
+        env.data = Cbor::map().set("grid", Cbor::f32_array(grid));
+        auto back = unframe(frame(env));
+        CHECK(back.has_value());
+        if (back) CHECK(back->data["grid"].size() == grid.size());
+    }
+}
+
 int main() {
     test_cbor_roundtrip();
     test_compression_roundtrip();
     test_envelope_frame();
     test_loopback_pubsub();
     test_hostile_frames();
+    test_high_ratio_payload_survives();
     if (failures == 0) { std::printf("UniNet round-trip: ALL TESTS PASSED\n"); return 0; }
     std::printf("UniNet round-trip: %d FAILURE(S)\n", failures);
     return 1;
