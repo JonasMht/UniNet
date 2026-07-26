@@ -148,7 +148,24 @@ Bytes encode(const Cbor& c) {
 
 // ── decode ──
 namespace {
-struct Cursor { const uint8_t* p; size_t len; size_t i; bool ok; };
+// A frame arrives from the network, so every length prefix in it is attacker
+// controlled and 64 bits wide. `c.i + n` and `n * 5` both wrap on 64-bit, which
+// turned every bounds check below into a no-op for crafted inputs: a 9-byte
+// frame declaring a 2^64-1 byte string reached the std::vector range ctor and
+// aborted the process. Depth is capped for the same reason — decode_one
+// recurses once per nesting level, and ~8.5k levels (which LZ4-compress to
+// about 60 bytes) exhausted the stack.
+constexpr int kMaxDepth = 128;
+
+struct Cursor { const uint8_t* p; size_t len; size_t i; bool ok; int depth; };
+
+// true when `count` items of `stride` bytes fit in the cursor from position i,
+// computed without overflowing.
+inline bool fits(const Cursor& c, uint64_t count, uint64_t stride) {
+    const uint64_t avail = uint64_t(c.len - c.i);        // c.i <= c.len invariant
+    if (stride != 0 && count > avail / stride) return false;
+    return count * stride <= avail;
+}
 
 inline uint64_t read_be(Cursor& c, int n) {
     uint64_t v = 0;
@@ -174,6 +191,8 @@ Cbor decode_one(Cursor& c);
 
 Cbor decode_one(Cursor& c) {
     if (c.i >= c.len) { c.ok = false; return Cbor::null(); }
+    if (c.depth >= kMaxDepth) { c.ok = false; return Cbor::null(); }
+    struct DepthGuard { int& d; ~DepthGuard() { --d; } } _g{++c.depth};
     uint8_t ib = c.p[c.i++];
     uint8_t major = uint8_t(ib >> 5);
     uint8_t ai = uint8_t(ib & 0x1F);
@@ -199,7 +218,7 @@ Cbor decode_one(Cursor& c) {
                 return Cbor::bytes(std::move(acc));
             }
             uint64_t n = read_arg(c, ai);
-            if (c.i + n > c.len) { c.ok = false; return Cbor::null(); }
+            if (!c.ok || !fits(c, n, 1)) { c.ok = false; return Cbor::null(); }
             Bytes b(c.p + c.i, c.p + c.i + n); c.i += size_t(n);
             return Cbor::bytes(std::move(b));
         }
@@ -217,7 +236,7 @@ Cbor decode_one(Cursor& c) {
                 return Cbor::text(std::move(acc));
             }
             uint64_t n = read_arg(c, ai);
-            if (c.i + n > c.len) { c.ok = false; return Cbor::null(); }
+            if (!c.ok || !fits(c, n, 1)) { c.ok = false; return Cbor::null(); }
             std::string s(reinterpret_cast<const char*>(c.p + c.i), size_t(n)); c.i += size_t(n);
             return Cbor::text(std::move(s));
         }
@@ -234,7 +253,7 @@ Cbor decode_one(Cursor& c) {
             }
             uint64_t n = read_arg(c, ai);
             // Fast path: homogeneous float32 array (each element = 0xFA + 4 BE bytes).
-            if (n > 0 && c.i + n * 5 <= c.len) {
+            if (n > 0 && fits(c, n, 5)) {
                 bool all_f32 = true;
                 for (uint64_t k = 0; k < n; ++k)
                     if (c.p[c.i + k * 5] != 0xFA) { all_f32 = false; break; }
@@ -252,7 +271,7 @@ Cbor decode_one(Cursor& c) {
                 }
             }
             // Fast path: homogeneous float64 array (0xFB + 8 BE bytes).
-            if (n > 0 && c.i + n * 9 <= c.len) {
+            if (n > 0 && fits(c, n, 9)) {
                 bool all_f64 = true;
                 for (uint64_t k = 0; k < n; ++k)
                     if (c.p[c.i + k * 9] != 0xFB) { all_f64 = false; break; }
@@ -328,7 +347,7 @@ Cbor decode_one(Cursor& c) {
 Cbor decode(const uint8_t* data, size_t len, bool* ok) {
     profiler::ScopedOp _("cbor.decode", len, len);
     if (!data || len == 0) { if (ok) *ok = false; return Cbor::null(); }
-    Cursor c{data, len, 0, true};
+    Cursor c{data, len, 0, true, 0};
     Cbor v = decode_one(c);
     if (c.i != len) c.ok = false;  // trailing garbage
     if (ok) *ok = c.ok;
