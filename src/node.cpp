@@ -78,8 +78,14 @@ void Node::publish(const std::string& subject, Cbor data, const std::string& dst
     env.dst_uuid = dst_uuid;
     env.subject = subject;
     env.data = std::move(data);
+    // Reuse this thread's framing buffers. A fresh Bytes per publish means an
+    // mmap/munmap pair for every mesh-sized payload (glibc's mmap threshold
+    // starts at 128 KiB); reusing them makes steady-state publishing allocate
+    // nothing after the first message.
+    static thread_local Scratch scratch;
+    static thread_local Bytes wire;
     profiler::ScopedOp _("node.publish");
-    Bytes wire = frame(env);
+    frame_into(env, wire, scratch);
     _.set_bytes_in(wire.size());
     _.set_bytes_out(wire.size());
     transport_->publish(subject, wire.data(), wire.size());
@@ -119,7 +125,11 @@ void Node::on_raw_(const std::string& subject, const Bytes& payload) {
     if (route->src == uuid_) return;                          // own echo
     if (!route->dst.empty() && route->dst != uuid_) return;   // not addressed to me
 
-    auto env = unframe(payload);
+    // Same reuse on the receive side: unframe_into decodes an uncompressed
+    // payload straight out of `payload` (no copy) and decompresses into a
+    // buffer that survives across messages.
+    static thread_local Scratch scratch;
+    auto env = unframe_into(payload.data(), payload.size(), scratch);
     if (!env) return;
     if (env->protocol_version != CURRENT_PROTOCOL_VERSION) {
         // Forward-compatible policy: accept the major, ignore unrecognized fields.

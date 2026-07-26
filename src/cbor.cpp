@@ -53,7 +53,7 @@ inline void put_head(Bytes& out, uint8_t major, uint64_t val) {
     }
 }
 
-void encode_into(const Cbor& c, Bytes& out) {
+void encode_rec(const Cbor& c, Bytes& out) {
     switch (c.kind()) {
         case Cbor::Kind::Null:    out.push_back(0xF6); break;
         case Cbor::Kind::Bool:    out.push_back(c.as_bool() ? 0xF5 : 0xF4); break;
@@ -74,7 +74,7 @@ void encode_into(const Cbor& c, Bytes& out) {
         case Cbor::Kind::Array: {
             const auto& a = c.array_items();
             put_head(out, 4, a.size());
-            for (const auto& e : a) encode_into(e, out);
+            for (const auto& e : a) encode_rec(e, out);
             break;
         }
         case Cbor::Kind::F32Array: {
@@ -113,7 +113,7 @@ void encode_into(const Cbor& c, Bytes& out) {
             for (const auto& [k, v] : m) {
                 put_head(out, 3, k.size());
                 out.insert(out.end(), k.begin(), k.end());
-                encode_into(v, out);
+                encode_rec(v, out);
             }
             break;
         }
@@ -137,12 +137,17 @@ void encode_into(const Cbor& c, Bytes& out) {
 }
 }  // namespace
 
-Bytes encode(const Cbor& c) {
+void encode_into(const Cbor& c, Bytes& out) {
     profiler::ScopedOp _("cbor.encode");
-    Bytes out;
-    encode_into(c, out);
+    out.clear();                 // keeps capacity — the point of this overload
+    encode_rec(c, out);
     _.set_bytes_in(out.size());
     _.set_bytes_out(out.size());
+}
+
+Bytes encode(const Cbor& c) {
+    Bytes out;
+    encode_into(c, out);
     return out;
 }
 
