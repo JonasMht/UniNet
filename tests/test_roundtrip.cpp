@@ -124,11 +124,49 @@ static void test_loopback_pubsub() {
     CHECK(b_recv == 2);
 }
 
+// Frames arrive from the network, so the decoder must survive anything. Each
+// case below aborted or crashed the process before the decoder was hardened.
+static void test_hostile_frames() {
+    bool ok = true;
+
+    // Byte string declaring 2^64-1 bytes: `c.i + n` wrapped, so the length guard
+    // passed and std::vector's range ctor threw std::length_error -> abort.
+    Bytes huge_bytes = {0x5B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    ok = true; decode(huge_bytes.data(), huge_bytes.size(), &ok);
+    CHECK(!ok);
+
+    // Same overflow via a text string.
+    Bytes huge_text = {0x7B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    ok = true; decode(huge_text.data(), huge_text.size(), &ok);
+    CHECK(!ok);
+
+    // Float-array fast path with a count whose n*5 wraps to a small value —
+    // the stride check then let the scan walk off the end of the buffer.
+    Bytes ovf_f32 = {0x9B, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x34};
+    for (int i = 0; i < 8; ++i) ovf_f32.push_back(0xFA);
+    ok = true; decode(ovf_f32.data(), ovf_f32.size(), &ok);
+    CHECK(!ok);
+
+    // Deep nesting: one recursion per byte exhausted the stack (~8.5k levels,
+    // and a run of 0x9F compresses ~1000:1, so this fits in a tiny frame).
+    Bytes deep(20000, 0x9F);
+    ok = true; decode(deep.data(), deep.size(), &ok);
+    CHECK(!ok);
+
+    // Legitimate nesting stays under the cap and still decodes.
+    Cbor nested = Cbor::uint(1);
+    for (int i = 0; i < 40; ++i) nested = Cbor::array({nested});
+    Bytes enc = encode(nested);
+    ok = false; decode(enc.data(), enc.size(), &ok);
+    CHECK(ok);
+}
+
 int main() {
     test_cbor_roundtrip();
     test_compression_roundtrip();
     test_envelope_frame();
     test_loopback_pubsub();
+    test_hostile_frames();
     if (failures == 0) { std::printf("UniNet round-trip: ALL TESTS PASSED\n"); return 0; }
     std::printf("UniNet round-trip: %d FAILURE(S)\n", failures);
     return 1;
