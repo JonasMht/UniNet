@@ -25,6 +25,8 @@ struct OpStats {
 };
 
 void enable(bool on = true);
+// Lock-free (a relaxed atomic load): every ScopedOp calls it, so taking a lock
+// here serialized every thread in the pipeline even with the profiler off.
 bool enabled();
 void record(const char* op, double seconds, size_t bytes_in, size_t bytes_out);
 
@@ -43,9 +45,13 @@ class ScopedOp {
 public:
     ScopedOp(const char* op, size_t bytes_in = 0, size_t bytes_out = 0)
         : op_(op), bytes_in_(bytes_in), bytes_out_(bytes_out),
-          start_(enabled() ? clock::now() : time_point{}) {}
+          armed_(enabled()), start_(armed_ ? clock::now() : time_point{}) {}
     ~ScopedOp() {
-        if (enabled()) {
+        // Only scopes that were timed may be recorded. Asking enabled() again here
+        // meant a profiler switched on mid-scope reported clock::now() minus a
+        // default-constructed time_point — machine uptime (245489 s was observed
+        // in one report), which then dominated the table it was supposed to rank.
+        if (armed_) {
             double s = std::chrono::duration<double>(clock::now() - start_).count();
             record(op_, s, bytes_in_, bytes_out_);
         }
@@ -60,6 +66,7 @@ private:
     using time_point = clock::time_point;
     const char* op_;
     size_t bytes_in_, bytes_out_;
+    bool armed_;          // profiler was on when this scope opened
     time_point start_;
 };
 

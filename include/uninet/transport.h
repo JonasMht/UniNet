@@ -1,9 +1,11 @@
 // UniNet — transport abstraction. A Transport moves framed payloads between
-// subjects; the protocol/codec layers above are independent of how bytes travel.
-// v0.1 ships LoopbackTransport (in-process, always available) and an optional
-// NatsTransport (the production brokered backend). Mesh / BLE / in-proc-discovery
-// backends are future implementations of this same interface — the layers above
-// never change when a transport is added.
+// subjects; the codec and protocol layers above are independent of how the bytes
+// travel.
+//
+// Two implementations ship: ZyreTransport (brokerless peer-to-peer over the
+// network, with discovery — what applications use) and LoopbackTransport
+// (in-process and deterministic, for tests). A new backend is an addition here,
+// not a change anywhere above.
 #pragma once
 
 #include "uninet/types.h"
@@ -24,25 +26,28 @@ public:
     virtual void disconnect() = 0;
     virtual bool connected() const = 0;
 
-    // Publish `len` bytes on `subject`. Returns false if not connected / failed.
+    // Publish `len` bytes on `subject` to everyone. Returns false if not
+    // connected / failed.
     virtual bool publish(const std::string& subject, const uint8_t* data, size_t len) = 0;
-    // Subscribe to `subject` (exact match or a NATS-style wildcard, see below).
+
+    // Publish to ONE peer. A transport that can address a single peer overrides
+    // this and delivers only there; the default returns false and the caller
+    // falls back to a broadcast that receivers filter on dst_uuid. ZRE can, so
+    // an addressed message really is sent to one device instead of to all of
+    // them — which matters when the payload is a 450 KiB mesh.
+    virtual bool publish_to(const std::string& peer_uuid, const std::string& subject,
+                            const uint8_t* data, size_t len) {
+        (void)peer_uuid; (void)subject; (void)data; (void)len; return false;
+    }
+
+    // Subscribe to `subject` (exact match or a wildcard, see below).
     virtual void subscribe(const std::string& subject, MessageHandler handler) = 0;
     virtual void unsubscribe(const std::string& subject) = 0;
 
-    // Synchronous request-reply (NATS request semantics): send `len` bytes on
-    // `subject`, wait up to `timeout_ms` for one responder's framed reply into
-    // `reply`. Default: unsupported (returns false) — only brokered transports
-    // that can correlate an inbox implement it.
-    virtual bool request(const std::string& subject, const uint8_t* data, size_t len,
-                         int timeout_ms, Bytes& reply) {
-        (void)subject; (void)data; (void)len; (void)timeout_ms; (void)reply; return false;
-    }
-
-    virtual std::string name() const = 0;   // "loopback" / "nats" / ...
+    virtual std::string name() const = 0;   // "zyre" / "loopback" / ...
 };
 
-// NATS-style subject matching:
+// Subject matching:
 //   "domain.D1"   exact
 //   "domain.>"    matches "domain.D1", "domain.D2.feed" (">" = one-or-more tokens)
 //   ">"           matches everything

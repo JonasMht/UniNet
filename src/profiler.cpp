@@ -2,6 +2,7 @@
 #include "uninet/profiler.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 #include <sstream>
@@ -10,19 +11,24 @@
 namespace uninet::profiler {
 
 namespace {
-std::mutex g_mu;
-bool g_enabled = false;
+std::mutex g_mu;                        // guards g_stats only
+// The flag is read twice per ScopedOp — i.e. on every encode, compress and
+// dispatch — so it must not be behind g_mu: with the profiler OFF, that lock made
+// every thread in the pipeline queue on a global mutex, which is the opposite of
+// the "zero overhead when disabled" this header promises. Relaxed is enough: a
+// racing enable() only decides whether a given scope is sampled.
+std::atomic<bool> g_enabled{false};
 std::map<std::string, OpStats> g_stats;
 constexpr double kMB = 1024.0 * 1024.0;
 }  // namespace
 
-void enable(bool on) { std::lock_guard<std::mutex> lk(g_mu); g_enabled = on; }
-bool enabled()       { std::lock_guard<std::mutex> lk(g_mu); return g_enabled; }
+void enable(bool on) { g_enabled.store(on, std::memory_order_relaxed); }
+bool enabled()       { return g_enabled.load(std::memory_order_relaxed); }
 
 void record(const char* op, double seconds, size_t bytes_in, size_t bytes_out) {
     if (!op) return;
+    if (!g_enabled.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lk(g_mu);
-    if (!g_enabled) return;
     OpStats& s = g_stats[op];
     s.count += 1;
     s.total_seconds += seconds;

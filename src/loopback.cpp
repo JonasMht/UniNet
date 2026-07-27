@@ -2,12 +2,13 @@
 #include "uninet/loopback.h"
 #include "uninet/profiler.h"
 
+#include <algorithm>   // std::remove_if (unsubscribe)
 #include <deque>
 
 namespace uninet {
 
 bool LoopbackTransport::publish(const std::string& subject, const uint8_t* data, size_t len) {
-    if (!online_) return false;
+    if (!online_.load(std::memory_order_relaxed)) return false;
 
     // The payload must be copied: `data` normally points at the publisher's
     // reusable framing buffer, so a handler that publishes re-entrantly would
@@ -37,7 +38,7 @@ bool LoopbackTransport::publish(const std::string& subject, const uint8_t* data,
         for (auto& s : subs_)
             if (subject_matches(s.pattern, subject))
                 targets.push_back(s.handler);
-        ++delivered_;
+        delivered_.fetch_add(1, std::memory_order_relaxed);
     }
     profiler::ScopedOp _("loopback.deliver", len, len);
     ++depth;
@@ -60,7 +61,7 @@ void LoopbackTransport::unsubscribe(const std::string& subject) {
 
 bool subject_matches(const std::string& pattern, const std::string& subject) {
     if (pattern.empty() || pattern == subject) return pattern == subject;
-    // NATS-style ">" wildcard as the final token matches one-or-more trailing tokens.
+    // A ">" as the final token matches one-or-more trailing tokens.
     if (pattern == ">") return true;
     if (pattern.size() >= 2 && pattern.back() == '>' && pattern[pattern.size() - 2] == '.') {
         std::string prefix = pattern.substr(0, pattern.size() - 1);  // keep trailing "."

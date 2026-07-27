@@ -27,16 +27,16 @@ if [[ "${UNINET_SKIP_DEPS:-0}" != "1" ]]; then
   if command -v apt-get >/dev/null; then
     sudo apt-get update -y >/dev/null
     sudo apt-get install -y --no-install-recommends \
-      build-essential cmake pkg-config zlib1g-dev liblz4-dev >/dev/null
+      build-essential cmake pkg-config zlib1g-dev liblz4-dev libzyre-dev >/dev/null
     ok "apt: build tools + zlib + lz4 installed"
   elif command -v dnf >/dev/null; then
-    sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config zlib-devel lz4-devel >/dev/null
+    sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config zlib-devel lz4-devel zyre-devel >/dev/null
     ok "dnf: build tools + zlib + lz4 installed"
   elif command -v pacman >/dev/null; then
-    sudo pacman -S --noconfirm --needed base-devel cmake pkgconf zlib lz4 >/dev/null
-    ok "pacman: build tools + zlib + lz4 installed"
+    sudo pacman -S --noconfirm --needed base-devel cmake pkgconf zlib lz4 zyre >/dev/null
+    ok "pacman: build tools + zlib + lz4 + zyre installed"
   elif command -v brew >/dev/null; then
-    brew install cmake pkg-config zlib lz4 >/dev/null || true
+    brew install cmake pkg-config zlib lz4 zyre >/dev/null || true
     ok "brew: cmake + zlib + lz4 installed"
   else
     echo "No supported package manager found. Install manually: a C++17 compiler, cmake, pkg-config, zlib, lz4."

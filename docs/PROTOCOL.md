@@ -1,120 +1,188 @@
-# UniNet — canonical wire protocol
+# UniNet — wire protocol
 
-UniNet is a versioned pub/sub wire protocol for distributed medical-navigation
-peers. One standard, one codec, one framing — owned by this project. This document
-is authoritative; the C++/Python/C# implementations in this repo conform to it.
+UniNet is a brokerless pub/sub protocol for peers on a local network. This
+document is authoritative; the C++/Python/C# implementations conform to it.
 
-It exists because the three ThermoNav peers (MR/Unity-C#, Server/C++, Slicer/Python)
-each re-implemented the *same* NATS+CBOR bus three times, with hand-mirrored schemas
-and LZ4 code that nobody could enable. UniNet is that bus, written once.
+There are two layers, and they are independent:
+
+1. **Discovery and delivery** — ZeroMQ's **ZRE** protocol
+   ([RFC 36](https://rfc.zeromq.org/spec/36/) / [RFC 43](https://rfc.zeromq.org/spec/43/)),
+   implemented by [zeromq/zyre](https://github.com/zeromq/zyre). UniNet does not
+   define this layer; it uses it.
+2. **The envelope** — UniNet's own CBOR framing, carried inside a ZRE message.
+   This is what the rest of the document specifies.
 
 ## Goals
 
-- **One contract** shared by every peer (server, MR headset, Slicer, future mesh node).
-- **Transport-agnostic:** the framing/codec are independent of how bytes travel
-  (NATS today; loopback for tests; mesh/BLE staged) via a `Transport` interface.
-- **Routing in the clear, content compressed:** `src`/`dst`/compression ride in a
-  binary header *before* the (possibly compressed) payload, so a receiver can drop
-  its own echo and frames not addressed to it **without decompressing or decoding**.
-- **Negotiated compression:** the header tells a receiver how the core was encoded,
-  so LZ4 can finally be turned on without breaking peers.
+- **Nothing is configured.** No addresses, ports, or broker endpoints in any
+  application. A peer is created with a name.
+- **One contract** shared by every peer (C++ server, Python module, C# headset).
+- **Routing in the clear, content compressed**, so a receiver can filter a frame
+  without decompressing or decoding it.
+- **Negotiated compression**, so a peer can tell how a frame was encoded.
 - **Forward-compatible:** a protocol version gates every frame.
 
-## Wire frame
+## Layer 1 — ZRE (discovery and delivery)
+
+| | |
+|---|---|
+| Discovery | UDP beacon on port **5670**, hop limit 1 (link-local; never crosses a router) |
+| Delivery | direct TCP between peers, ephemeral ports |
+| Grouping | every UniNet node joins one ZRE **group**, named after the realm (default `uninet`) |
+| Broadcast | `SHOUT` to the group |
+| Unicast | `WHISPER` to one peer uuid |
+| Presence | `ENTER` / `JOIN` / `LEAVE` / `EXIT` events |
+| Identity | a 32-hex-character uuid assigned by ZRE, stable for the process |
+| Metadata | ZRE **headers**, sent once with the beacon: UniNet uses `role`, `app`, plus anything the application sets |
+
+Two consequences worth stating explicitly:
+
+- **A node never receives its own broadcast.** ZRE does not echo, so UniNet needs
+  no echo-suppression pass on the receive path.
+- **`ENTER` fires for every node on the beacon port, regardless of group.** Realm
+  isolation therefore keys on `JOIN`/`LEAVE` of the realm group, not on `ENTER` —
+  otherwise a peer in another realm would appear in the device list.
+
+### ZRE message shape
+
+A UniNet message is a two-frame ZRE message:
 
 ```
-frame = [ comp:1 ][ flags:1 ][ srclen:2 BE ][ src ][ dstlen:2 BE ][ dst ][ payload ]
-payload = comp==None ? CBOR(core) : compress(CBOR(core))
-core    = { "pv": uint, "sub": text, "data": <any> }     # routing is NOT here
+frame 0: subject          (UTF-8 text, e.g. "domain.D1")
+frame 1: UniNet envelope  (binary, see below)
+```
+
+Keeping the subject in its own frame lets a receiver match subscriptions without
+decompressing or decoding the payload.
+
+## Layer 2 — the UniNet envelope
+
+```
+envelope = [ comp:1 ][ flags:1 ][ srclen:2 BE ][ src ][ dstlen:2 BE ][ dst ][ payload ]
+payload  = comp==None ? CBOR(core) : compress(CBOR(core))
+core     = { "pv": uint, "sub": text, "data": <any> }     # routing is NOT here
 ```
 
 `comp` is an unsigned byte: `0`=None, `1`=Zlib (deflate), `2`=LZ4 frame. `flags`
-is reserved (0). Lengths are 2-byte big-endian. `src`/`dst` are the sender /
-intended-receiver UUIDs (`dst` empty = broadcast).
+is reserved (0). Lengths are 2-byte big-endian and are rejected above 65535.
+`src`/`dst` are peer uuids; `dst` empty means broadcast.
 
-This split is what the old single-byte-header design couldn't do: with compression
-on, `src`/`dst` would be trapped inside the compressed blob, forcing every receiver
-(including the sender hearing its own echo) to decompress + decode just to decide
-whether to keep the frame. Keeping routing in the clear makes echo suppression and
-unicast targeting nearly free — the profiler showed `unframe` running 4000× for
-2000 publishes before this change; it now runs 2000×.
+Routing rides in a **clear** header before the compressed body. With compression
+on, `src`/`dst` inside the compressed blob would force every receiver to
+decompress and decode a frame just to decide whether to keep it.
 
-## Envelope core (CBOR map)
+### Envelope core (CBOR map)
 
 ```
 {
   "pv":  uint    protocol version (uint16; CURRENT_PROTOCOL_VERSION = 1)
-  "sub": text    subject, e.g. "domain.D1" (NATS-style; ">" wildcard for subs)
-  "data": <any>  the message payload (see "Message payloads")
+  "sub": text    subject, e.g. "domain.D1"
+  "data": <any>  the message payload
 }
 ```
 
-`src`, `dst` and `compression` are reconstructed by `unframe()` from the binary
-header — they are not in the CBOR core. (They were in v0.1's single-header form;
-the split is the only in-place evolution since then and is wire-incompatible with
-that early internal revision, which no deployed peer used.)
+`src`, `dst` and `compression` are reconstructed from the binary header; they are
+not in the CBOR core.
 
-A receiver accepts a frame when `src != self` (echo suppression) **and**
-(`dst == ""` or `dst == self`). Addressing is by UUID in the envelope, not by
-subject — the subject is the topic, the UUID is the route.
+A receiver accepts a frame when `dst == ""` or `dst == self`. (Echo suppression
+is unnecessary — see above.)
 
 ## Subjects
 
-NATS-style, dot-separated:
+Dot-separated, with a trailing `>` wildcard for subscriptions:
 
-| subject       | meaning                                              |
-|---------------|------------------------------------------------------|
-| `domain.D1`   | the shared OR bus (the one peer all three use today) |
-| `<app>.<id>`  | a scoped stream, e.g. `telemetry.needle`             |
-| `>`           | wildcard: matches one-or-more trailing tokens        |
+| subject | meaning |
+|---|---|
+| `domain.D1` | exact match |
+| `domain.>` | matches `domain.D1`, `domain.D2.feed`, … (one or more trailing tokens) |
+| `>` | matches everything |
 
-Multiplexing by message *type* happens inside `data` (see payloads), not by
-spawning many subjects — matching the existing `domain.D1` deployment.
+`>` is the **only** wildcard. There is no `*`; a pattern containing one matches
+nothing, rather than silently behaving differently from a subscriber's
+expectation.
+
+Multiplexing by message *type* happens inside `data`, not by spawning many
+subjects.
 
 ## Message payloads
 
 `data` is an arbitrary CBOR value. UniNet's transport and codec layers are
-**schema-agnostic** — they carry any `Cbor` payload and impose no application
-taxonomy. The ThermoNav application schema (the `code`/`*_type` string tags) is a
-*consumer* concern, owned by a single IDL, `ThermoNavServer/prototypes/comm_standard/schema.toml`,
-whose `gen_schema.py` emits the C++/Python/C# bindings for every peer. That IDL is
-the one source of truth for the tags; UniNet does not duplicate it. The shape:
+**schema-agnostic** — they carry any value and impose no application taxonomy.
 
-```
-data = { "code": <code>, "<code>_type": <type>, ...fields }
-```
+The CBOR subset UniNet encodes and decodes:
 
-| tag family      | values (subset)                                                        |
-|-----------------|------------------------------------------------------------------------|
-| `code`          | update · request · information · message                               |
-| `update_type`   | object · transform · remove · reset · events · material · state ·      |
-|                 | stats · insertion_map · vertex_distances · safety_map · safety_texture ·|
-|                 | result · metrics · info                                                |
-| `request_type`  | applicator · sync · reset · new_case · volume · solve · metrics ·      |
-|                 | start/stop/next/previous_procedure · start_experiment                  |
-| `object_type`   | surface · applicator · volume                                          |
-| `solver_type`   | fdm · fdm_multi_res · c_nca                                            |
-| `information_type` | simulation                                                          |
+| CBOR | notes |
+|---|---|
+| uint / negative int | negative arguments ≥ 2⁶³ are rejected rather than silently wrapped |
+| byte string, text string | text is not UTF-8-validated; length-checked without overflow |
+| array, map | insertion-ordered maps; element counts are bounds-checked against the remaining input |
+| bool, null | |
+| float16 / float32 / float64 | half-floats are **decoded** (some CBOR libraries emit them for exact values) but never emitted |
+| homogeneous float arrays | a fast path: stored and encoded contiguously, no per-element node |
 
-Mesh geometry rides as `{ "polydata": { "points": float32[], "polys": uint[] },
-"transform": float64[16] }` — the shape `ThermoNavMR/SurfaceObject.cs` and
-`ThermoNavServer/surface_object.cpp` hand-mirror today.
+Reserved and unassigned major-7 values (`ai` 28–30) are rejected.
+
+### JSON equivalence
+
+`from_json` / `to_json` map JSON onto this subset so that a Python dict, a C#
+JSON string and a C++ `Cbor` describing the same thing produce identical wire
+bytes. JSON is the smaller type system, so:
+
+- byte strings render as base64 text
+- float arrays render as ordinary JSON arrays
+- NaN and Infinity render as `null`
+- integers beyond 2⁵³ survive CBOR exactly but lose precision in JSON consumers
+
+## Compression
+
+The tier is a per-message choice carried in the header, not a protocol change. A
+None-only peer interoperates with an LZ4 peer by sending None frames.
+
+| tier | when |
+|---|---|
+| LZ4 | live traffic (the default where liblz4 is present) |
+| zlib | archival/batch — better ratio, far slower |
+| None | always available |
+
+Decompression is bounded: a frame declaring an implausible decompressed size is
+rejected rather than attempted, and truncated LZ4 frames are refused rather than
+accepted as complete.
 
 ## Versions
 
-| v  | change                                                                  |
-|----|-------------------------------------------------------------------------|
-| 1  | CURRENT. CBOR envelope + 1-byte compression header; UUID echo/dst filter.|
+| v | change |
+|---|---|
+| 1 | CBOR envelope + compression header; uuid dst filter. Carried over ZRE from v0.2. |
 
-Readers refuse unknown `pv` majors. The compression tier (zlib/lz4) is a build- and
-runtime-choice, not a protocol change — a None-only peer interoperates with an
-LZ4 peer by simply sending None frames.
+Readers refuse unknown `pv` majors.
+
+**v0.2 is not wire-compatible with v0.1's NATS deployment** — the transport
+changed from a broker to peer-to-peer ZRE. The envelope itself is unchanged, so
+message-handling code ports as-is. Migrate all peers together.
+
+## Security
+
+There is **no authentication or integrity check on the envelope**. `src` is
+self-asserted, so `dst` targeting is spoofable by any peer that has joined the
+realm. Realms are a scoping mechanism, not a security boundary.
+
+Discovery beacons carry a hop limit of 1 and never leave the local link, which
+bounds exposure to devices already on the same network segment. Treat that
+network as the trust boundary.
+
+Hardening that *is* in place, because every frame is unauthenticated input:
+
+- length prefixes are range-checked without integer overflow
+- decode recursion is capped (128 levels)
+- container element counts are checked against the remaining input, so a small
+  compressed frame cannot expand into an unbounded allocation
+- decompressed size is capped against a policy maximum
+- ZRE itself supports CURVE encryption; UniNet does not currently expose it
 
 ## Backends
 
-| Transport           | status   | notes                                                 |
-|---------------------|----------|-------------------------------------------------------|
-| LoopbackTransport   | v0.1     | in-process; deterministic; tests + benchmarks         |
-| NatsTransport       | optional | the production brokered bus (`nats://…:4222`); gated  |
-| MeshTransport       | staged   | peer discovery + relay behind the same interface      |
-| BleTransport        | staged   | Bluetooth-LE device bridge                            |
+| Transport | status | notes |
+|---|---|---|
+| `ZyreTransport` | current | brokerless peer-to-peer over ZRE; discovery included |
+| `LoopbackTransport` | current | in-process, deterministic; tests and benchmarks |
+| `NatsTransport` | **removed in v0.2** | required a broker and a configured address |

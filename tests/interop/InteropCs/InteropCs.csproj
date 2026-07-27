@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>InteropCs</AssemblyName>
+    <RootNamespace>InteropCs</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Compile the binding sources directly, so this test exercises exactly the
+         files an application would ship rather than a stale built assembly. -->
+    <Compile Include="../../../csharp/UniNet/*.cs" />
+  </ItemGroup>
+</Project>
