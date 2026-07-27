@@ -8,6 +8,7 @@
 #include "uninet/cabi.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -41,6 +42,13 @@ static int wait_until(int (*pred)(void*), void* arg, int timeout_ms) {
 
 /* ── collected callback state ── */
 typedef struct {
+    int  blobs;
+    char blob_name[128];
+    char blob_meta[256];
+    int  blob_bytes;
+    int  blob_ok;              /* payload matched the expected pattern */
+    int  blob_progress_calls;
+    int  cbor_messages;
     int  messages;
     char last_subject[128];
     char last_json[512];
@@ -69,6 +77,37 @@ static void on_peer(const char* uuid, const char* name, const char* address,
 
 /* ── predicates for wait_until ── */
 static int has_message(void* arg)  { return ((Collected*)arg)->messages > 0; }
+static int has_blob(void* arg)     { return ((Collected*)arg)->blobs > 0; }
+static int has_cbor(void* arg)     { return ((Collected*)arg)->cbor_messages > 0; }
+
+static void on_cbor(const char* subject, const char* src, const uint8_t* data,
+                    size_t len, void* user) {
+    Collected* c = (Collected*)user;
+    (void)subject; (void)src;
+    /* CBOR bytes must be non-empty and decodable back to JSON. */
+    char json[256];
+    if (len > 0 && uninet_cbor_to_json(data, len, json, sizeof json) > 0) ++c->cbor_messages;
+}
+
+static void on_blob(const char* id, const char* name, const char* src,
+                    const char* meta_json, const uint8_t* data, size_t len, void* user) {
+    Collected* c = (Collected*)user;
+    (void)id; (void)src;
+    snprintf(c->blob_name, sizeof c->blob_name, "%s", name ? name : "");
+    snprintf(c->blob_meta, sizeof c->blob_meta, "%s", meta_json ? meta_json : "");
+    c->blob_bytes = (int)len;
+    c->blob_ok = 1;
+    for (size_t i = 0; i < len; ++i)
+        if (data[i] != (uint8_t)((i * 31 + 7) & 0xFF)) { c->blob_ok = 0; break; }
+    ++c->blobs;
+}
+
+static void on_blob_progress(const char* id, const char* name, size_t done,
+                             size_t total, void* user) {
+    Collected* c = (Collected*)user;
+    (void)id; (void)name; (void)done; (void)total;
+    ++c->blob_progress_calls;
+}
 static int has_peer(void* arg)     { return ((Collected*)arg)->peers_found > 0; }
 
 typedef struct { uninet_session_t* s; int want; } PeerCount;
@@ -205,6 +244,113 @@ int main(void) {
         uninet_session_free(b);
         uninet_session_free(a);
         check(1, "sessions closed cleanly");
+    }
+
+    /* ── config handle: headers and compression ── */
+    printf("configuration\n");
+    {
+        uninet_config_t* cfg = uninet_config_new();
+        check(cfg != NULL, "a config handle is created");
+        check(uninet_config_set_header(cfg, "site", "lab-2") == UNINET_OK, "set_header");
+        check(uninet_config_set_compression(cfg, 1) == UNINET_OK, "set_compression(zlib)");
+        check(uninet_config_set_compression(cfg, 99) == UNINET_ERR_ARG,
+              "an out-of-range compression is rejected, not cast blindly");
+        check(uninet_config_set_port(cfg, 70000) == UNINET_ERR_ARG, "an out-of-range port is rejected");
+        check(uninet_config_set_header(NULL, "k", "v") == UNINET_ERR_ARG, "null config is an error");
+        uninet_config_free(cfg);
+        uninet_config_free(NULL);
+        check(1, "config free is safe");
+    }
+
+    /* ── the surface that shipped untested, where two bugs were hiding ── */
+    printf("blob, cbor and lifetime\n");
+    {
+        Collected got;
+        memset(&got, 0, sizeof got);
+
+        uninet_config_t* cfg = uninet_config_new();
+        uninet_config_set_realm(cfg, realm);
+        uninet_config_set_role(cfg, "server");
+        uninet_config_set_app(cfg, "ctest");
+        uninet_config_set_header(cfg, "site", "lab-2");
+        uninet_session_t* a = uninet_session_join_cfg("C Blob TX", cfg);
+        uninet_session_t* b = uninet_session_join_cfg("C Blob RX", cfg);
+        uninet_config_free(cfg);
+        check(a != NULL && b != NULL, "sessions created from a config handle");
+        if (!a || !b) { printf("\nFAIL (cannot continue)\n"); return 1; }
+
+        check(uninet_session_open(a) == 1, "a new session reports open");
+
+        /* An advertised header must be readable, and distinguishable from absent. */
+        PeerCount pc; pc.s = a; pc.want = 1;
+        check(wait_until(peer_count_is, &pc, 25000), "peers found each other");
+        uninet_peers_t* peers = uninet_session_peers(a);
+        check(strcmp(uninet_peers_header(peers, 0, "site"), "lab-2") == 0,
+              "a custom header survives to the peer list");
+        check(uninet_peers_has_header(peers, 0, "site") == 1, "has_header finds it");
+        check(uninet_peers_has_header(peers, 0, "nope") == 0,
+              "and reports an absent header as absent, not as empty");
+        uninet_peers_free(peers);
+
+        /* subscribe_cbor: was never covered by any test. */
+        check(uninet_session_subscribe_cbor(b, "c.>", on_cbor, &got) == UNINET_OK,
+              "subscribe_cbor registered");
+        unsigned char cbor[64]; size_t written = 0;
+        uninet_json_to_cbor("{\"n\":7}", cbor, sizeof cbor, &written);
+        check(uninet_session_publish_cbor(a, "c.raw", cbor, written, NULL) == UNINET_OK,
+              "publish_cbor accepted");
+        check(wait_until(has_cbor, &got, 10000), "the CBOR message arrived and decoded");
+
+        /* blob: the whole API was untested. */
+        uninet_blob_t* tx = uninet_blob_new(a, "files");
+        uninet_blob_t* rx = uninet_blob_new(b, "files");
+        check(tx != NULL && rx != NULL, "blob channels created");
+        check(uninet_blob_on_received(rx, on_blob, &got) == UNINET_OK, "on_received registered");
+        check(uninet_blob_on_progress(rx, on_blob_progress, &got) == UNINET_OK,
+              "on_progress registered");
+
+        enum { kPayload = 700000 };
+        uint8_t* payload = (uint8_t*)malloc(kPayload);
+        check(payload != NULL, "payload allocated");
+        for (int i = 0; i < kPayload; ++i) payload[i] = (uint8_t)((i * 31 + 7) & 0xFF);
+
+        char id[128];
+        int rc = uninet_blob_send(tx, "c.bin", payload, kPayload,
+                                  "{\"kind\":\"test\",\"n\":42}", NULL, id, sizeof id);
+        check(rc > 0, "blob send returned a transfer id");
+        check(wait_until(has_blob, &got, 30000), "the blob arrived");
+        check(strcmp(got.blob_name, "c.bin") == 0, "with its name");
+        check(got.blob_bytes == kPayload, "and every byte");
+        check(got.blob_ok == 1, "byte-for-byte identical");
+        check(strstr(got.blob_meta, "\"n\":42") != NULL, "metadata survived as JSON");
+        check(got.blob_progress_calls > 1, "progress was reported");
+        check(uninet_blob_incoming_count(rx) == 0, "nothing left buffered");
+        free(payload);
+
+        /* Failures must be reported, not returned as UNINET_OK. */
+        check(uninet_blob_send_file(tx, "/nonexistent/file", NULL, NULL, id, sizeof id) < 0,
+              "sending a missing file is an error");
+
+        /* close(): the operations that follow must be inert, not crashes, and
+           registering on a closed session must not report success. */
+        uninet_session_close(a);
+        check(uninet_session_open(a) == 0, "close() marks the session closed");
+        check(uninet_session_connected(a) == 0, "and disconnected");
+        uninet_session_close(a);
+        check(1, "close() is idempotent");
+        check(uninet_session_publish_json(a, "t.x", "{}", NULL) < 0,
+              "publish on a closed session is an error");
+        check(uninet_session_subscribe_json(a, "t.>", on_json, &got) == UNINET_ERR_STATE,
+              "subscribing on a closed session reports failure, not OK");
+        check(uninet_session_on_peer_found(a, on_peer, &got) == UNINET_ERR_STATE,
+              "registering presence on a closed session reports failure");
+
+        uninet_blob_free(tx);
+        uninet_blob_free(rx);
+        uninet_blob_free(NULL);
+        uninet_session_free(b);
+        uninet_session_free(a);
+        check(1, "everything freed cleanly");
     }
 
     printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",

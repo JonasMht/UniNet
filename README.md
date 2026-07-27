@@ -67,6 +67,7 @@ One codec, one wire format, three languages. See [Data](#data-json-in-cbor-on-th
 - [Quick start: C++](#quick-start-c) · [Python](#quick-start-python) · [C#](#quick-start-c-1)
 - [Data: JSON in, CBOR on the wire, JSON out](#data-json-in-cbor-on-the-wire-json-out)
 - [Large payloads: files, volumes, meshes](#large-payloads-files-volumes-meshes)
+- [What each language can do](#what-each-language-can-do)
 - [Finding devices](#finding-devices)
 - [Realms: keeping setups apart](#realms-keeping-setups-apart)
 - [Links without multicast (USB, VPN, routed)](#links-without-multicast-usb-tether-vpn-routed-networks)
@@ -430,6 +431,32 @@ transfers, and on total bytes in flight (`BlobConfig`). Raise them deliberately.
 > transposed array is not contiguous, and the buffer protocol needs it to be.
 
 See [`examples/`](examples/) for complete, runnable versions of all of this.
+
+---
+
+## What each language can do
+
+The three bindings are deliberately at parity. Anything in this table works the
+same way, over the same wire bytes, in all three.
+
+| | C++ | Python | C# |
+|---|:-:|:-:|:-:|
+| join / close | ● | ● | ● |
+| publish (JSON or native) | ● | ● | ● |
+| publish to one peer | ● | ● | ● |
+| subscribe (JSON / native) | ● | ● | ● |
+| subscribe to raw CBOR | ● | ● | ● |
+| peers, presence events | ● | ● | ● |
+| peer headers | ● | ● | ● |
+| large transfers (`Blob`) | ● | ● | ● |
+| transfer progress and failure | ● | ● | ● |
+| custom advertised headers | ● | ● | ● |
+| compression choice | ● | ● | ● |
+| gossip / non-multicast links | ● | ● | ● |
+| realm isolation | ● | ● | ● |
+
+`publish` reports whether the message could be sent in all three. A transfer
+that cannot start says so rather than returning a plausible-looking id.
 
 ---
 

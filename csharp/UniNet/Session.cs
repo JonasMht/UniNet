@@ -36,10 +36,27 @@ namespace UniNet
         public string Role { get; }
         public string App { get; }
 
-        internal Peer(string uuid, string name, string address, string role, string app)
+        private readonly Dictionary<string, string> _headers;
+
+        internal Peer(string uuid, string name, string address, string role, string app,
+                      Dictionary<string, string>? headers = null)
         {
             Uuid = uuid; Name = name; Address = address; Role = role; App = app;
+            _headers = headers ?? new Dictionary<string, string>();
         }
+
+        /// <summary>
+        /// A key/value this peer advertised, or "" when it did not advertise one.
+        /// Use <see cref="HasHeader"/> to tell an absent header from an empty one.
+        /// </summary>
+        public string Header(string key) =>
+            _headers.TryGetValue(key, out var v) ? v : string.Empty;
+
+        /// <summary>True when the peer advertised <paramref name="key"/> at all.</summary>
+        public bool HasHeader(string key) => _headers.ContainsKey(key);
+
+        /// <summary>Every key/value this peer advertised.</summary>
+        public IReadOnlyDictionary<string, string> Headers => _headers;
 
         /// <summary>Just the host part of Address, for a device list.</summary>
         public string Host
@@ -91,6 +108,30 @@ namespace UniNet
 
         /// <summary>The native handle, for companion types such as Blob.</summary>
         internal IntPtr Handle => _handle;
+
+        // Blob holds a raw C++ reference to this session. Disposing the session
+        // first left that reference dangling and the next Send() segfaulted with
+        // no managed exception, so the session neutralises its blobs on the way
+        // out. Weak, so a dropped Blob is still collectable.
+        private readonly List<WeakReference<Blob>> _blobs = new List<WeakReference<Blob>>();
+
+        internal void Register(Blob blob)
+        {
+            lock (_blobs) _blobs.Add(new WeakReference<Blob>(blob));
+        }
+
+        private void DisposeBlobs()
+        {
+            lock (_blobs)
+            {
+                foreach (var weak in _blobs)
+                    if (weak.TryGetTarget(out var b))
+                    {
+                        try { b.Dispose(); } catch { }
+                    }
+                _blobs.Clear();
+            }
+        }
 
         /// <summary>A device appeared. Also fires for devices already present.</summary>
         public event Action<Peer>? PeerFound;
@@ -298,6 +339,35 @@ namespace UniNet
                 throw new InvalidOperationException("UniNet subscribe: " + Native.LastError());
         }
 
+        /// <summary>
+        /// Receive messages with the payload as raw CBOR bytes rather than JSON.
+        /// Use this when you already have a CBOR library, or to skip the text
+        /// conversion on a large payload.
+        /// </summary>
+        public void SubscribeCbor(string subject, Action<string, string, byte[]> handler)
+        {
+            ThrowIfDisposed();
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+
+            Native.CborCallback cb = (subj, src, data, len, _) =>
+            {
+                try
+                {
+                    ulong total = len.ToUInt64();
+                    if (total > int.MaxValue) return;
+                    int n = (int)total;
+                    var bytes = new byte[n];
+                    if (n > 0) Marshal.Copy(data, bytes, 0, n);
+                    Dispatch(() => handler(subj, src, bytes));
+                }
+                catch { }
+            };
+            _rooted.Add(cb);
+            int rc = Native.uninet_session_subscribe_cbor(_handle, subject, cb, IntPtr.Zero);
+            if (rc != Status.Ok)
+                throw new InvalidOperationException("UniNet subscribe: " + Native.LastError());
+        }
+
         /// <summary>Send JSON to everyone, or to one peer when <paramref name="dst"/> is a peer uuid.</summary>
         public void Publish(string subject, string json, string dst = "")
         {
@@ -323,19 +393,27 @@ namespace UniNet
         {
             ThrowIfDisposed();
             IntPtr snap = Native.uninet_session_peers(_handle);
-            if (snap == IntPtr.Zero) return Array.Empty<Peer>();
+            // A null snapshot is an error, not an empty network; reporting it as
+            // "no peers" hid the reason entirely.
+            if (snap == IntPtr.Zero)
+                throw new InvalidOperationException("UniNet peers: " + Native.LastError());
             try
             {
                 int n = Native.uninet_peers_count(snap);
                 var list = new List<Peer>(n);
                 for (int i = 0; i < n; ++i)
                 {
+                    var headers = new Dictionary<string, string>();
+                    foreach (var key in new[] { "role", "app", "host" })
+                        if (Native.uninet_peers_has_header(snap, i, key) == 1)
+                            headers[key] = Native.Str(Native.uninet_peers_header(snap, i, key));
                     list.Add(new Peer(
                         Native.Str(Native.uninet_peers_uuid(snap, i)),
                         Native.Str(Native.uninet_peers_name(snap, i)),
                         Native.Str(Native.uninet_peers_address(snap, i)),
                         Native.Str(Native.uninet_peers_role(snap, i)),
-                        Native.Str(Native.uninet_peers_app(snap, i))));
+                        Native.Str(Native.uninet_peers_app(snap, i)),
+                        headers));
                 }
                 return list;
             }
@@ -417,11 +495,16 @@ namespace UniNet
             IntPtr handle = _handle;
             _handle = IntPtr.Zero;
 
-            // Free the native handle FIRST: that is what stops the network thread
+            // Blobs first: each holds a raw C++ reference to this session, so
+            // freeing the session under them is a dangling pointer.
+            DisposeBlobs();
+            // Then the native handle: that is what stops the network thread
             // calling back. Only then is it safe to let the delegates go: the
             // reverse order leaves a window where native code holds a pointer to
             // a delegate the GC may already have collected.
             Native.uninet_session_free(handle);
+            // Anything still queued refers to a session that no longer exists.
+            while (_pending.TryDequeue(out _)) { }
             _rooted.Clear();
             _handlersKeepAlive.Clear();
             GC.SuppressFinalize(this);

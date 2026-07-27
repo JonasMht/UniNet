@@ -45,6 +45,7 @@ from ._uninet import (  # noqa: F401
     decode,
     encode,
     from_json,
+    local_hostname,
     profiler_enable,
     profiler_report,
     profiler_reset,
@@ -95,7 +96,9 @@ def join(
         advertised_endpoint: what to tell peers this node's endpoint is, when
             that differs from what it binds (a forwarded port).
         headers: extra key/value advertised to peers, readable via
-            ``peer.header(key)``.
+            ``peer.header(key)``. Pass the whole dict here; assigning into
+            ``config.headers`` item by item does nothing, because the binding
+            returns a fresh dict on every access.
         compression: wire compression. The default is the fastest tier the build
             has.
 
@@ -117,7 +120,7 @@ def join(
     if headers:
         cfg.headers = dict(headers)
     if compression is not None:
-        cfg.compression = compression
+        cfg.compression = compression   # bound now; this used to raise
     session = _join(name, cfg)
     _live.add(session)
     return session
@@ -209,6 +212,7 @@ __all__ = [
     "profiler_report",
     "profiler_reset",
     "zyre_version",
+    "local_hostname",
     "PROTOCOL_VERSION",
     "HAS_LZ4",
 ]
