@@ -147,10 +147,16 @@ To force a source build of everything, pass `-DUNINET_SYSTEM_ZYRE=OFF`.
 
 ```bash
 git clone <this repo> && cd UniNet
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUNINET_BUILD_CABI=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build -L uninet --no-tests=error --output-on-failure
 ```
+
+No options needed: the C++ library, the C ABI and the Python extension are all
+built by default. The Python extension is the one part with an outside
+requirement, pybind11, which CMake locates through your interpreter. If it is
+not installed, that one target is skipped with a note and everything else still
+builds.
 
 That produces:
 
@@ -158,6 +164,7 @@ That produces:
 |---|---|
 | `build/libuninet.a` | the C++ library |
 | `build/libuninet_c.so` | the C ABI, for C# / Unity / any FFI |
+| `python/uninet/_uninet*.so` | the Python extension, importable with `PYTHONPATH=python` |
 | `build/uninet-discover` | CLI: what is on my network? |
 | `build/uninet-demo` | the demo (see [Command-line tools](#command-line-tools)) |
 | `build/uninet-benchmark` | end-to-end network benchmark |
@@ -172,8 +179,8 @@ pip install .
 
 | option | default | meaning |
 |---|---|---|
-| `UNINET_BUILD_CABI` | OFF | build `libuninet_c` for C#/FFI |
-| `UNINET_BUILD_PYTHON` | OFF | build the Python extension (`pip install` sets it) |
+| `UNINET_BUILD_CABI` | ON | build `libuninet_c` for C#/FFI |
+| `UNINET_BUILD_PYTHON` | ON | build the Python extension; skipped with a note if pybind11 is absent |
 | `UNINET_LZ4` | ON | LZ4 compression tier, auto-detected |
 | `UNINET_SYSTEM_ZYRE` | ON | use an installed zyre; OFF forces a source build |
 

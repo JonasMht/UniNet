@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/interop_cpp.dir/tests/interop/interop_cpp.cpp.o -o interop_cpp  -Wl,-rpath,/usr/local/lib libuninet.a /usr/lib/x86_64-linux-gnu/libz.so /usr/local/lib/libzyre.so /usr/local/lib/libczmq.so /usr/lib/x86_64-linux-gnu/libzmq.so /usr/local/lib/liblz4.so 

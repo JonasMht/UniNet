@@ -45,5 +45,25 @@ echo "=== cross-language interop (C++ / Python / C#) ==="
 ./scripts/test-interop.sh 25 2>&1 | tail -20 || FAILED=1
 echo
 
+# The wheel is a different artifact from the in-tree build, and only this checks
+# it. `pip install .` once shipped a package with __init__.py and no extension,
+# because the extension had a build-tree output directory and no install rule.
+# Every in-tree test still passed, since they import from python/ where the
+# build had already put the file. So: install it, then import it from a
+# directory where the source tree cannot possibly shadow it.
+echo "=== pip wheel, imported from outside the source tree ==="
+if python3 -m venv /tmp/wheelenv >/dev/null 2>&1 && \
+   /tmp/wheelenv/bin/pip install -q . >/dev/null 2>&1; then
+    if (cd /tmp && env -u PYTHONPATH /tmp/wheelenv/bin/python -c "
+import uninet, os
+from uninet import _uninet
+assert 'site-packages' in uninet.__file__, uninet.__file__
+print('wheel OK:', uninet.__version__, os.path.basename(_uninet.__file__))
+"); then :; else echo "WHEEL FAILED"; FAILED=1; fi
+else
+    echo "WHEEL BUILD FAILED"; FAILED=1
+fi
+echo
+
 echo "=== RESULT: $([ $FAILED -eq 0 ] && echo PASS || echo FAIL) ==="
 exit $FAILED

@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/uninet_demo.dir/examples/demo.cpp.o -o uninet-demo  -Wl,-rpath,/usr/local/lib libuninet.a /usr/lib/x86_64-linux-gnu/libz.so /usr/local/lib/libzyre.so /usr/local/lib/libczmq.so /usr/lib/x86_64-linux-gnu/libzmq.so /usr/local/lib/liblz4.so 

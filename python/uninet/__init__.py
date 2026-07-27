@@ -23,36 +23,59 @@ import contextlib
 import weakref
 from typing import Any, Dict, Iterator, Optional
 
-from ._uninet import (  # noqa: F401
-    HAS_LZ4,
-    PROTOCOL_VERSION,
-    Blob,
-    BlobConfig,
-    BlobInfo,
-    Cbor,
-    Compression,
-    Envelope,
-    LoopbackTransport,
-    Message,
-    Node,
-    Peer,
-    Session,
-    SessionConfig,
-    Transport,
-    ZyreConfig,
-    ZyreTransport,
-    _join,
-    decode,
-    encode,
-    from_json,
-    local_hostname,
-    profiler_enable,
-    profiler_report,
-    profiler_reset,
-    set_compression_level,
-    to_json,
-    zyre_version,
-)
+try:
+    from ._uninet import (  # noqa: F401
+        HAS_LZ4,
+        PROTOCOL_VERSION,
+        Blob,
+        BlobConfig,
+        BlobInfo,
+        Cbor,
+        Compression,
+        Envelope,
+        LoopbackTransport,
+        Message,
+        Node,
+        Peer,
+        Session,
+        SessionConfig,
+        Transport,
+        ZyreConfig,
+        ZyreTransport,
+        _join,
+        decode,
+        encode,
+        from_json,
+        local_hostname,
+        profiler_enable,
+        profiler_report,
+        profiler_reset,
+        set_compression_level,
+        to_json,
+        zyre_version,
+    )
+except ImportError as _exc:  # pragma: no cover - only on a broken install
+    # Half of UniNet is C++. If only the Python half got installed, the plain
+    # error is "No module named 'uninet._uninet'", which says nothing about
+    # what to do. Say it.
+    raise ImportError(
+        "UniNet's compiled extension (uninet._uninet) is missing or failed to "
+        "load.\n"
+        "\n"
+        "The Python half of the package is installed but the C++ half is not, "
+        "so nothing can work.\n"
+        "\n"
+        "If you installed with pip, pybind11 was most likely unavailable when "
+        "the wheel was built:\n"
+        "    pip install pybind11\n"
+        "    pip install --force-reinstall --no-cache-dir <path to uninet>\n"
+        "\n"
+        "If you are running from a clone, the extension has to be built first:\n"
+        "    cmake -S . -B build && cmake --build build -j\n"
+        "    PYTHONPATH=python python -c 'import uninet'\n"
+        "\n"
+        f"The underlying error was: {_exc}"
+    ) from _exc
 
 __version__ = "0.2.0"
 HAS_LZ4 = bool(HAS_LZ4)
