@@ -352,15 +352,24 @@ bool ZyreTransport::connect() {
         }
         if (!impl_->cfg.advertised_endpoint.empty()) {
             // zyre_set_advertised_endpoint is a DRAFT API: it exists only when
-            // Zyre was built with -DENABLE_DRAFTS. Distro packages usually are
-            // not, so guard it and say so rather than failing to compile there.
+            // Zyre was built with -DENABLE_DRAFTS. UniNet's own fetched build
+            // enables them, but a distro or Homebrew package usually does not.
 #ifdef ZYRE_BUILD_DRAFT_API
             zyre_set_advertised_endpoint(impl_->node,
                                          impl_->cfg.advertised_endpoint.c_str());
 #else
+            // Refused, not ignored. Continuing here looks like it worked: the
+            // node joins, peers discover it, and it advertises the address it
+            // bound instead of the one it was told to advertise. Every message
+            // toward it is then sent to an address that does not route, while
+            // messages from it arrive normally. A half-working link that
+            // reports success is far worse than a join that fails and says why.
             impl_->set_error(
-                "advertised_endpoint needs a Zyre built with -DENABLE_DRAFTS; "
-                "this build has the stable API only, so the setting is ignored");
+                "advertised_endpoint needs a Zyre built with -DENABLE_DRAFTS, "
+                "and this one has the stable API only. Either rebuild the "
+                "dependency with drafts enabled, or bind `endpoint` directly to "
+                "the address peers will use, which needs no draft API");
+            return false;
 #endif
         }
         if (!impl_->cfg.gossip_bind.empty())

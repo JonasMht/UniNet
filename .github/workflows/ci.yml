@@ -41,6 +41,17 @@ jobs:
         run: ctest --test-dir build -L uninet --no-tests=error --output-on-failure
       - name: Python
         run: PYTHONPATH=$PWD/python python3 -m pytest python/tests -q
+      # A separate artifact from the in-tree build, and the only step that would
+      # catch a wheel shipped without its compiled extension. Imported from /tmp
+      # so the source tree cannot shadow the installed package.
+      - name: pip wheel
+        run: |
+          python3 -m venv /tmp/wheelenv
+          /tmp/wheelenv/bin/pip install -q .
+          cd /tmp && /tmp/wheelenv/bin/python -c "
+          import uninet; from uninet import _uninet
+          assert 'site-packages' in uninet.__file__, uninet.__file__
+          print('wheel OK:', uninet.__version__)"
       - name: Cross-language interop
         run: ./scripts/test-interop.sh
 

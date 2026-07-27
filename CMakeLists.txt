@@ -134,7 +134,13 @@ if(NOT UNINET_ZYRE_TARGET)
     set(BUILD_SHARED  OFF CACHE BOOL "" FORCE)
     set(BUILD_STATIC  ON  CACHE BOOL "" FORCE)
     set(WITH_DOC      OFF CACHE BOOL "" FORCE)
-    set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
+    # Drafts ON, unlike the other flags here, which exist to keep the build
+    # small. zyre_set_advertised_endpoint is a draft API, and it is what lets a
+    # node behind a port forward tell peers the address they can actually reach
+    # it on: a USB-tethered headset, a container, a VPN. Building the dependency
+    # without drafts makes that setting impossible to honour, and UniNet then
+    # refuses the join rather than advertising the wrong address.
+    set(ENABLE_DRAFTS ON CACHE BOOL "" FORCE)
     set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(WITH_PERF_TOOL  OFF CACHE BOOL "" FORCE)
     set(WITH_LIBBSD     OFF CACHE BOOL "" FORCE)
@@ -281,7 +287,10 @@ target_link_libraries(uninet_file_transfer PRIVATE uninet uninet_warnings)
 set_target_properties(uninet_file_transfer PROPERTIES OUTPUT_NAME uninet-file-transfer)
 
 # ── C ABI shared library (for C# / P-Invoke and other FFI). ──
-option(UNINET_BUILD_CABI "Build the C ABI shared library (libuninet_c)" OFF)
+# On by default: it needs no dependency beyond what the core already links, and
+# leaving it off meant a fresh clone produced no library for C#/Unity and no way
+# to run the C ABI test, which is the exact path those bindings take.
+option(UNINET_BUILD_CABI "Build the C ABI shared library (libuninet_c)" ON)
 if(UNINET_BUILD_CABI)
     add_library(uninet_c SHARED src/cabi.cpp)
     target_link_libraries(uninet_c PUBLIC uninet)
@@ -300,13 +309,72 @@ if(UNINET_BUILD_CABI)
 endif()
 
 # ── Python extension (pybind11). `pip install` drives it via scikit-build-core.
-option(UNINET_BUILD_PYTHON "Build the pybind11 Python extension (_uninet)" OFF)
+option(UNINET_BUILD_PYTHON "Build the pybind11 Python extension (_uninet)" ON)
 if(UNINET_BUILD_PYTHON)
-    find_package(pybind11 CONFIG REQUIRED)
+    # QUIET, not REQUIRED, because this is now on by default: a C++-only
+    # consumer without pybind11 installed must still get a working build rather
+    # than a hard configure error for a component they never asked for.
+    find_package(pybind11 CONFIG QUIET)
+    if(NOT pybind11_FOUND)
+        # pybind11 is distributed as a Python package, so its CMake config sits
+        # inside site-packages, which is not on any prefix find_package searches.
+        # Almost nobody has it anywhere else, so plain find_package misses it on
+        # a machine that does have pybind11 installed, and the extension gets
+        # skipped for no reason. Ask the interpreter instead, which is what the
+        # bootstrap script always did by hand.
+        # Development.Module too, not just Interpreter: pybind11's newer CMake
+        # calls python3_add_library(), which only exists once that component has
+        # been found. With Interpreter alone the configure fails with
+        # "Unknown CMake command python3_add_library", which reads like a broken
+        # pybind11 rather than a missing python3-dev.
+        find_package(Python3 COMPONENTS Interpreter Development.Module QUIET)
+        if(Python3_Interpreter_FOUND AND Python3_Development.Module_FOUND)
+            execute_process(
+                COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
+                OUTPUT_VARIABLE UNINET_PYBIND11_DIR
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE UNINET_PYBIND11_RC
+                ERROR_QUIET)
+            if(UNINET_PYBIND11_RC EQUAL 0 AND EXISTS "${UNINET_PYBIND11_DIR}")
+                find_package(pybind11 CONFIG QUIET
+                             PATHS "${UNINET_PYBIND11_DIR}" NO_DEFAULT_PATH)
+            endif()
+        endif()
+    endif()
+endif()
+if(UNINET_BUILD_PYTHON AND NOT pybind11_FOUND)
+    if(DEFINED SKBUILD)
+        # Under pip there is no "carry on without it": the whole point of the
+        # build is the extension, and continuing produces a wheel containing
+        # __init__.py and nothing to import, which fails at runtime on the
+        # user's machine with ModuleNotFoundError: uninet._uninet. Fail here,
+        # where the message can still say what to do.
+        message(FATAL_ERROR
+            "pybind11 is required to build the Python extension but was not found.\n"
+            "Install it with:  pip install pybind11")
+    endif()
+    message(STATUS "UniNet: pybind11 not found, skipping the Python extension.")
+    set(UNINET_BUILD_PYTHON OFF)
+endif()
+if(UNINET_BUILD_PYTHON)
     pybind11_add_module(_uninet python/bindings.cpp)
     target_link_libraries(_uninet PRIVATE uninet)
-    set_target_properties(_uninet PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/python/uninet")
+    if(NOT DEFINED SKBUILD)
+        # Plain cmake build: drop the extension next to __init__.py so that
+        # `PYTHONPATH=python python -c "import uninet"` works with no install
+        # step. Skipped under pip, which must not write into the source tree.
+        set_target_properties(_uninet PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/python/uninet")
+    endif()
+    # This is what puts the extension INTO THE WHEEL. scikit-build-core packages
+    # what CMake installs, and there was no install rule for _uninet: only
+    # LIBRARY_OUTPUT_DIRECTORY, which is a build-tree setting, not an install
+    # one. So `pip install .` produced a package containing __init__.py and no
+    # extension, and the first line of __init__.py then failed with
+    #     ImportError: cannot import name '_uninet' from 'uninet'
+    # The in-tree tests never caught it because they import from python/, where
+    # the line above had already put the file.
+    install(TARGETS _uninet LIBRARY DESTINATION uninet)
 endif()
 
 # ── Install rules, so consumers can find_package(UniNet) instead of vendoring

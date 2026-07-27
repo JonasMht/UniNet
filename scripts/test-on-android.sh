@@ -127,11 +127,17 @@ else
     HOSTPID=$!
     sleep 2
 
+    # Bound to 127.0.0.1, not 0.0.0.0. A node advertises the endpoint it bound,
+    # so binding the wildcard makes it tell peers "reach me at 0.0.0.0", which
+    # is not an address anything can dial. Binding the loopback address makes
+    # the advertisement literally true on the other side of the cable, because
+    # that is the port adb is forwarding. This is also why no --advertise is
+    # needed: overriding the advertised address requires a draft-enabled Zyre,
+    # and this way needs nothing.
     DEVLOG="$("$ADB" shell "cd $REMOTE && LD_LIBRARY_PATH=$REMOTE timeout 12 ./uninet-demo 'Phone' \
         --role headset --realm '$REALM' \
         --gossip-connect 'tcp://127.0.0.1:31337' \
-        --endpoint 'tcp://0.0.0.0:31338' \
-        --advertise 'tcp://127.0.0.1:31338'" 2>&1 | tr -d '\r')"
+        --endpoint 'tcp://127.0.0.1:31338'" 2>&1 | tr -d '\r')"
 
     sleep 1
     kill "$HOSTPID" 2>/dev/null; wait "$HOSTPID" 2>/dev/null
@@ -139,10 +145,19 @@ else
     echo "--- on the device ---"; echo "$DEVLOG" | head -12
     echo "--- on this machine ---"; head -12 "$HOSTLOG"
 
-    if grep -q "Workstation" <<<"$DEVLOG" && grep -q "Phone" "$HOSTLOG"; then
-        echo "  -> PASS: each saw the other over USB, with no network configured"
+    # Presence is not enough. Discovery is bidirectional even when the return
+    # path is broken, so an earlier version of this check passed while every
+    # message from this machine to the device was being sent to 0.0.0.0 and
+    # silently dropped. Both directions have to carry an actual message.
+    ok=1
+    grep -q "JOINED  Workstation" <<<"$DEVLOG" || { echo "  the device never saw the workstation"; ok=0; }
+    grep -q "JOINED  Phone" "$HOSTLOG"         || { echo "  the workstation never saw the device"; ok=0; }
+    grep -q "MESSAGE on demo.hello" <<<"$DEVLOG" || { echo "  no message reached the device"; ok=0; }
+    grep -q "MESSAGE on demo.hello" "$HOSTLOG"   || { echo "  no message reached this machine"; ok=0; }
+    if [ "$ok" -eq 1 ]; then
+        echo "  -> PASS: both found each other AND messages crossed both ways over USB"
     else
-        echo "  -> FAILED: they did not find each other"
+        echo "  -> FAILED"
         FAILED=1
     fi
     rm -f "$HOSTLOG"
