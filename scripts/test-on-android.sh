@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Run UniNet's test suite on a real Android device over USB.
+#
+#     ./scripts/build-for-android.sh      # first: cross-compile for arm64-v8a
+#     ./scripts/test-on-android.sh        # then: push and run on the device
+#
+# Two things are tested, and they are different questions:
+#
+#   1. **On the device.** The codec, the C ABI and discovery between two nodes
+#      inside the phone. This is UniNet running on ARM64 Android for real, not a
+#      cross-compile that merely linked.
+#
+#   2. **Across the USB cable.** A node on the device and a node on this machine
+#      finding each other with no Wi-Fi involved, using the rendezvous endpoint
+#      the README describes for links without multicast. adb's port forwarding is
+#      what carries it, which is exactly how a tethered headset works.
+#
+# The device needs USB debugging on (Settings > Developer options) and this
+# machine authorised on it. Nothing is installed: the binaries run from
+# /data/local/tmp and are deleted afterwards. No root needed.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD="$HERE/build-android"
+REMOTE=/data/local/tmp/uninet-test
+
+ADB="${ADB:-}"
+if [ -z "$ADB" ]; then
+    ADB="$(command -v adb 2>/dev/null)"
+fi
+if [ -z "$ADB" ]; then
+    ADB="$(ls -d "$HOME"/Unity/Hub/Editor/*/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/platform-tools/adb 2>/dev/null | head -1)"
+fi
+[ -x "$ADB" ] || { echo "adb not found. Install android-sdk-platform-tools, or set ADB=." >&2; exit 2; }
+
+if [ ! -f "$BUILD/test_network" ]; then
+    echo "No Android build found. Run ./scripts/build-for-android.sh first." >&2
+    exit 2
+fi
+
+STATE="$("$ADB" get-state 2>&1)"
+if [ "$STATE" != "device" ]; then
+    "$ADB" devices -l
+    cat >&2 <<'EOF'
+
+No authorised device. On the phone or headset:
+  1. Settings > About > Software information: tap "Build number" seven times.
+  2. Settings > Developer options: turn on "USB debugging".
+  3. Accept the "Allow USB debugging?" prompt that appears when you plug in.
+     Tick "Always allow from this computer".
+
+"unauthorized" in the list above means step 3 is still pending.
+EOF
+    exit 2
+fi
+
+MODEL="$("$ADB" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
+REL="$("$ADB" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')"
+ABI="$("$ADB" shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')"
+echo "device : $MODEL, Android $REL, $ABI"
+if [ "$ABI" != "arm64-v8a" ]; then
+    echo "warning: the build is arm64-v8a but the device reports $ABI." >&2
+fi
+echo
+
+FAILED=0
+note() { echo; echo "──── $* ────"; }
+
+cleanup() {
+    "$ADB" shell "rm -rf $REMOTE" >/dev/null 2>&1
+    "$ADB" reverse --remove-all >/dev/null 2>&1
+    "$ADB" forward --remove-all >/dev/null 2>&1
+}
+trap cleanup EXIT
+
+"$ADB" shell "rm -rf $REMOTE && mkdir -p $REMOTE" >/dev/null
+for f in test_roundtrip test_network test_cabi uninet-demo libuninet_c.so; do
+    [ -f "$BUILD/$f" ] && "$ADB" push "$BUILD/$f" "$REMOTE/" >/dev/null 2>&1
+done
+"$ADB" shell "chmod 755 $REMOTE/*" >/dev/null
+
+run_remote() {   # run_remote <label> <command...>
+    local label="$1"; shift
+    note "$label"
+    # The exit status has to come back over `adb shell`, which does not forward
+    # it on older devices: echoing a marker is the portable way to read it.
+    local out
+    out="$("$ADB" shell "cd $REMOTE && LD_LIBRARY_PATH=$REMOTE $* ; echo RC=\$?" 2>&1 | tr -d '\r')"
+    echo "$out" | grep -v '^RC='
+    local rc="${out##*RC=}"
+    if [ "$rc" != "0" ]; then
+        echo "  -> FAILED (exit $rc)"
+        FAILED=1
+    else
+        echo "  -> PASS"
+    fi
+}
+
+# ── 1. on the device ─────────────────────────────────────────────────────────
+run_remote "codec, compression, framing, hostile input" ./test_roundtrip
+run_remote "C ABI, compiled as C" ./test_cabi
+run_remote "discovery and messaging between two nodes on the device" ./test_network
+
+# ── 2. across the USB cable ──────────────────────────────────────────────────
+# Wi-Fi is not involved. Zyre's UDP beacon cannot cross USB, so both sides use
+# the rendezvous endpoint instead, and adb carries the three TCP connections:
+#
+#   reverse 31337  device -> host   the rendezvous itself
+#   reverse 31339  device -> host   the host node's data endpoint
+#   forward 31338  host   -> device the device node's data endpoint
+#
+# Each side therefore advertises a 127.0.0.1 address, which resolves correctly
+# on the other side because adb is forwarding that exact port.
+note "discovery across the USB cable, with no network"
+if [ ! -f "$BUILD/uninet-demo" ] || [ ! -x "$HERE/build/uninet-demo" ]; then
+    echo "  SKIPPED: needs uninet-demo built for both the device and this machine"
+else
+    "$ADB" reverse tcp:31337 tcp:31337 >/dev/null
+    "$ADB" reverse tcp:31339 tcp:31339 >/dev/null
+    "$ADB" forward tcp:31338 tcp:31338 >/dev/null
+
+    REALM="usb-$$"
+    HOSTLOG="$(mktemp)"
+    "$HERE/build/uninet-demo" "Workstation" --role server --realm "$REALM" \
+        --gossip-bind 'tcp://127.0.0.1:31337' \
+        --endpoint 'tcp://127.0.0.1:31339' >"$HOSTLOG" 2>&1 &
+    HOSTPID=$!
+    sleep 2
+
+    DEVLOG="$("$ADB" shell "cd $REMOTE && LD_LIBRARY_PATH=$REMOTE timeout 12 ./uninet-demo 'Phone' \
+        --role headset --realm '$REALM' \
+        --gossip-connect 'tcp://127.0.0.1:31337' \
+        --endpoint 'tcp://0.0.0.0:31338' \
+        --advertise 'tcp://127.0.0.1:31338'" 2>&1 | tr -d '\r')"
+
+    sleep 1
+    kill "$HOSTPID" 2>/dev/null; wait "$HOSTPID" 2>/dev/null
+
+    echo "--- on the device ---"; echo "$DEVLOG" | head -12
+    echo "--- on this machine ---"; head -12 "$HOSTLOG"
+
+    if grep -q "Workstation" <<<"$DEVLOG" && grep -q "Phone" "$HOSTLOG"; then
+        echo "  -> PASS: each saw the other over USB, with no network configured"
+    else
+        echo "  -> FAILED: they did not find each other"
+        FAILED=1
+    fi
+    rm -f "$HOSTLOG"
+fi
+
+echo
+if [ "$FAILED" -ne 0 ]; then
+    echo "=== RESULT: FAIL ==="
+    exit 1
+fi
+echo "=== RESULT: PASS on $MODEL (Android $REL, $ABI) ==="

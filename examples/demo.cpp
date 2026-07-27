@@ -47,8 +47,18 @@ void usage() {
         "Options:\n"
         "  --role <role>    what this device is: server / headset / viewer\n"
         "  --realm <name>   session group, to keep two setups apart (default \"uninet\")\n"
+        "  --iface <name>   pin discovery to one interface, e.g. eth0 or wlan0\n"
         "  --quiet          only print arrivals, departures and errors\n"
-        "  -h, --help       this message\n");
+        "  -h, --help       this message\n"
+        "\n"
+        "For a link with no multicast (USB tethering, a VPN, a routed network),\n"
+        "discovery falls back to a rendezvous endpoint. One side binds it, the\n"
+        "other dials it; after that they talk directly.\n\n"
+        "  --gossip-bind <endpoint>     be the rendezvous, e.g. tcp://*:31337\n"
+        "  --gossip-connect <endpoint>  dial one, e.g. tcp://127.0.0.1:31337\n"
+        "  --endpoint <endpoint>        this device's own data endpoint\n"
+        "  --advertise <endpoint>       what to tell peers that endpoint is,\n"
+        "                               when it differs (behind a port forward)\n");
 }
 
 }  // namespace
@@ -70,6 +80,11 @@ int main(int argc, char** argv) {
         };
         if (a == "--role")       cfg.role = next();
         else if (a == "--realm") cfg.realm = next();
+        else if (a == "--iface") cfg.iface = next();
+        else if (a == "--gossip-bind")    cfg.gossip_bind = next();
+        else if (a == "--gossip-connect") cfg.gossip_connect = next();
+        else if (a == "--endpoint")       cfg.endpoint = next();
+        else if (a == "--advertise")      cfg.advertised_endpoint = next();
         else if (a == "--quiet") quiet = true;
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { std::fprintf(stderr, "unknown option '%s'\n", a.c_str()); usage(); return 2; }

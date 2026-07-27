@@ -215,6 +215,14 @@ endif()
 # zlib is a hard requirement above, so the Zlib tier is always present. Without
 # this the "fall back to zlib" default silently selected None instead.
 target_compile_definitions(uninet PUBLIC UNINET_HAS_ZLIB=1)
+if(ANDROID)
+    # czmq logs through __android_log_print, so the NDK's liblog is required.
+    # Without it the link fails with an undefined symbol that names czmq rather
+    # than the missing library, which is not an obvious diagnosis.
+    find_library(ANDROID_LOG_LIB log)
+    target_link_libraries(uninet PUBLIC ${ANDROID_LOG_LIB})
+endif()
+
 if(WIN32)
     target_link_libraries(uninet PUBLIC ws2_32 iphlpapi rpcrt4)
 

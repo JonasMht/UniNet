@@ -637,11 +637,40 @@ congested Wi-Fi, which can matter for large transfers.
 
 ## Unity / Meta Quest
 
-**1. Build the native library for Android ARM64** and place it at
-`Assets/Plugins/Android/libs/arm64-v8a/libuninet_c.so`.
+**1. Build the native library for Android ARM64:**
+
+```bash
+./scripts/build-for-android.sh          # uses the NDK bundled with Unity
+```
+
+It cross-compiles zlib, libzmq, czmq, zyre and UniNet for `arm64-v8a` (API 24)
+and prints where to copy the result:
+
+```
+Assets/Plugins/Android/libs/arm64-v8a/libuninet_c.so
+```
+
+Everything is linked statically except Android's own libraries, so that one file
+is all that ships: `libz`, `liblog`, `libm`, `libdl`, `libc` and nothing else. In
+the Unity inspector leave the platform set to Android / ARM64, which the
+`arm64-v8a` directory name already implies.
 
 **2. Add the C# sources.** Copy `csharp/UniNet/*.cs` into `Assets/Plugins/UniNet/`,
-or reference the built assembly.
+or reference the built assembly. They compile unchanged under both scripting
+backends and both API compatibility levels; nothing needs to be edited for Unity.
+
+> **IL2CPP is supported, and that is not automatic.** Android and iOS players are
+> always IL2CPP, which is ahead-of-time: it has no JIT, so a method that native
+> code calls back into has to exist as a real function at compile time. That means
+> a **static** method carrying `[MonoPInvokeCallback]`, never a lambda or a closure.
+> UniNet's callbacks are written that way, and the per-subscription state they need
+> reaches them through a `GCHandle` passed in the C ABI's `user` pointer.
+>
+> This is worth knowing because the failure mode is nasty: a binding that uses
+> lambdas compiles cleanly, runs perfectly in the editor, and then throws
+> `NotSupportedException: To marshal a managed method, please add an attribute
+> named 'MonoPInvokeCallback'` the first time a message arrives on the device.
+> If you fork `Native.cs` or `Session.cs`, keep the callbacks static.
 
 **3. Add the Wi-Fi multicast permission. This is not optional.**
 
@@ -747,31 +776,55 @@ Verified against Slicer 5.8.1 (Python 3.9.10) on Linux.
 Then, in your Slicer module:
 
 ```python
-import uninet
+import collections, qt, uninet
 
 class MyModuleLogic:
     def __init__(self):
+        # Filled on UniNet's network thread, drained on Slicer's main thread.
+        self._inbox = collections.deque()
+        self._pump = qt.QTimer()                 # created on the main thread
+        self._pump.setInterval(16)               # ~60 Hz, same idea as Unity's Update()
+        self._pump.timeout.connect(self._drain)
+        self._pump.start()
+
         self.net = uninet.join("Slicer Viewer", role="viewer", app="my-app")
         self.net.subscribe("app.v1.>", self.on_message)
         self.net.on_peer_found(self.on_peer)
 
     def on_message(self, msg):
-        # Called on UniNet's network thread. Slicer's VTK/Qt objects are NOT
-        # thread-safe, so hop to the main thread before touching the scene.
-        import qt
-        qt.QTimer.singleShot(0, lambda: self.apply(msg.data))
+        # Network thread. Do no Slicer work here: just hand it over.
+        self._inbox.append(msg.data)
 
-    def apply(self, data):
-        if data.get("code") == "update":
-            ...   # safe here: this runs on Slicer's main thread
+    def _drain(self):
+        while self._inbox:
+            data = self._inbox.popleft()         # main thread: safe from here on
+            if data.get("code") == "update":
+                ...
 
     def on_peer(self, peer):
         print(f"UniNet: {peer.name} ({peer.role}) at {peer.endpoint}")
+
+    def cleanup(self):
+        self._pump.stop()
+        self.net.close()
 ```
 
 > **The threading rule is the same as Unity's**: callbacks arrive on a
 > background thread. Marshal to the main thread before touching VTK, Qt or the
-> MRML scene. `qt.QTimer.singleShot(0, fn)` is the idiomatic way in Slicer.
+> MRML scene.
+>
+> **`qt.QTimer.singleShot(0, fn)` does not work for this**, even though it is
+> the usual Slicer idiom. Qt refuses to start a timer on a thread it did not
+> create, and UniNet's delivery thread is a plain pthread, so Slicer logs
+>
+> ```
+> QObject::startTimer: Timers can only be used with threads started with QThread
+> ```
+>
+> and your handler never runs. The message goes to the terminal, not to the
+> Python console, so it usually is not seen at all: the symptom is simply that
+> nothing arrives. A queue plus a timer created on the main thread, as above, is
+> the shape that works. It also preserves message order.
 
 Volumes are the realistic payload, and numpy is already bundled with Slicer:
 
@@ -922,6 +975,8 @@ tests/            test_roundtrip (codec) · test_network · test_cabi (C)
                   docker/ : Linux and Windows-cross test images
 tools/            uninet_discover.cpp
 scripts/          test-all.sh · test-interop.sh · demo.sh · bootstrap.{sh,ps1}
+                  build-for-android.sh · build-for-slicer.sh
+                  test-on-android.sh · check-il2cpp.sh
 docs/             PROTOCOL.md · unity/UniNetMulticastLock.cs
 ```
 
@@ -969,6 +1024,8 @@ PYTHONPATH=python pytest python/tests -v       # Python
 | `test_cabi` | the C ABI compiled **as C**: the exact path C#/Unity takes, including UTF-8, null-safety and pointer lifetimes |
 | `python/tests` | dict round-trips, numpy volumes, discovery, wildcards, threading, error handling |
 | `scripts/test-interop.sh` | a C++, a Python and a C# node in one realm, each verifying the others' payloads field by field |
+| `scripts/test-on-android.sh` | the codec, the C ABI and discovery running **on a connected Android device**, plus two nodes finding each other across the USB cable with no network |
+| `scripts/check-il2cpp.sh` | compiles the C# binding with Unity's AOT class library and runs the real IL2CPP compiler over it, asserting every callback converts. Catches the Unity-only failure described under [Unity / Meta Quest](#unity--meta-quest), which no ordinary build or test run can see |
 
 Every network test runs in a realm unique to its process, so a demo on the same
 machine, or a second CI job on the same box: cannot perturb it.
