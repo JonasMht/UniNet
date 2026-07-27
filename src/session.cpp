@@ -4,6 +4,7 @@
 #include "uninet/json.h"
 
 #include <memory>
+#include <stdexcept>
 #include <utility>
 
 namespace uninet {
@@ -98,8 +99,20 @@ const std::string& Session::uuid() const {
     return impl_->transport ? impl_->transport->uuid() : kNone;
 }
 
-Node&          Session::node()      { return *impl_->node; }
-ZyreTransport& Session::transport() { return *impl_->transport; }
+Node& Session::node() {
+    // Dereferencing after close() was silent undefined behaviour.
+    if (!impl_->node) throw std::runtime_error("uninet: the session is closed");
+    return *impl_->node;
+}
+
+ZyreTransport& Session::transport() {
+    if (!impl_->transport) throw std::runtime_error("uninet: the session is closed");
+    return *impl_->transport;
+}
+
+std::string Session::last_error() const {
+    return impl_->transport ? impl_->transport->last_error() : "the session is closed";
+}
 
 std::string Session::describe() const {
     if (!impl_->transport) return "Closed.";

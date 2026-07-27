@@ -27,17 +27,17 @@ if [[ "${UNINET_SKIP_DEPS:-0}" != "1" ]]; then
   if command -v apt-get >/dev/null; then
     sudo apt-get update -y >/dev/null
     sudo apt-get install -y --no-install-recommends \
-      build-essential cmake pkg-config git zlib1g-dev liblz4-dev >/dev/null
-    ok "apt: build tools + zlib + lz4 installed"
+      build-essential cmake pkg-config git zlib1g-dev liblz4-dev libzmq3-dev libczmq-dev >/dev/null
+    ok "apt: build tools, zlib, lz4, libzmq, czmq installed (zyre is built from source)"
   elif command -v dnf >/dev/null; then
-    sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config git zlib-devel lz4-devel >/dev/null
-    ok "dnf: build tools + zlib + lz4 installed"
+    sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config git zlib-devel lz4-devel zeromq-devel czmq-devel >/dev/null
+    ok "dnf: build tools, zlib, lz4, zeromq, czmq installed (zyre is built from source)"
   elif command -v pacman >/dev/null; then
-    sudo pacman -S --noconfirm --needed base-devel cmake pkgconf zlib lz4 zyre >/dev/null
-    ok "pacman: build tools + zlib + lz4 + zyre installed"
+    sudo pacman -S --noconfirm --needed base-devel cmake pkgconf git zlib lz4 zeromq czmq zyre >/dev/null
+    ok "pacman: build tools, zlib, lz4, zeromq, czmq, zyre installed"
   elif command -v brew >/dev/null; then
-    brew install cmake pkg-config zlib lz4 zyre >/dev/null || true
-    ok "brew: cmake + zlib + lz4 installed"
+    brew install cmake pkg-config git zlib lz4 zeromq czmq zyre >/dev/null || true
+    ok "brew: cmake, zlib, lz4, zeromq, czmq, zyre installed"
   else
     echo "No supported package manager found. Install manually: a C++17 compiler, cmake, pkg-config, zlib, lz4."
   fi

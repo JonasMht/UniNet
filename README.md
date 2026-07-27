@@ -113,24 +113,34 @@ UniNet needs **ZeroMQ/Zyre** (the peer-to-peer layer), **zlib**, and optionally
 **liblz4**. If Zyre is not installed, the build fetches and compiles it
 automatically, so on most machines you can skip straight to the build.
 
-**Zyre is not packaged by Ubuntu or Debian.** There is no `libzyre-dev` to
-install there, so CMake builds ZeroMQ, czmq and Zyre from source the first time
-you configure. That is the normal path and it needs nothing from you: it adds a
-few minutes to the first build and nothing afterwards.
-
 | OS | install prerequisites |
 |---|---|
-| **Ubuntu/Debian** | `sudo apt install build-essential cmake pkg-config git zlib1g-dev liblz4-dev` |
-| **Fedora** | `sudo dnf install gcc-c++ cmake pkgconf-pkg-config git zlib-devel lz4-devel` |
-| **Arch** | `sudo pacman -S base-devel cmake pkgconf git zlib lz4 zyre` |
-| **macOS** | `brew install cmake pkg-config git zlib lz4 zyre` |
+| **Ubuntu/Debian** | `sudo apt install build-essential cmake pkg-config git zlib1g-dev liblz4-dev libzmq3-dev libczmq-dev` |
+| **Fedora** | `sudo dnf install gcc-c++ cmake pkgconf-pkg-config git zlib-devel lz4-devel zeromq-devel czmq-devel` |
+| **Arch** | `sudo pacman -S base-devel cmake pkgconf git zlib lz4 zeromq czmq zyre` |
+| **macOS** | `brew install cmake pkg-config git zlib lz4 zeromq czmq zyre` |
 | **Windows** | `scripts/bootstrap.ps1` (clones vcpkg for the dependencies); needs Git, CMake, and VS 2022's "Desktop development with C++" workload |
 
-`git` is in that list because the source build needs it to fetch Zyre.
+**Zyre itself is not packaged by Ubuntu, Debian or Fedora.** There is no
+`libzyre-dev` to install there, so CMake fetches and builds Zyre for you on the
+first configure. Nothing extra is required from you; `git` is in the list above
+because that fetch needs it.
 
-Arch and Homebrew do package Zyre, so those two lines install it and the build
-uses it directly. If you would rather build it from source everywhere, pass
-`-DUNINET_SYSTEM_ZYRE=OFF`.
+The `libzmq3-dev` and `libczmq-dev` entries are what Zyre is built *against*.
+They are optional in the sense that CMake will fetch and build those too if they
+are absent, but installing them turns a several-minute first build into about
+thirty seconds. Arch and Homebrew package Zyre as well, so on those two nothing
+is built from source at all.
+
+What CMake reports tells you which path it took:
+
+```
+-- UniNet: using system zyre 2.0.1.        <- nothing built from source
+-- UniNet: using system libzmq 4.3.5.      <- only zyre is built
+-- UniNet: fetching libzmq.                <- libzmq is built too
+```
+
+To force a source build of everything, pass `-DUNINET_SYSTEM_ZYRE=OFF`.
 
 ### Build
 
@@ -138,7 +148,7 @@ uses it directly. If you would rather build it from source everywhere, pass
 git clone <this repo> && cd UniNet
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUNINET_BUILD_CABI=ON
 cmake --build build -j
-ctest --test-dir build --output-on-failure
+ctest --test-dir build -L uninet --output-on-failure
 ```
 
 That produces:
@@ -865,7 +875,7 @@ is MIT.
 Or run a suite directly:
 
 ```bash
-ctest --test-dir build --output-on-failure     # C++ core, network, C ABI
+ctest --test-dir build -L uninet --output-on-failure   # C++ core, network, C ABI
 PYTHONPATH=python pytest python/tests -v       # Python
 ./scripts/test-interop.sh                      # C++ <-> Python <-> C#
 ```
