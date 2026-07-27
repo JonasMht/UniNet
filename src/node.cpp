@@ -142,8 +142,19 @@ void Node::on_raw_(const std::string& subject, const Bytes& payload) {
     static thread_local Scratch scratch;
     auto env = unframe_into(payload.data(), payload.size(), scratch);
     if (!env) return;
+    // The docs say readers refuse an unknown major; this used to be an empty
+    // statement, so every version was accepted and delivered.
     if (env->protocol_version != CURRENT_PROTOCOL_VERSION) {
-        // Forward-compatible policy: accept the major, ignore unrecognized fields.
+        static thread_local uint16_t warned_about = 0;
+        if (warned_about != env->protocol_version) {
+            warned_about = env->protocol_version;
+            std::fprintf(stderr,
+                         "uninet: dropping a message with protocol version %u "
+                         "(this build speaks %u)\n",
+                         unsigned(env->protocol_version),
+                         unsigned(CURRENT_PROTOCOL_VERSION));
+        }
+        return;
     }
     std::vector<std::pair<std::string, DataHandler>> snapshot;
     {

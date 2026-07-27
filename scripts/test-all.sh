@@ -49,7 +49,7 @@ fi
 rm -f "$BUILD_LOG"
 
 stage "C++ and C ABI (ctest)"
-if ctest --test-dir "$BUILD" --output-on-failure 2>&1 | tail -6; then
+if ctest --test-dir "$BUILD" -L uninet --output-on-failure 2>&1 | tail -6; then
     pass "ctest"
 else
     fail "ctest"

@@ -106,7 +106,11 @@ public:
     // One plain sentence for a status bar: no jargon, no addresses.
     std::string describe() const;
 
+    // Why the last operation failed, when one did. Empty when healthy.
+    std::string last_error() const;
+
     // ── the full surface, when the one-call layer is not enough ──
+    // Both throw std::runtime_error once the session is closed.
     Node& node();
     ZyreTransport& transport();
 

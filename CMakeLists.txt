@@ -60,12 +60,13 @@ if(UNINET_SYSTEM_ZYRE)
     if(PkgConfig_FOUND)
         pkg_check_modules(ZYRE IMPORTED_TARGET libzyre)
     endif()
+    # Probed unconditionally: libzyre.pc lists czmq/libzmq only as private
+    # requirements, which pkg-config does not expand for a dynamic link (so a
+    # zyre-only link fails with "DSO missing from command line"), AND the
+    # from-source fallback below needs to know which of them it can reuse.
+    pkg_check_modules(CZMQ IMPORTED_TARGET libczmq)
+    pkg_check_modules(ZMQ  IMPORTED_TARGET libzmq)
     if(ZYRE_FOUND)
-        # libzyre.pc lists czmq/libzmq only as private requirements, which
-        # pkg-config does not expand for a dynamic link, so linking against
-        # zyre alone fails with "DSO missing from command line". Ask for them.
-        pkg_check_modules(CZMQ IMPORTED_TARGET libczmq)
-        pkg_check_modules(ZMQ  IMPORTED_TARGET libzmq)
         set(UNINET_ZYRE_TARGET PkgConfig::ZYRE)
         if(CZMQ_FOUND)
             list(APPEND UNINET_ZYRE_TARGET PkgConfig::CZMQ)
@@ -76,28 +77,107 @@ if(UNINET_SYSTEM_ZYRE)
         message(STATUS "UniNet: using system zyre ${ZYRE_VERSION}.")
     endif()
 endif()
+# Add a fetched dependency WITHOUT building anything we do not link against.
+#
+# czmq and zyre ship auxiliary executables (czmq_selftest, zsp, zmakecert,
+# test_randof, zyre_selftest, zpinger, perf_local, perf_remote). UniNet uses
+# none of them, but a plain FetchContent_MakeAvailable builds them all, and they
+# link against whatever their own build happened to detect: curl's transitive
+# dependencies, OpenLDAP, and so on. On a machine missing any of those, the
+# build fails on a tool nobody asked for.
+#
+# EXCLUDE_FROM_ALL makes every target in the subdirectory build only if
+# something actually depends on it. We link zyre-static, which pulls
+# czmq-static and libzmq-static; nothing else is ever compiled.
+macro(uninet_add_dependency name)
+    FetchContent_Declare(${name} ${ARGN})
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+        FetchContent_MakeAvailable(${name})
+    else()
+        # EXCLUDE_FROM_ALL only became a FetchContent_Declare option in 3.28.
+        FetchContent_GetProperties(${name})
+        if(NOT ${name}_POPULATED)
+            FetchContent_Populate(${name})
+            add_subdirectory(${${name}_SOURCE_DIR} ${${name}_BINARY_DIR} EXCLUDE_FROM_ALL)
+        endif()
+    endif()
+endmacro()
+
 if(NOT UNINET_ZYRE_TARGET)
-    message(STATUS "UniNet: zyre not found: building libzmq + czmq + zyre from source.")
+    # Ubuntu and Debian do not package Zyre, so this is the normal path there.
+    # libzmq and czmq usually ARE packaged; use them when present and fetch only
+    # what is missing, which is both faster and far less fragile.
     include(FetchContent)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+        set(UNINET_FC_EXCLUDE EXCLUDE_FROM_ALL)
+    else()
+        set(UNINET_FC_EXCLUDE "")
+    endif()
+    # Belt and braces alongside EXCLUDE_FROM_ALL: these stop the dependencies
+    # registering their own ctest entries, so `ctest` shows UniNet's tests only.
     set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(CZMQ_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(ZYRE_BUILD_TESTING OFF CACHE BOOL "" FORCE)
     set(BUILD_SHARED  OFF CACHE BOOL "" FORCE)
     set(BUILD_STATIC  ON  CACHE BOOL "" FORCE)
     set(WITH_DOC      OFF CACHE BOOL "" FORCE)
     set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
     set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(WITH_PERF_TOOL  OFF CACHE BOOL "" FORCE)
+    set(WITH_LIBBSD     OFF CACHE BOOL "" FORCE)
     set(CZMQ_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(CZMQ_BUILD_STATIC ON  CACHE BOOL "" FORCE)
     set(ZYRE_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(ZYRE_BUILD_STATIC ON  CACHE BOOL "" FORCE)
-    FetchContent_Declare(libzmq
-        GIT_REPOSITORY https://github.com/zeromq/libzmq.git GIT_TAG v4.3.5)
-    FetchContent_Declare(czmq
-        GIT_REPOSITORY https://github.com/zeromq/czmq.git   GIT_TAG v4.2.1)
-    FetchContent_Declare(zyre
-        GIT_REPOSITORY https://github.com/zeromq/zyre.git   GIT_TAG v2.0.1)
-    FetchContent_MakeAvailable(libzmq czmq zyre)
+
+    # czmq and zyre locate their dependencies with find_package(), which only
+    # ever looks for an INSTALLED library. It cannot see a sibling target that
+    # FetchContent built in the same tree, so each step below hands the next one
+    # explicit paths. Without this the configure failed with "libzmq not found"
+    # on any machine that did not already have libzmq installed, and appeared to
+    # work on any machine that did.
+    if(NOT ZMQ_FOUND)
+        message(STATUS "UniNet: fetching libzmq.")
+        uninet_add_dependency(libzmq
+            GIT_REPOSITORY https://github.com/zeromq/libzmq.git GIT_TAG v4.3.5
+            ${UNINET_FC_EXCLUDE})
+        set(LIBZMQ_LIBRARIES    libzmq-static                    CACHE STRING "" FORCE)
+        set(LIBZMQ_INCLUDE_DIRS "${libzmq_SOURCE_DIR}/include"   CACHE STRING "" FORCE)
+        set(UNINET_FETCHED_ZMQ libzmq-static)
+    else()
+        message(STATUS "UniNet: using system libzmq ${ZMQ_VERSION}.")
+    endif()
+
+    if(NOT CZMQ_FOUND)
+        message(STATUS "UniNet: fetching czmq.")
+        uninet_add_dependency(czmq
+            GIT_REPOSITORY https://github.com/zeromq/czmq.git GIT_TAG v4.2.1
+            ${UNINET_FC_EXCLUDE})
+        set(CZMQ_LIBRARIES    czmq-static                      CACHE STRING "" FORCE)
+        set(CZMQ_INCLUDE_DIRS "${czmq_SOURCE_DIR}/include"     CACHE STRING "" FORCE)
+        set(UNINET_FETCHED_CZMQ czmq-static)
+    else()
+        message(STATUS "UniNet: using system czmq ${CZMQ_VERSION}.")
+    endif()
+
+    message(STATUS "UniNet: fetching zyre.")
+    uninet_add_dependency(zyre
+        GIT_REPOSITORY https://github.com/zeromq/zyre.git GIT_TAG v2.0.1
+        ${UNINET_FC_EXCLUDE})
+
+    # Link what was fetched plus whatever came from the system.
     set(UNINET_ZYRE_TARGET zyre-static)
+    if(UNINET_FETCHED_CZMQ)
+        list(APPEND UNINET_ZYRE_TARGET ${UNINET_FETCHED_CZMQ})
+    elseif(CZMQ_FOUND)
+        list(APPEND UNINET_ZYRE_TARGET PkgConfig::CZMQ)
+    endif()
+    if(UNINET_FETCHED_ZMQ)
+        list(APPEND UNINET_ZYRE_TARGET ${UNINET_FETCHED_ZMQ})
+    elseif(ZMQ_FOUND)
+        list(APPEND UNINET_ZYRE_TARGET PkgConfig::ZMQ)
+    endif()
 endif()
 
 add_library(uninet STATIC
@@ -142,13 +222,17 @@ enable_testing()
 add_executable(test_roundtrip tests/test_roundtrip.cpp)
 target_link_libraries(test_roundtrip PRIVATE uninet uninet_warnings)
 add_test(NAME roundtrip COMMAND test_roundtrip)
+# Labelled so `ctest -L uninet` runs OUR tests only. When the dependencies are
+# built from source they register their own, and a bare ctest then runs 35
+# tests instead of 3, most of them upstream's.
+set_tests_properties(roundtrip PROPERTIES LABELS uninet)
 
 add_executable(test_network tests/test_network.cpp)
 target_link_libraries(test_network PRIVATE uninet uninet_warnings)
 add_test(NAME network COMMAND test_network)
 # Two nodes must find each other over a real UDP beacon; give it room on a
 # loaded CI box before calling it a failure.
-set_tests_properties(network PROPERTIES TIMEOUT 90)
+set_tests_properties(network PROPERTIES TIMEOUT 90 LABELS uninet)
 
 # ── Benchmarks ──
 # Two, with names that say which is which: the codec in isolation, and what a
@@ -192,7 +276,7 @@ if(UNINET_BUILD_CABI)
     target_link_libraries(test_cabi PRIVATE uninet_c uninet_warnings)
     set_target_properties(test_cabi PROPERTIES C_STANDARD 99)
     add_test(NAME cabi COMMAND test_cabi)
-    set_tests_properties(cabi PROPERTIES TIMEOUT 90)
+    set_tests_properties(cabi PROPERTIES TIMEOUT 90 LABELS uninet)
 endif()
 
 # ── Python extension (pybind11). `pip install` drives it via scikit-build-core.

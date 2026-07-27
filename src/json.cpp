@@ -5,6 +5,7 @@
 // non-throwing, and refuses malformed input rather than guessing at it.
 #include "uninet/json.h"
 
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -177,20 +178,35 @@ struct Parser {
 
         // Number. Integers stay integers so they survive the round-trip as CBOR
         // uints rather than becoming floats that print as "4.0".
+        //
+        // Scanned to JSON's actual grammar rather than "digits and punctuation":
+        // the loose version accepted 0123, +5, 1. and .5, all invalid JSON, and
+        // produced a value for them.
         const char* start = p;
-        if (p < end && (*p == '-' || *p == '+')) ++p;
-        bool is_float = false;
-        while (p < end) {
-            const char c = *p;
-            if (c >= '0' && c <= '9') { ++p; continue; }
-            if (c == '.' || c == 'e' || c == 'E' || c == '-' || c == '+') {
-                is_float = true;
-                ++p;
-                continue;
-            }
-            break;
+        if (p < end && *p == '-') ++p;                    // no leading '+' in JSON
+        const char* int_start = p;
+        if (p < end && *p == '0') {
+            ++p;                                         // a leading zero stands alone
+        } else {
+            while (p < end && *p >= '0' && *p <= '9') ++p;
         }
-        if (p == start) { ok = false; return Cbor::null(); }
+        if (p == int_start) { ok = false; return Cbor::null(); }   // ".5", "-", "e5"
+        bool is_float = false;
+        if (p < end && *p == '.') {
+            ++p;
+            const char* frac = p;
+            while (p < end && *p >= '0' && *p <= '9') ++p;
+            if (p == frac) { ok = false; return Cbor::null(); }     // "1."
+            is_float = true;
+        }
+        if (p < end && (*p == 'e' || *p == 'E')) {
+            ++p;
+            if (p < end && (*p == '+' || *p == '-')) ++p;
+            const char* exp = p;
+            while (p < end && *p >= '0' && *p <= '9') ++p;
+            if (p == exp) { ok = false; return Cbor::null(); }      // "1e", "1e+"
+            is_float = true;
+        }
 
         const std::string num(start, size_t(p - start));
         if (!is_float) {
@@ -209,8 +225,13 @@ struct Parser {
             // than losing the value entirely.
         }
         char* endp = nullptr;
+        errno = 0;
         const double d = std::strtod(num.c_str(), &endp);
         if (endp != num.c_str() + num.size()) { ok = false; return Cbor::null(); }
+        // errno was checked on the integer path but not here, so "1e999" parsed
+        // as +infinity and was happily published; to_json then rendered it as
+        // null, so the value silently became nothing at the far end.
+        if (errno == ERANGE && (d > 1.0 || d < -1.0)) { ok = false; return Cbor::null(); }
         return Cbor::f64(d);
     }
 };
@@ -240,9 +261,52 @@ void base64(const Bytes& in, std::string& out) {
     }
 }
 
+// Validate a UTF-8 sequence starting at s[i]. Returns its length, or 0 when the
+// bytes are not valid UTF-8.
+size_t utf8_len(const std::string& s, size_t i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    size_t need;
+    uint32_t cp;
+    if (c < 0x80)                   return 1;
+    else if ((c & 0xE0) == 0xC0) { need = 1; cp = c & 0x1Fu; }
+    else if ((c & 0xF0) == 0xE0) { need = 2; cp = c & 0x0Fu; }
+    else if ((c & 0xF8) == 0xF0) { need = 3; cp = c & 0x07u; }
+    else                            return 0;          // continuation or 5-byte form
+    if (i + need >= s.size() + 0 && i + need > s.size() - 1) return 0;
+    for (size_t k = 1; k <= need; ++k) {
+        const unsigned char cc = static_cast<unsigned char>(s[i + k]);
+        if ((cc & 0xC0) != 0x80) return 0;
+        cp = (cp << 6) | (cc & 0x3Fu);
+    }
+    // Reject overlong forms, surrogates and out-of-range code points: all of
+    // them would produce JSON no strict parser accepts.
+    if (need == 1 && cp < 0x80)    return 0;
+    if (need == 2 && cp < 0x800)   return 0;
+    if (need == 3 && cp < 0x10000) return 0;
+    if (cp > 0x10FFFF)             return 0;
+    if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+    return need + 1;
+}
+
 void escape(const std::string& s, std::string& out) {
+    // A CBOR text value is not UTF-8-validated on decode (the wire format allows
+    // any bytes), so passing it through verbatim could emit JSON that no parser
+    // accepts, with no signal. Invalid bytes become U+FFFD instead.
     out.push_back('"');
-    for (char c : s) {
+    for (size_t i = 0; i < s.size(); ) {
+        const unsigned char u = static_cast<unsigned char>(s[i]);
+        if (u >= 0x80) {
+            const size_t n = utf8_len(s, i);
+            if (n == 0) {
+                out.append("\ufffd");     // replacement character
+                ++i;
+            } else {
+                out.append(s, i, n);
+                i += n;
+            }
+            continue;
+        }
+        const char c = s[i++];
         switch (c) {
             case '"':  out.append("\\\""); break;
             case '\\': out.append("\\\\"); break;
@@ -259,6 +323,7 @@ void escape(const std::string& s, std::string& out) {
                 } else {
                     out.push_back(c);
                 }
+                break;
         }
     }
     out.push_back('"');
@@ -273,6 +338,9 @@ void number(double d, std::string& out) {
 }
 
 void write(const Cbor& v, std::string& out, int indent, int depth) {
+    // The parser caps nesting; the writer did not, so a programmatically built
+    // deep value overflowed the stack on the way out.
+    if (depth > kMaxDepth) { out.append("null"); return; }
     const bool pretty = indent > 0;
     const std::string nl   = pretty ? "\n" : "";
     const std::string pad  = pretty ? std::string(size_t(indent) * size_t(depth + 1), ' ') : "";

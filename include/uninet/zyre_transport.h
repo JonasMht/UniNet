@@ -137,8 +137,9 @@ public:
     const std::string& node_name() const;
 
     // Advertise another key/value. Must be called before connect(): ZRE sends
-    // headers once, with the discovery beacon.
-    void set_header(const std::string& key, const std::string& value);
+    // headers once, with the discovery beacon. Returns false (and sets
+    // last_error) if called afterwards, when it could not take effect.
+    bool set_header(const std::string& key, const std::string& value);
 
     // Why connect() failed, when it did.
     std::string last_error() const;

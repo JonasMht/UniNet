@@ -141,6 +141,11 @@ struct ZyreTransport::Impl {
             }
         }
         std::lock_guard<std::mutex> lk(mu);
+        // If JOIN arrived before ENTER the visible entry has only a uuid, and
+        // nothing refreshed it afterwards, so peers() reported a nameless
+        // address for the rest of the run. Fill it in now.
+        auto vis = peers.find(p.uuid);
+        if (vis != peers.end()) vis->second = p;
         seen[p.uuid] = std::move(p);
     }
 
@@ -309,10 +314,17 @@ ZyreTransport::~ZyreTransport() {
     if (impl_->node) zyre_destroy(&impl_->node);
 }
 
-void ZyreTransport::set_header(const std::string& key, const std::string& value) {
-    if (impl_->running.load()) return;   // ZRE sends headers once, with the beacon
+bool ZyreTransport::set_header(const std::string& key, const std::string& value) {
+    if (impl_->running.load()) {
+        // ZRE sends headers once, with the discovery beacon, so a later change
+        // would never reach anyone. Say so instead of discarding it silently.
+        impl_->set_error("set_header('" + key + "') was called after connect(); "
+                         "ZRE sends headers once with the beacon, so it was ignored");
+        return false;
+    }
     impl_->cfg.headers[key] = value;
     if (impl_->node) zyre_set_header(impl_->node, key.c_str(), "%s", value.c_str());
+    return true;
 }
 
 bool ZyreTransport::connect() {
