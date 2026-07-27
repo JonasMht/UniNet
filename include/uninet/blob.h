@@ -106,7 +106,11 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    // shared_ptr, not unique_ptr: the subscription installed on the Session
+    // outlives this object (Node has no unsubscribe), so the handler holds a
+    // weak_ptr and does nothing once the Blob is gone. Without that, destroying
+    // a Blob while its Session lived was a use-after-free on the network thread.
+    std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace uninet

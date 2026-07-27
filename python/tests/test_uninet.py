@@ -511,3 +511,100 @@ def test_gossip_discovery_without_multicast():
     a.publish("g.x", {"over": "gossip"})
     assert wait_until(lambda: got, timeout=15)
     assert got[0]["over"] == "gossip"
+
+
+# ── regressions for silently-wrong behaviour ──────────────────────────────
+
+def test_numeric_accessors_convert_instead_of_reading_the_wrong_field():
+    """Regression: as_f64() on an integer returned 0.0, as_text() returned "".
+
+    The C++ accessors are documented as unchecked and read their own union
+    field whatever the kind is. Through the binding that was a silently wrong
+    value, and is_number() invited exactly that mistake.
+    """
+    assert uninet.Cbor.from_value(5).as_f64() == 5.0
+    assert uninet.Cbor.from_value(-7).as_int() == -7
+    assert uninet.Cbor.f64(2.5).as_int() == 2
+    with pytest.raises(TypeError):
+        uninet.Cbor.from_value(5).as_text()
+    with pytest.raises(TypeError):
+        uninet.Cbor.text("x").as_f64()
+
+
+def test_strided_buffer_is_refused_not_silently_wrong():
+    """Regression: a non-contiguous array transmitted the WRONG elements.
+
+    arr[::2] was read as a flat block, so the receiver got arr[0:n/2] with a
+    correct-looking byte count and nothing looked wrong at any layer.
+    """
+    np = pytest.importorskip("numpy")
+    r = realm("strided")
+    net = uninet.join("s", realm=r)
+    blob = uninet.Blob(net, "f")
+    with pytest.raises(ValueError, match="contiguous"):
+        blob.send("bad", np.arange(64, dtype=np.float64)[::2])
+    # The contiguous form of the same data is accepted.
+    assert blob.send("good", np.ascontiguousarray(np.arange(64, dtype=np.float64)[::2]))
+
+
+def test_float32_keeps_its_width_on_the_wire():
+    """Regression: every numpy array went through .tolist(), widening f32 to f64."""
+    np = pytest.importorskip("numpy")
+    a32 = np.arange(2000, dtype=np.float32)
+    assert len(uninet.encode({"p": a32})) < len(uninet.encode({"p": a32.astype(np.float64)}))
+    assert uninet.decode(uninet.encode({"p": a32}))["p"] == pytest.approx(list(a32))
+
+
+def test_builders_refuse_a_mismatched_kind():
+    """Regression: append() on a non-array accepted the value then dropped it."""
+    with pytest.raises(TypeError):
+        uninet.Cbor.map().append(1)
+    with pytest.raises(TypeError):
+        uninet.Cbor.array().set("k", 1)
+    # And the builder is chainable when the kind is right.
+    m = uninet.Cbor.map()
+    m.set("a", 1).set("b", 2)
+    assert uninet.to_json(m) == '{"a":1,"b":2}'
+
+
+def test_missing_map_key_raises_and_len_covers_text():
+    """Regression: a missing key returned a null, indistinguishable from a real
+    null value; len() on text and bytes was 0."""
+    m = uninet.Cbor.from_value({"a": 1, "n": None})
+    with pytest.raises(KeyError):
+        m["missing"]
+    assert m["n"].is_null()                 # a present null still reads as null
+    assert m.get("missing", "fallback") == "fallback"
+    assert len(uninet.Cbor.text("hello")) == 5
+    assert len(uninet.Cbor.from_value(b"abcd")) == 4
+
+
+def test_publish_to_an_unknown_peer_reports_failure(net_pair):
+    """Regression: an addressed publish to a departed peer returned True and the
+    message vanished, because Node fell back to a broadcast nobody accepted."""
+    a, b = net_pair
+    assert a.publish("t.x", {"n": 1}, dst=b.uuid()) is True
+    assert a.publish("t.x", {"n": 1}, dst="DEADBEEFDEADBEEFDEADBEEFDEADBEEF") is False
+
+
+def test_blob_send_reports_failure(net_pair):
+    """Regression: an oversized payload was streamed in full to be refused at
+    the far end, and the sender was told nothing."""
+    a, _ = net_pair
+    cfg = uninet.BlobConfig()
+    cfg.max_blob_bytes = 1024
+    blob = uninet.Blob(a, "f", cfg)
+    assert blob.send("too-big", b"x" * 5000) == ""      # refused locally
+    assert blob.send("fine", b"x" * 100) != ""
+
+
+def test_blob_survives_being_destroyed_before_its_session(net_pair):
+    """Regression: ~Blob left its subscription installed holding a dangling
+    pointer, so the next message was a use-after-free on the network thread."""
+    a, b = net_pair
+    tx = uninet.Blob(a, "f")
+    rx = uninet.Blob(b, "f")
+    del rx                                   # the subscription outlives it
+    import gc; gc.collect()
+    tx.send("after-free", b"payload")        # must not crash the process
+    time.sleep(1.0)

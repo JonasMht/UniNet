@@ -118,8 +118,33 @@ Cbor py_to_cbor(const py::handle& obj, int depth) {
         return a;
     }
 
-    // numpy support without importing numpy: an ndarray has .tolist(), and so
-    // do most array-likes a Slicer module has in hand. Keeps numpy optional.
+    // Anything exposing the buffer protocol (numpy arrays, array.array,
+    // memoryview) is read directly rather than via .tolist(). Going through a
+    // Python list materialised one object per element, cost ~15x, and widened
+    // float32 to float64 on the wire.
+    if (py::isinstance<py::buffer>(obj)) {
+        const py::buffer_info info = obj.cast<py::buffer>().request();
+        // A strided view must NOT be read as a flat block: `arr[::2]` would
+        // transmit the wrong elements with a plausible byte count and nothing
+        // would look wrong at any layer. Fall back to the element-wise path.
+        bool contiguous = info.ndim == 0;
+        if (!contiguous && info.ndim >= 1) {
+            ssize_t expected = info.itemsize;
+            contiguous = true;
+            for (ssize_t d = info.ndim - 1; d >= 0; --d) {
+                if (info.strides[d] != expected) { contiguous = false; break; }
+                expected *= info.shape[d];
+            }
+        }
+        if (contiguous && info.size > 0) {
+            const size_t n = size_t(info.size);
+            if (info.format == py::format_descriptor<float>::format())
+                return Cbor::f32_array(static_cast<const float*>(info.ptr), n);
+            if (info.format == py::format_descriptor<double>::format())
+                return Cbor::f64_array(static_cast<const double*>(info.ptr), n);
+        }
+    }
+    // Everything else array-like: correct, just not on the fast path.
     if (py::hasattr(obj, "tolist")) return py_to_cbor(obj.attr("tolist")(), depth + 1);
 
     throw py::type_error("uninet: cannot send a value of type '" +
@@ -191,6 +216,22 @@ void call_guarded(const std::shared_ptr<py::function>& fn, const char* what, con
     }
 }
 
+// Same, for the two-argument handlers (progress, failure, completion).
+template <typename A, typename B>
+void call_guarded2(const std::shared_ptr<py::function>& fn, const char* what,
+                   const A& a, const B& b) {
+    py::gil_scoped_acquire gil;
+    try {
+        (*fn)(a, b);
+    } catch (const py::error_already_set& e) {
+        std::fprintf(stderr, "uninet: exception in %s handler: %s\n", what, e.what());
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "uninet: exception in %s handler: %s\n", what, e.what());
+    } catch (...) {
+        std::fprintf(stderr, "uninet: unknown exception in %s handler\n", what);
+    }
+}
+
 // What a subscriber receives: a small value object rather than the raw
 // Envelope, so `msg.data` is already a dict and `msg.json()` is already text.
 struct Message {
@@ -241,9 +282,47 @@ PYBIND11_MODULE(_uninet, m) {
         .def("is_null", &Cbor::is_null).def("is_map", &Cbor::is_map)
         .def("is_array", &Cbor::is_array).def("is_text", &Cbor::is_text)
         .def("is_number", &Cbor::is_number)
-        .def("as_bool", &Cbor::as_bool).def("as_uint", &Cbor::as_uint)
-        .def("as_int", &Cbor::as_int).def("as_f64", &Cbor::as_f64)
-        .def("as_text", &Cbor::as_text)
+        // The C++ accessors are documented as unchecked: each reads its own
+        // field whatever the kind actually is, so as_f64() on a Uint returned
+        // 0.0 and as_text() on a number returned "". In C++ that is a
+        // performance choice the caller can see; from Python it is a silently
+        // wrong value, and `is_number()` invites exactly that mistake.
+        .def("as_bool", [](const Cbor& c) {
+            if (c.kind() != Cbor::Kind::Bool)
+                throw py::type_error("uninet: this value is not a bool");
+            return c.as_bool();
+        })
+        .def("as_uint", [](const Cbor& c) -> uint64_t {
+            switch (c.kind()) {
+                case Cbor::Kind::Uint:    return c.as_uint();
+                case Cbor::Kind::Nint:    throw py::value_error("uninet: value is negative");
+                case Cbor::Kind::Float32:
+                case Cbor::Kind::Float64: return uint64_t(c.as_f64());
+                default: throw py::type_error("uninet: this value is not a number");
+            }
+        })
+        .def("as_int", [](const Cbor& c) -> int64_t {
+            switch (c.kind()) {
+                case Cbor::Kind::Uint:    return int64_t(c.as_uint());
+                case Cbor::Kind::Nint:    return c.as_int();
+                case Cbor::Kind::Float32:
+                case Cbor::Kind::Float64: return int64_t(c.as_f64());
+                default: throw py::type_error("uninet: this value is not a number");
+            }
+        })
+        .def("as_f64", [](const Cbor& c) -> double {
+            switch (c.kind()) {
+                case Cbor::Kind::Uint:    return double(c.as_uint());
+                case Cbor::Kind::Nint:    return double(c.as_int());
+                case Cbor::Kind::Float32:
+                case Cbor::Kind::Float64: return c.as_f64();
+                default: throw py::type_error("uninet: this value is not a number");
+            }
+        })
+        .def("as_text", [](const Cbor& c) -> const std::string& {
+            if (!c.is_text()) throw py::type_error("uninet: this value is not text");
+            return c.as_text();
+        })
         .def("as_bytes", [](const Cbor& c) {
             const Bytes& b = c.as_bytes();
             return py::bytes(reinterpret_cast<const char*>(b.data()), b.size());
@@ -251,13 +330,41 @@ PYBIND11_MODULE(_uninet, m) {
         .def("f32_items", &Cbor::f32_items)
         .def("f64_items", &Cbor::f64_items)
         .def("has", &Cbor::has)
-        .def("set", [](Cbor& c, const std::string& k, const py::object& v) {
+        // Both refuse a mismatched kind. push_back() on a non-array left kind_
+        // alone, so the elements were accepted and then silently vanished at
+        // encode time; set() on an array overwrote the kind and dropped the
+        // elements. Returning *this keeps the builder chainable.
+        .def("set", [](Cbor& c, const std::string& k, const py::object& v) -> Cbor& {
+            if (!c.is_map())
+                throw py::type_error("uninet: set() needs a map (use Cbor.map())");
             c.set(k, py_to_cbor(v));
-        }, py::arg("key"), py::arg("value"))
-        .def("append", [](Cbor& c, const py::object& v) { c.push_back(py_to_cbor(v)); })
-        .def("__len__", &Cbor::size)
+            return c;
+        }, py::arg("key"), py::arg("value"), py::return_value_policy::reference_internal)
+        .def("append", [](Cbor& c, const py::object& v) -> Cbor& {
+            if (!c.is_array())
+                throw py::type_error("uninet: append() needs an array (use Cbor.array())");
+            c.push_back(py_to_cbor(v));
+            return c;
+        }, py::return_value_policy::reference_internal)
+        .def("__len__", [](const Cbor& c) -> size_t {
+            // Cbor::size() covers containers only, so len() on text or bytes
+            // was 0 rather than the obvious length.
+            if (c.is_text())  return c.as_text().size();
+            if (c.is_bytes()) return c.as_bytes().size();
+            return c.size();
+        })
         .def("__contains__", &Cbor::has)
-        .def("__getitem__", [](const Cbor& c, const std::string& k) { return c[k]; })
+        .def("__getitem__", [](const Cbor& c, const std::string& k) {
+            // Returning a null Cbor made "key missing" and "key present and
+            // null" the same answer. Use .has(k) or .get(k) to probe.
+            if (!c.is_map()) throw py::type_error("uninet: this value is not a map");
+            if (!c.has(k)) throw py::key_error(k);
+            return c[k];
+        })
+        .def("get", [](const Cbor& c, const std::string& k, const py::object& fallback) {
+            return (c.is_map() && c.has(k)) ? py::cast(c[k]) : fallback;
+        }, py::arg("key"), py::arg("default") = py::none(),
+           "The value at `key`, or `default` when it is absent.")
         .def("__getitem__", [](const Cbor& c, size_t i) {
             // The C++ operator[] is documented as unchecked; from Python an
             // out-of-range index must raise, not read past the end.
@@ -273,8 +380,11 @@ PYBIND11_MODULE(_uninet, m) {
 
     m.def("decode", [](const py::buffer& buf) {
         const py::buffer_info info = buf.request();
+        // info.size counts ELEMENTS; a memoryview cast to 'Q' would otherwise
+        // decode one eighth of the payload.
+        const size_t nbytes = size_t(info.size) * size_t(info.itemsize);
         bool ok = false;
-        Cbor c = decode(static_cast<const uint8_t*>(info.ptr), size_t(info.size), &ok);
+        Cbor c = decode(static_cast<const uint8_t*>(info.ptr), nbytes, &ok);
         // Returning null for corrupt input made a decode failure indistinguishable
         // from a legitimate null value; raise instead.
         if (!ok) throw py::value_error("uninet: malformed CBOR");
@@ -466,6 +576,17 @@ PYBIND11_MODULE(_uninet, m) {
         .def("send", [](Blob& b, const std::string& name, const py::buffer& buf,
                         const py::object& meta, const std::string& dst) {
             const py::buffer_info info = buf.request();
+            // Reject a strided view. Reading it as a flat block would send the
+            // WRONG ELEMENTS with a correct-looking byte count: `arr[::2]`
+            // transmitted arr[0..n/2] and nothing looked wrong anywhere.
+            ssize_t expected = info.itemsize;
+            for (ssize_t d = info.ndim - 1; d >= 0; --d) {
+                if (info.strides[d] != expected)
+                    throw py::value_error(
+                        "uninet: the buffer is not contiguous, so its bytes are not "
+                        "the data you mean. Pass numpy.ascontiguousarray(x).");
+                expected *= info.shape[d];
+            }
             Cbor m2 = meta.is_none() ? Cbor::null() : py_to_cbor(meta);
             const auto* p = static_cast<const uint8_t*>(info.ptr);
             const size_t n = size_t(info.size) * size_t(info.itemsize);
@@ -473,7 +594,8 @@ PYBIND11_MODULE(_uninet, m) {
             return b.send(name, p, n, std::move(m2), dst);
         }, py::arg("name"), py::arg("data"), py::arg("meta") = py::none(),
            py::arg("dst") = "",
-           "Send raw bytes (or any buffer, e.g. a numpy array) with metadata.")
+           "Send raw bytes, or any contiguous buffer such as a numpy array.\n"
+           "Returns the transfer id, or '' if it could not start.")
         .def("send_file", [](Blob& b, const std::string& path, const py::object& meta,
                              const std::string& dst, const std::string& name) {
             Cbor m2 = meta.is_none() ? Cbor::null() : py_to_cbor(meta);
@@ -484,27 +606,36 @@ PYBIND11_MODULE(_uninet, m) {
         .def("on_received", [](Blob& b, py::function cb) {
             auto held = hold(std::move(cb));
             b.on_received([held](const BlobInfo& info, const Bytes& data) {
+                // The GIL must be held BEFORE constructing py::bytes: building it
+                // at the call site allocated a Python object on the network
+                // thread with no GIL, which segfaults.
                 py::gil_scoped_acquire gil;
                 try {
                     (*held)(info, py::bytes(reinterpret_cast<const char*>(data.data()),
                                             data.size()));
+                } catch (const py::error_already_set& e) {
+                    std::fprintf(stderr, "uninet: exception in on_received handler: %s\n",
+                                 e.what());
                 } catch (const std::exception& e) {
-                    std::fprintf(stderr, "uninet: exception in on_received: %s\n", e.what());
-                } catch (...) {}
+                    std::fprintf(stderr, "uninet: exception in on_received handler: %s\n",
+                                 e.what());
+                } catch (...) {
+                    std::fprintf(stderr, "uninet: unknown exception in on_received handler\n");
+                }
             });
         }, py::arg("handler"), "handler(info, data: bytes) when a transfer completes.")
         .def("on_progress", [](Blob& b, py::function cb) {
             auto held = hold(std::move(cb));
             b.on_progress([held](const BlobInfo& info, size_t done) {
-                py::gil_scoped_acquire gil;
-                try { (*held)(info, done); } catch (...) {}
+                // call_guarded reports to stderr; a bare catch(...) lost the
+                // exception entirely, with no way to know a handler was broken.
+                call_guarded2(held, "on_progress", info, done);
             });
         }, py::arg("handler"), "handler(info, bytes_so_far) as chunks arrive.")
         .def("on_failed", [](Blob& b, py::function cb) {
             auto held = hold(std::move(cb));
             b.on_failed([held](const BlobInfo& info, const std::string& why) {
-                py::gil_scoped_acquire gil;
-                try { (*held)(info, why); } catch (...) {}
+                call_guarded2(held, "on_failed", info, why);
             });
         }, py::arg("handler"), "handler(info, reason) when a transfer is abandoned.")
         .def("incoming_count", &Blob::incoming_count)

@@ -252,20 +252,31 @@ namespace UniNet
         /// <summary>Why the last call on this thread failed.</summary>
         internal static string LastError() => Str(uninet_last_error());
 
-        /// <summary>Read a caller-buffer out-parameter, growing once if it did not fit.</summary>
+        /// <summary>
+        /// Read a caller-buffer out-parameter, growing until it fits.
+        /// Throws on a real error rather than returning an empty string.
+        /// </summary>
+        /// <remarks>
+        /// The previous version retried once with a fixed 4096-byte buffer. When
+        /// the caller's first guess was already larger than that, the retry
+        /// SHRANK the buffer and failed again, and every failure was mapped to
+        /// "" — so any JSON over about 4 KB came back as an empty string with no
+        /// error. Doubling until it fits removes both halves of that bug.
+        /// </remarks>
         internal static string ReadBuffer(Func<byte[], UIntPtr, int> call, int initial = 256)
         {
-            var buf = new byte[initial];
-            int n = call(buf, (UIntPtr)buf.Length);
-            if (n == Status.Buffer)
+            int size = Math.Max(initial, 64);
+            for (int attempt = 0; attempt < 24; ++attempt)   // 64 B up to ~1 GB
             {
-                // The error text carries the required size; rather than parse it,
-                // retry once with a buffer larger than anything this ABI returns
-                // (uuids and one-line status strings).
-                buf = new byte[4096];
-                n = call(buf, (UIntPtr)buf.Length);
+                var buf = new byte[size];
+                int n = call(buf, (UIntPtr)buf.Length);
+                if (n >= 0) return System.Text.Encoding.UTF8.GetString(buf, 0, n);
+                if (n != Status.Buffer)
+                    throw new InvalidOperationException("UniNet: " + LastError());
+                size *= 2;
             }
-            return n < 0 ? string.Empty : System.Text.Encoding.UTF8.GetString(buf, 0, n);
+            throw new InvalidOperationException(
+                "UniNet: the value did not fit in any reasonable buffer: " + LastError());
         }
     }
 }

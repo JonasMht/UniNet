@@ -108,13 +108,15 @@ bool Node::publish(const std::string& subject, Cbor data, const std::string& dst
     frame_into(env, wire, scratch);
     _.set_bytes_in(wire.size());
     _.set_bytes_out(wire.size());
-    // Addressed messages go to that peer alone where the transport can do it.
-    // Falling back to a broadcast keeps the loopback path (and any future
-    // broadcast-only transport) working: the dst in the clear header still makes
-    // every other receiver drop the frame before decoding it.
-    if (!dst_uuid.empty() &&
-        transport_->publish_to(dst_uuid, subject, wire.data(), wire.size()))
-        return true;
+    if (!dst_uuid.empty() && transport_->can_address()) {
+        // A transport that can address one peer gets no broadcast fallback. It
+        // would send the whole payload to everyone so that nobody accepts it,
+        // and still report success, which is how a message to a peer that had
+        // just left used to disappear with publish() returning true.
+        return transport_->publish_to(dst_uuid, subject, wire.data(), wire.size());
+    }
+    // Otherwise broadcast: the dst in the clear header still makes every other
+    // receiver drop the frame before decoding it.
     return transport_->publish(subject, wire.data(), wire.size());
 }
 
@@ -149,8 +151,22 @@ void Node::on_raw_(const std::string& subject, const Bytes& payload) {
         for (auto& [pat, h] : handlers_)
             if (subject_matches(pat, subject)) snapshot.emplace_back(pat, h);
     }
-    for (auto& [pat, h] : snapshot)
-        if (h) h(*env);
+    for (auto& [pat, h] : snapshot) {
+        // Per handler, not per message: without this, the first subscriber that
+        // threw silently cancelled delivery to every subscriber after it, and
+        // the exception was swallowed further up by the transport.
+        (void)pat;
+        if (!h) continue;
+        try {
+            h(*env);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "uninet: exception in a subscriber for '%s': %s\n",
+                         subject.c_str(), e.what());
+        } catch (...) {
+            std::fprintf(stderr, "uninet: unknown exception in a subscriber for '%s'\n",
+                         subject.c_str());
+        }
+    }
 }
 
 }  // namespace uninet

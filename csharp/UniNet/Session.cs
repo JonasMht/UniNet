@@ -22,6 +22,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace UniNet
 {
@@ -96,10 +97,37 @@ namespace UniNet
         /// <summary>A device left the network.</summary>
         public event Action<Peer>? PeerLost;
 
+        // .NET (Core and later) does not run finalizers at process exit, so
+        // ~Session is dead code for the common case and an undisposed session
+        // never announced its departure: peers waited out the full 30 s
+        // expiry instead of seeing it leave at once. Measured: 0.0 s when
+        // disposed, 29.1 s when leaked. Python solves this the same way.
+        private static readonly List<WeakReference<Session>> _live =
+            new List<WeakReference<Session>>();
+
+        static Session()
+        {
+            AppDomain.CurrentDomain.ProcessExit += (_, __) => CloseAll();
+        }
+
+        private static void CloseAll()
+        {
+            lock (_live)
+            {
+                foreach (var weak in _live)
+                    if (weak.TryGetTarget(out var s))
+                    {
+                        try { s.Close(); } catch { /* exiting; nothing useful to do */ }
+                    }
+                _live.Clear();
+            }
+        }
+
         private Session(IntPtr handle, bool marshalToCaller)
         {
             _handle = handle;
             _marshalToCaller = marshalToCaller;
+            lock (_live) _live.Add(new WeakReference<Session>(this));
         }
 
         /// <summary>
@@ -181,11 +209,41 @@ namespace UniNet
                     "UniNet: could not register presence callbacks: " + Native.LastError());
         }
 
+
         internal void Dispatch(Action action)
         {
-            if (_marshalToCaller) _pending.Enqueue(action);
-            else action();
+            if (!_marshalToCaller)
+            {
+                // Direct mode runs user code here. Guard it separately from the
+                // P/Invoke boundary guard: without this, a throwing handler in
+                // direct mode produced no output at all, while queued mode
+                // logged it.
+                try { action(); }
+                catch (Exception e) { Console.Error.WriteLine("UniNet handler threw: " + e); }
+                return;
+            }
+            // Bounded on purpose. An app whose Update() stalls would otherwise
+            // grow this without limit and die of memory exhaustion with nothing
+            // to point at. Dropping the oldest keeps the newest state, and the
+            // counter makes the loss visible instead of silent.
+            if (_pending.Count >= MaxPendingEvents)
+            {
+                if (_pending.TryDequeue(out _))
+                    Interlocked.Increment(ref _droppedEvents);
+            }
+            _pending.Enqueue(action);
         }
+
+        /// <summary>Most events held for Update() before the oldest are dropped.</summary>
+        public const int MaxPendingEvents = 100_000;
+
+        private int _droppedEvents;
+
+        /// <summary>
+        /// Events discarded because the queue was full, meaning Update() was not
+        /// called often enough. Zero in a healthy application.
+        /// </summary>
+        public int DroppedEvents => Volatile.Read(ref _droppedEvents);
 
         /// <summary>
         /// Deliver queued messages and presence events on the calling thread.
@@ -194,13 +252,29 @@ namespace UniNet
         /// </summary>
         public void Update()
         {
-            while (_pending.TryDequeue(out var action))
+            // One drainer at a time. Two threads calling Update() would split the
+            // queue and run handlers concurrently, which is exactly what this
+            // pump exists to prevent; a second caller simply returns.
+            if (Interlocked.CompareExchange(ref _draining, 1, 0) != 0) return;
+            try
             {
-                // One bad handler must not stop the rest of the queue draining.
-                try { action(); }
-                catch (Exception e) { Console.Error.WriteLine("UniNet handler threw: " + e); }
+                while (_pending.TryDequeue(out var action))
+                {
+                    // One bad handler must not stop the rest of the queue draining.
+                    try { action(); }
+                    catch (Exception e) { Console.Error.WriteLine("UniNet handler threw: " + e); }
+                }
             }
+            finally { Volatile.Write(ref _draining, 0); }
         }
+
+        private int _draining;
+
+        /// <summary>
+        /// Events waiting for <see cref="Update"/>. Non-zero and climbing means
+        /// Update() is not being called often enough.
+        /// </summary>
+        public int PendingEvents => _pending.Count;
 
         /// <summary>Receive messages. A subject ending in "&gt;" matches everything below it.</summary>
         public void Subscribe(string subject, Action<Message> handler)

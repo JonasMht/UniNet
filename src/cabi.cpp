@@ -11,6 +11,7 @@
 #include "uninet/session.h"
 
 #include <cstring>
+#include <map>
 #include <memory>
 #include <new>
 #include <string>
@@ -135,9 +136,15 @@ extern "C" int uninet_session_publish_json(uninet_session_t* session, const char
             set_error("null session, subject or payload");
             return UNINET_ERR_ARG;
         }
-        if (!session->session->publish_json(subject, json, safe(dst))) {
-            set_error("payload is not valid JSON");
-            return UNINET_ERR_PARSE;
+        // Parse first, so a send failure is never reported as a parse failure.
+        // Both used to return UNINET_ERR_PARSE, so a caller could not tell a
+        // malformed payload from being offline.
+        bool ok = false;
+        Cbor data = from_json(json, &ok);
+        if (!ok) { set_error("payload is not valid JSON"); return UNINET_ERR_PARSE; }
+        if (!session->session->publish(subject, std::move(data), safe(dst))) {
+            set_error("not on the network, or the transport refused the message");
+            return UNINET_ERR_STATE;
         }
         return UNINET_OK;
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
@@ -153,7 +160,12 @@ extern "C" int uninet_session_publish_cbor(uninet_session_t* session, const char
         bool ok = false;
         Cbor data = decode(cbor, len, &ok);
         if (!ok) { set_error("payload is not valid CBOR"); return UNINET_ERR_PARSE; }
-        session->session->publish(subject, std::move(data), safe(dst));
+        // The bool was discarded here, so this function could never fail: a
+        // message published while offline reported UNINET_OK and vanished.
+        if (!session->session->publish(subject, std::move(data), safe(dst))) {
+            set_error("not on the network, or the transport refused the message");
+            return UNINET_ERR_STATE;
+        }
         return UNINET_OK;
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
 }
@@ -164,6 +176,12 @@ extern "C" int uninet_session_subscribe_json(uninet_session_t* session, const ch
         if (!session || !session->session || !subject || !cb) {
             set_error("null session, subject or callback");
             return UNINET_ERR_ARG;
+        }
+        // Subscribing on a closed session is a no-op inside Session; reporting
+        // OK for it meant the caller believed they were receiving.
+        if (!session->session->open()) {
+            set_error("the session is closed");
+            return UNINET_ERR_STATE;
         }
         session->session->subscribe(subject, [cb, user](const Envelope& env) {
             // A managed exception crossing back over a reverse P/Invoke must not
@@ -183,6 +201,10 @@ extern "C" int uninet_session_subscribe_cbor(uninet_session_t* session, const ch
         if (!session || !session->session || !subject || !cb) {
             set_error("null session, subject or callback");
             return UNINET_ERR_ARG;
+        }
+        if (!session->session->open()) {
+            set_error("the session is closed");
+            return UNINET_ERR_STATE;
         }
         session->session->subscribe(subject, [cb, user](const Envelope& env) {
             try {
@@ -216,6 +238,10 @@ extern "C" int uninet_session_on_peer_found(uninet_session_t* session,
             set_error("null argument");
             return UNINET_ERR_ARG;
         }
+        if (!session->session->open()) {
+            set_error("the session is closed");
+            return UNINET_ERR_STATE;
+        }
         session->session->on_peer_found(wrap_peer_cb(cb, user));
         return UNINET_OK;
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
@@ -227,6 +253,10 @@ extern "C" int uninet_session_on_peer_lost(uninet_session_t* session,
         if (!session || !session->session || !cb) {
             set_error("null argument");
             return UNINET_ERR_ARG;
+        }
+        if (!session->session->open()) {
+            set_error("the session is closed");
+            return UNINET_ERR_STATE;
         }
         session->session->on_peer_lost(wrap_peer_cb(cb, user));
         return UNINET_OK;
@@ -292,6 +322,13 @@ extern "C" int uninet_blob_send(uninet_blob_t* blob, const char* name,
         Cbor meta;
         if (!parse_meta(meta_json, meta)) return UNINET_ERR_PARSE;
         const std::string id = blob->blob->send(name, data, len, std::move(meta), safe(dst));
+        // copy_out("") returns 0, which is indistinguishable from UNINET_OK, so
+        // a failed send looked like a successful one with an empty id.
+        if (id.empty()) {
+            set_error("the transfer could not start: not on the network, or the "
+                      "payload exceeds the configured maximum");
+            return UNINET_ERR_STATE;
+        }
         return copy_out(id, id_buf, id_buflen);
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
 }
@@ -304,7 +341,10 @@ extern "C" int uninet_blob_send_file(uninet_blob_t* blob, const char* path,
         Cbor meta;
         if (!parse_meta(meta_json, meta)) return UNINET_ERR_PARSE;
         const std::string id = blob->blob->send_file(path, std::move(meta), safe(dst));
-        if (id.empty()) set_error("could not read the file, or the send failed");
+        if (id.empty()) {
+            set_error("could not read the file, or the send failed");
+            return UNINET_ERR_STATE;
+        }
         return copy_out(id, id_buf, id_buflen);
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
 }

@@ -40,6 +40,13 @@ public:
         (void)peer_uuid; (void)subject; (void)data; (void)len; return false;
     }
 
+    // True when publish_to() can really address a single peer. Callers use it
+    // to decide whether a failed unicast should fall back to a broadcast: on a
+    // transport that cannot address anyone, the fallback is the only delivery
+    // path; on one that can, a failure means the peer is gone and broadcasting
+    // a payload to everyone for nobody is worse than reporting the failure.
+    virtual bool can_address() const { return false; }
+
     // Subscribe to `subject` (exact match or a wildcard, see below).
     virtual void subscribe(const std::string& subject, MessageHandler handler) = 0;
     virtual void unsubscribe(const std::string& subject) = 0;

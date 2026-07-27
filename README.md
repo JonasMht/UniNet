@@ -113,17 +113,24 @@ UniNet needs **ZeroMQ/Zyre** (the peer-to-peer layer), **zlib**, and optionally
 **liblz4**. If Zyre is not installed, the build fetches and compiles it
 automatically, so on most machines you can skip straight to the build.
 
+**Zyre is not packaged by Ubuntu or Debian.** There is no `libzyre-dev` to
+install there, so CMake builds ZeroMQ, czmq and Zyre from source the first time
+you configure. That is the normal path and it needs nothing from you: it adds a
+few minutes to the first build and nothing afterwards.
+
 | OS | install prerequisites |
 |---|---|
-| **Ubuntu/Debian** | `sudo apt install build-essential cmake pkg-config zlib1g-dev liblz4-dev libzyre-dev` |
-| **Fedora** | `sudo dnf install gcc-c++ cmake pkgconf-pkg-config zlib-devel lz4-devel zyre-devel` |
-| **Arch** | `sudo pacman -S base-devel cmake pkgconf zlib lz4 zyre` |
-| **macOS** | `brew install cmake pkg-config zlib lz4 zyre` |
+| **Ubuntu/Debian** | `sudo apt install build-essential cmake pkg-config git zlib1g-dev liblz4-dev` |
+| **Fedora** | `sudo dnf install gcc-c++ cmake pkgconf-pkg-config git zlib-devel lz4-devel` |
+| **Arch** | `sudo pacman -S base-devel cmake pkgconf git zlib lz4 zyre` |
+| **macOS** | `brew install cmake pkg-config git zlib lz4 zyre` |
 | **Windows** | `scripts/bootstrap.ps1` (clones vcpkg for the dependencies); needs Git, CMake, and VS 2022's "Desktop development with C++" workload |
 
-> If `libzyre-dev` is unavailable, install nothing extra: CMake will build
-> libzmq + czmq + zyre from source on first configure. It adds a few minutes to
-> the first build and nothing after that.
+`git` is in that list because the source build needs it to fetch Zyre.
+
+Arch and Homebrew do package Zyre, so those two lines install it and the build
+uses it directly. If you would rather build it from source everywhere, pass
+`-DUNINET_SYSTEM_ZYRE=OFF`.
 
 ### Build
 
@@ -478,24 +485,41 @@ domain. Some links do not provide one:
 For those, ZRE offers a second discovery mode. One node binds a rendezvous
 endpoint, the others dial it, and no multicast is involved at all:
 
+Throughout the examples below, `RENDEZVOUS_ADDR` stands for **the address of
+the rendezvous machine as seen by the node doing the dialling**. There is no
+fixed value: it depends entirely on the link.
+
+| link | what `RENDEZVOUS_ADDR` is |
+|---|---|
+| same LAN | the machine's LAN address, e.g. `192.168.1.10` |
+| VPN (WireGuard, Tailscale, ...) | its **VPN** address, not its LAN one, e.g. `10.0.0.10` |
+| USB via `adb reverse` | always `127.0.0.1`, because the tunnel makes the far end look local |
+| cloud host | its public address or DNS name |
+
+`tcp://*:PORT` on the binding side means "every interface on this machine" and
+never changes.
+
 ```cpp
-// the rendezvous node
+// the rendezvous node: binds, so it uses * and needs no address of its own
 uninet::SessionConfig host;
 host.gossip_bind = "tcp://*:5670";
-host.endpoint    = "tcp://192.168.1.10:5671";
+host.endpoint    = "tcp://*:5671";
 auto a = uninet::Session::join("Recorder", host);
 
-// every other node
+// every other node: dials, so it needs the rendezvous machine's address
 uninet::SessionConfig peer;
-peer.gossip_connect = "tcp://192.168.1.10:5670";
+peer.gossip_connect = "tcp://RENDEZVOUS_ADDR:5670";
 auto b = uninet::Session::join("Laptop", peer);
 ```
 
 ```python
-a = uninet.join("Recorder", gossip_bind="tcp://*:5670",
-                endpoint="tcp://192.168.1.10:5671")
-b = uninet.join("Laptop", gossip_connect="tcp://192.168.1.10:5670")
+a = uninet.join("Recorder", gossip_bind="tcp://*:5670", endpoint="tcp://*:5671")
+b = uninet.join("Laptop",   gossip_connect="tcp://RENDEZVOUS_ADDR:5670")
 ```
+
+Run `uninet-discover` or `ip addr` on the rendezvous machine to find the address
+the other side should use. If the two are on a VPN, use the VPN address: the LAN
+one is usually not reachable across it.
 
 Everything above this line works unchanged: same subjects, same payloads, same
 presence events.
@@ -509,8 +533,10 @@ This works, with one thing to be careful about. `adb` gives you the tunnel:
 adb reverse tcp:5670 tcp:5670
 ```
 
-The headset then dials `tcp://127.0.0.1:5670`, which `adb` forwards to the
-computer.
+The headset then dials `tcp://127.0.0.1:5670`. Over `adb reverse` the address is
+**always** `127.0.0.1`, whatever the machines' real addresses are: the tunnel
+makes the computer's port appear on the headset's own loopback. This is the one
+case where the address is fixed and you can hardcode it.
 
 **The part that needs attention:** gossip carries only the introductions. Once
 two nodes know about each other they open direct TCP connections, so each node's
