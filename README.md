@@ -1092,6 +1092,25 @@ cmake --build build-tsan -j && ./build-tsan/test_network
 Run `uninet-discover` on both machines; whichever one shows an empty list is the
 one with the problem.
 
+**A device stops being seen after the network changed.** It should not any
+more: UniNet watches the machine's networks and rebuilds itself when the one in
+use goes away or a better one appears. Wi-Fi dropping, moving between access
+points, a cable pulled, a phone tethered, a laptop waking from sleep. Peers see
+the device leave and rejoin, which is what actually happened.
+
+It is on by default and costs an interface enumeration every two seconds. To
+turn it off, or to react faster:
+
+```cpp
+uninet::SessionConfig cfg;
+cfg.auto_reconnect     = false;   // something else owns reconnection
+cfg.reconnect_poll_ms  = 500;     // notice sooner
+```
+
+`transport().reconnect_count()` reports how many times it has happened, which is
+worth putting in a status line: a number that climbs steadily means the machine
+is flapping between networks, not that UniNet is misbehaving.
+
 **This machine has several networks and discovery is using the wrong one.**
 This is the most common cause of "it just does not find anything" on a laptop,
 and nothing on screen points at it. Discovery binds **one** interface. A machine

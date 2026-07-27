@@ -96,11 +96,22 @@ bool Node::retry_connect(int attempts, double base_sleep_s) {
     return false;
 }
 
+std::string Node::uuid() const {
+    std::lock_guard<std::mutex> lk(uuid_mu_);
+    return uuid_;
+}
+
+void Node::set_uuid(std::string uuid) {
+    if (uuid.empty()) return;
+    std::lock_guard<std::mutex> lk(uuid_mu_);
+    uuid_ = std::move(uuid);
+}
+
 bool Node::publish(const std::string& subject, Cbor data, const std::string& dst_uuid) {
     if (!transport_ || !transport_->connected()) return false;
     Envelope env;
     env.compression = compress_;
-    env.src_uuid = uuid_;
+    env.src_uuid = uuid();
     env.dst_uuid = dst_uuid;
     env.subject = subject;
     env.data = std::move(data);
@@ -139,8 +150,11 @@ void Node::on_raw_(const std::string& subject, const Bytes& payload) {
     // keeps a publisher from decoding every frame it sends.
     auto route = peek_routing(payload);
     if (!route) return;
-    if (route->src == uuid_) return;                          // own echo
-    if (!route->dst.empty() && route->dst != uuid_) return;   // not addressed to me
+    // Read once: a reconnect can change it between these two tests, and a
+    // message would then be neither our echo nor addressed to us.
+    const std::string me = uuid();
+    if (route->src == me) return;                          // own echo
+    if (!route->dst.empty() && route->dst != me) return;   // not addressed to me
 
     // A tier this build cannot decode is a configuration problem, not a bad
     // frame, and it is invisible from either end: the sender's publish succeeds,

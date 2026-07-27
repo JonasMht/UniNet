@@ -201,9 +201,10 @@ struct ZyreTransport::Impl {
 
     std::string  uuid;
     std::string  error;
-    // The network discovery actually settled on. Set before zyre_start, read by
-    // callers afterwards, so it needs no lock: nothing writes it once the node
-    // is running.
+    // The network discovery actually settled on. Guarded by `mu`: a rebuild
+    // rewrites it on the actor thread while a caller may be reading it. It used
+    // to be lock-free on the grounds that nothing wrote it once the node was
+    // running, which stopped being true the moment reconnection was added.
     Interface    chosen_interface;
 
     // Guards everything below, which the actor thread writes and callers read.
@@ -227,6 +228,151 @@ struct ZyreTransport::Impl {
     // Guards sends into the actor pipe: zactor_t is a zsock, so it is not safe
     // to write from two threads at once.
     std::mutex pipe_mu;
+
+    // ── network supervision ──
+    std::function<void()> on_reconnected;
+    std::atomic<uint64_t> reconnects{0};
+    std::thread watchdog;
+    std::atomic<bool> watching{false};
+
+    // Create the ZRE node and put its headers on it. Headers live on the node,
+    // so a rebuild has to re-apply them or the device comes back nameless.
+    bool build_node() {
+        node = zyre_new(name.c_str());
+        if (!node) return false;
+        {   // Written here by the actor thread on every rebuild, read by
+            // uuid() from any caller thread. Unguarded this is a data race, and
+            // ThreadSanitizer says so.
+            std::lock_guard<std::mutex> lk(mu);
+            uuid = zyre_uuid(node);
+        }
+        zyre_set_header(node, "app", "%s", "uninet");
+        for (const auto& kv : cfg.headers)
+            zyre_set_header(node, kv.first.c_str(), "%s", kv.second.c_str());
+        return true;
+    }
+
+    // Everything connect() does between having a node and having a live one.
+    // Shared so a reconnect cannot drift from the original path.
+    bool configure_and_start(std::string* why) {
+        const bool gossip = !cfg.gossip_bind.empty() || !cfg.gossip_connect.empty();
+        if (gossip) {
+            const std::string ep = cfg.endpoint.empty()
+                                       ? std::string("tcp://*:") + std::to_string(cfg.port + 1)
+                                       : cfg.endpoint;
+            if (zyre_set_endpoint(node, "%s", ep.c_str()) != 0) {
+                if (why) *why = "could not bind the node endpoint '" + ep + "'";
+                return false;
+            }
+            if (!cfg.gossip_bind.empty())
+                zyre_gossip_bind(node, "%s", cfg.gossip_bind.c_str());
+            if (!cfg.gossip_connect.empty())
+                zyre_gossip_connect(node, "%s", cfg.gossip_connect.c_str());
+        } else if (cfg.port > 0) {
+            zyre_set_port(node, cfg.port);
+        }
+        std::string chosen = cfg.iface;
+        if (chosen.empty() && !gossip) {
+            const Interface best = best_interface(local_interfaces());
+            if (!best.name.empty()) {
+                chosen = best.name;
+                std::lock_guard<std::mutex> lk(mu);
+                chosen_interface = best;
+            }
+        }
+        zyre_set_evasive_timeout(node, cfg.evasive_ms);
+        zyre_set_expired_timeout(node, cfg.expired_ms);
+
+        // zyre_set_interface writes czmq's zsys_interface, which is a single
+        // process-global string, and zyre_start reads it. Two sessions starting
+        // at once in one process is therefore a genuine data race on that
+        // string, not merely the documented "last one wins" ambiguity about
+        // which interface each ends up on. ThreadSanitizer reported 13 of them
+        // from one run of the network test.
+        //
+        // Serialising set-then-start removes the race. It does NOT make two
+        // sessions able to sit on different interfaces: the beacon reads the
+        // global later, from Zyre's own thread. That limit is czmq's, and it is
+        // why several networks at once needs several processes.
+        // Written only when the value actually changes. czmq keeps ONE global
+        // interface string for the process and Zyre's own node threads read it
+        // whenever they please, so a write always races those reads and no lock
+        // on this side can prevent it - their thread will never take our mutex.
+        // What we can do is not write the same value over and over: with
+        // automatic selection every session would otherwise rewrite it on every
+        // connect, and ThreadSanitizer reported 13 races from a single run of
+        // the network test. Writing only on a real change leaves one write at
+        // startup, before any node thread exists, and one more if the machine
+        // genuinely moves network.
+        static std::mutex zsys_interface_mu;
+        static std::string zsys_interface_now;
+        if (!chosen.empty()) {
+            std::lock_guard<std::mutex> zsys_lk(zsys_interface_mu);
+            if (zsys_interface_now != chosen) {
+                zyre_set_interface(node, chosen.c_str());
+                zsys_interface_now = chosen;
+            }
+        }
+
+        if (zyre_start(node) != 0) {
+            if (why) *why = "could not start discovery: another program may hold UDP port "
+                            + std::to_string(cfg.port);
+            return false;
+        }
+        if (zyre_join(node, cfg.realm.c_str()) != 0) {
+            if (why) *why = "could not join realm '" + cfg.realm + "'";
+            zyre_stop(node);
+            return false;
+        }
+        return true;
+    }
+
+    std::atomic<bool> rebuild_requested{false};
+
+    // Replace the ZRE node with one bound to the current network. Runs ONLY on
+    // the actor thread, which is the thread that owns the node.
+    void rebuild_node_now() {
+        // Peers reachable through the old interface are not reachable any more,
+        // whatever happens next. Report them gone now rather than leaving stale
+        // entries in the caller's device list; the ones still around will be
+        // rediscovered within a beacon interval and reported again.
+        std::vector<Peer> gone;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            for (auto& kv : peers) gone.push_back(kv.second);
+            peers.clear();
+            seen.clear();
+        }
+        if (on_lost)
+            for (const auto& p : gone) { try { on_lost(p); } catch (...) {} }
+
+        zyre_stop(node);
+        zyre_destroy(&node);
+
+        std::string why;
+        if (!build_node() || !configure_and_start(&why)) {
+            // Left without a node the actor cannot poll anything, so put a
+            // stopped one back and let the watchdog try again: a laptop with
+            // the lid shut has no network for a while, and that is not fatal.
+            set_error(why.empty() ? "could not rebuild the network node" : why);
+            if (!node) build_node();
+            return;
+        }
+        reconnects.fetch_add(1, std::memory_order_relaxed);
+        if (on_reconnected) { try { on_reconnected(); } catch (...) {} }
+    }
+
+    // The network this node should be on right now, or an empty name when the
+    // machine has none. An explicit cfg.iface is never second-guessed.
+    Interface intended_interface() const {
+        const auto all = local_interfaces();
+        if (!cfg.iface.empty()) {
+            for (const auto& i : all)
+                if (i.name == cfg.iface) return i;
+            return Interface{};      // named, but currently absent
+        }
+        return best_interface(all);
+    }
 
     void set_error(const std::string& e) {
         std::lock_guard<std::mutex> lk(mu);
@@ -372,6 +518,17 @@ struct ZyreTransport::Impl {
             void* which = zpoller_wait(poller, 250);
             if (zpoller_terminated(poller)) break;
 
+            // A rebuild replaces the socket the poller is watching, so the
+            // poller has to be replaced too. Doing it here, at the top of the
+            // loop, keeps the destroy well away from the wait that is using it.
+            if (self->rebuild_requested.exchange(false)) {
+                self->rebuild_node_now();
+                zpoller_destroy(&poller);
+                poller = zpoller_new(pipe, zyre_socket(self->node), nullptr);
+                if (!poller) break;
+                continue;
+            }
+
             if (which == pipe) {
                 zmsg_t* msg = zmsg_recv(pipe);
                 if (!msg) break;
@@ -467,86 +624,27 @@ bool ZyreTransport::connect() {
         std::lock_guard<std::mutex> lk(impl_->mu);
         impl_->error.clear();
     }
+    const bool gossip = !impl_->cfg.gossip_bind.empty() || !impl_->cfg.gossip_connect.empty();
 
-    // Gossip mode replaces the UDP beacon entirely, so the beacon settings below
-    // do not apply to it. Setting the endpoint is what switches ZRE over.
-    const bool gossip = !impl_->cfg.gossip_bind.empty() ||
-                        !impl_->cfg.gossip_connect.empty();
-    if (gossip) {
-        // ZRE requires an explicit endpoint in gossip mode: with no beacon there
-        // is nothing to announce an ephemeral port. Pick a sane default rather
-        // than failing, so the common case needs one setting, not three.
-        const std::string ep = impl_->cfg.endpoint.empty()
-                                   ? std::string("tcp://*:") + std::to_string(impl_->cfg.port + 1)
-                                   : impl_->cfg.endpoint;
-        if (zyre_set_endpoint(impl_->node, "%s", ep.c_str()) != 0) {
-            impl_->set_error("could not bind the node endpoint '" + ep + "'");
-            return false;
-        }
-        if (!impl_->cfg.advertised_endpoint.empty()) {
-            // zyre_set_advertised_endpoint is a DRAFT API: it exists only when
-            // Zyre was built with -DENABLE_DRAFTS. UniNet's own fetched build
-            // enables them, but a distro or Homebrew package usually does not.
+    // advertised_endpoint is refused rather than ignored: see the note in
+    // configure_and_start's gossip branch for why a half-working link is worse
+    // than a join that fails and says so.
+    if (gossip && !impl_->cfg.advertised_endpoint.empty()) {
 #ifdef ZYRE_BUILD_DRAFT_API
-            zyre_set_advertised_endpoint(impl_->node,
-                                         impl_->cfg.advertised_endpoint.c_str());
+        zyre_set_advertised_endpoint(impl_->node, impl_->cfg.advertised_endpoint.c_str());
 #else
-            // Refused, not ignored. Continuing here looks like it worked: the
-            // node joins, peers discover it, and it advertises the address it
-            // bound instead of the one it was told to advertise. Every message
-            // toward it is then sent to an address that does not route, while
-            // messages from it arrive normally. A half-working link that
-            // reports success is far worse than a join that fails and says why.
-            impl_->set_error(
-                "advertised_endpoint needs a Zyre built with -DENABLE_DRAFTS, "
-                "and this one has the stable API only. Either rebuild the "
-                "dependency with drafts enabled, or bind `endpoint` directly to "
-                "the address peers will use, which needs no draft API");
-            return false;
-#endif
-        }
-        if (!impl_->cfg.gossip_bind.empty())
-            zyre_gossip_bind(impl_->node, "%s", impl_->cfg.gossip_bind.c_str());
-        if (!impl_->cfg.gossip_connect.empty())
-            zyre_gossip_connect(impl_->node, "%s", impl_->cfg.gossip_connect.c_str());
-    } else if (impl_->cfg.port > 0) {
-        zyre_set_port(impl_->node, impl_->cfg.port);
-    }
-    // Which network to discover on. An explicit setting always wins; otherwise
-    // choose, rather than letting czmq take whatever the OS lists first.
-    //
-    // That default is wrong often enough to be the single most common "it finds
-    // nothing" report: on a machine with Docker installed the first interface is
-    // a container bridge, where a beacon reaches nobody, and on a laptop with a
-    // cable attached it is the wire while the other device is on Wi-Fi. Neither
-    // produces an error, only silence.
-    //
-    // NOTE, and it is a sharp one: zyre_set_interface writes czmq's
-    // zsys_interface, which is a PROCESS-GLOBAL. Two sessions in one process
-    // asking for different interfaces both get whichever was set last. Nothing
-    // here can fix that; it is recorded in the header and the README, and it is
-    // why bridging several networks needs a process per network.
-    std::string chosen = impl_->cfg.iface;
-    if (chosen.empty() && !gossip) {
-        const Interface best = best_interface(local_interfaces());
-        if (!best.name.empty()) {
-            chosen = best.name;
-            impl_->chosen_interface = best;
-        }
-    }
-    if (!chosen.empty())
-        zyre_set_interface(impl_->node, chosen.c_str());
-    zyre_set_evasive_timeout(impl_->node, impl_->cfg.evasive_ms);
-    zyre_set_expired_timeout(impl_->node, impl_->cfg.expired_ms);
-
-    if (zyre_start(impl_->node) != 0) {
-        impl_->set_error("could not start discovery: another program may hold UDP port "
-                         + std::to_string(impl_->cfg.port));
+        impl_->set_error(
+            "advertised_endpoint needs a Zyre built with -DENABLE_DRAFTS, "
+            "and this one has the stable API only. Either rebuild the "
+            "dependency with drafts enabled, or bind `endpoint` directly to "
+            "the address peers will use, which needs no draft API");
         return false;
+#endif
     }
-    if (zyre_join(impl_->node, impl_->cfg.realm.c_str()) != 0) {
-        impl_->set_error("could not join realm '" + impl_->cfg.realm + "'");
-        zyre_stop(impl_->node);
+
+    std::string why;
+    if (!impl_->configure_and_start(&why)) {
+        impl_->set_error(why);
         return false;
     }
 
@@ -560,7 +658,49 @@ bool ZyreTransport::connect() {
         zyre_stop(impl_->node);
         return false;
     }
+
+    // ── the watchdog ──
+    // Gossip mode is excluded on purpose: it has no beacon and no bound
+    // interface to lose, and its TCP connections are reconnected by ZeroMQ
+    // itself. Rebuilding there would drop working links to fix nothing.
+    if (impl_->cfg.auto_reconnect && !gossip) {
+        impl_->watching.store(true);
+        impl_->watchdog = std::thread([impl = impl_.get()] {
+            // What the node is on now. A rebuild is warranted when this stops
+            // being the right answer: the address changed (a new DHCP lease, a
+            // different access point), it vanished (cable out, Wi-Fi off), or a
+            // better network appeared (a phone was tethered).
+            Interface current;
+            {
+                std::lock_guard<std::mutex> lk(impl->mu);
+                current = impl->chosen_interface;
+            }
+            while (impl->watching.load()) {
+                for (int slept = 0; slept < impl->cfg.reconnect_poll_ms && impl->watching.load();
+                     slept += 100)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!impl->watching.load()) break;
+
+                const Interface want = impl->intended_interface();
+                // No network at all: nothing to rebuild onto. Waiting beats
+                // tearing down a node that may still have loopback peers.
+                if (want.name.empty()) continue;
+                if (want.name == current.name && want.address == current.address) continue;
+
+                current = want;
+                impl->rebuild_requested.store(true);
+            }
+        });
+    }
     return true;
+}
+
+void ZyreTransport::on_reconnected(std::function<void()> cb) {
+    impl_->on_reconnected = std::move(cb);
+}
+
+uint64_t ZyreTransport::reconnect_count() const {
+    return impl_->reconnects.load(std::memory_order_relaxed);
 }
 
 void ZyreTransport::disconnect() {
@@ -573,6 +713,13 @@ void ZyreTransport::disconnect() {
         return;
     }
     if (!impl_->running.exchange(false)) return;
+
+    // The watchdog goes first. It exists to poke the actor into rebuilding the
+    // node; leaving it running while the actor is torn down means it can ask a
+    // destroyed node to be replaced.
+    impl_->watching.store(false);
+    if (impl_->watchdog.joinable()) impl_->watchdog.join();
+
     // Destroying the actor sends $TERM and joins the thread, so the event loop
     // is quiet before we touch the Zyre node again.
     {
@@ -662,7 +809,10 @@ void ZyreTransport::on_peer_lost(PeerCallback cb) {
     impl_->on_lost = std::move(cb);
 }
 
-const std::string& ZyreTransport::uuid() const { return impl_->uuid; }
+std::string ZyreTransport::uuid() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->uuid;
+}
 const std::string& ZyreTransport::node_name() const { return impl_->name; }
 
 std::string ZyreTransport::last_error() const {
@@ -671,6 +821,7 @@ std::string ZyreTransport::last_error() const {
 }
 
 Interface ZyreTransport::chosen_interface() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
     return impl_->chosen_interface;
 }
 

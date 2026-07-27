@@ -111,10 +111,18 @@ if [ "$USE_SAN" -eq 1 ]; then
             -DCMAKE_C_FLAGS="-fsanitize=thread -g -O1" \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" >/dev/null 2>&1 \
-       && cmake --build "$SAN_TSAN" -j"$(nproc 2>/dev/null || echo 4)" --target test_network >/dev/null 2>&1; then
+       && cmake --build "$SAN_TSAN" -j"$(nproc 2>/dev/null || echo 4)" \
+               --target test_network test_reconnect >/dev/null 2>&1; then
         # setarch -R: TSan aborts with "unexpected memory mapping" under ASLR
         # often enough to make the stage flaky otherwise.
-        if setarch -R "$SAN_TSAN/test_network" > /tmp/uninet-tsan.log 2>&1; then
+        # The reconnect test too: it is the most concurrent thing in the tree,
+        # with a watchdog thread rebuilding the node under the actor thread
+        # while callers read the identity. Both races found during its
+        # development were here and nowhere else.
+        setarch -R "$SAN_TSAN/test_network" > /tmp/uninet-tsan.log 2>&1; NET_RC=$?
+        "$HERE/scripts/test-reconnect.sh" "$SAN_TSAN/test_reconnect" \
+            >> /tmp/uninet-tsan.log 2>&1; REC_RC=$?
+        if [ $NET_RC -eq 0 ] && [ $REC_RC -eq 0 ]; then
             RACES="$(grep -c 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log || true)"
             if [ "${RACES:-0}" -eq 0 ]; then pass "tsan (0 races)"; else
                 grep -A6 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log | head -20

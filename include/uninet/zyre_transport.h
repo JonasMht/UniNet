@@ -98,6 +98,24 @@ struct ZyreConfig {
     // Advertised to every peer at discovery time and readable as Peer::headers.
     // "role", "app" and "host" get accessors on Peer; anything else is yours.
     std::map<std::string, std::string> headers;
+
+    // ── surviving a network change ──
+    // Watch the machine's networks and rebuild the node when the one in use
+    // goes away or is replaced: Wi-Fi dropping, moving between access points,
+    // a cable pulled, a phone tethered or unplugged, a laptop waking up.
+    //
+    // Without this a session stays bound to an interface that no longer exists.
+    // Nothing errors, nothing reconnects, and the device is simply deaf and
+    // invisible until the application is restarted - which is the state ZRE
+    // leaves it in, because the interface is chosen once when the beacon starts.
+    //
+    // Rebuilding means a new ZRE identity, so peers see this device leave and
+    // rejoin. That is honest: from their side it did.
+    bool auto_reconnect = true;
+    // How often to look. Cheap (an interface enumeration), and 2 s is well
+    // inside the 30 s a peer takes to expire us, so the far side usually never
+    // notices the gap.
+    int  reconnect_poll_ms = 2000;
 };
 
 enum class LinkKind {
@@ -184,7 +202,10 @@ public:
     void on_peer_lost(PeerCallback cb);
 
     // This node's ZRE identity: the uuid other peers address it by.
-    const std::string& uuid() const;
+    // By value, and guarded: a network rebuild replaces this string on the
+    // network thread, so handing out a reference to it would be a race and a
+    // dangling one the moment the string reallocates.
+    std::string uuid() const;
     const std::string& node_name() const;
 
     // Advertise another key/value. Must be called before connect(): ZRE sends
@@ -201,6 +222,16 @@ public:
     // unanswerable from inside the application, and getting it wrong is the
     // most common reason two devices never see each other.
     Interface chosen_interface() const;
+
+    // Fired after the node has been rebuilt on a new network, on the network
+    // thread. The ZRE identity has changed by then, so anything that cached
+    // uuid() must re-read it; Session does exactly that.
+    void on_reconnected(std::function<void()> cb);
+
+    // How many times the network has been rebuilt under this session. Useful in
+    // a status line, and in a test: it is the only externally visible proof
+    // that a dropout was survived rather than never noticed.
+    uint64_t reconnect_count() const;
 
 private:
     struct Impl;
