@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <cstdio>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -53,6 +54,113 @@ std::string local_hostname() {
     return out;
 }
 
+const char* link_kind_name(LinkKind kind) {
+    switch (kind) {
+        case LinkKind::Wired:    return "wired";
+        case LinkKind::Wireless: return "wi-fi";
+        case LinkKind::Tethered: return "usb-tether";
+        case LinkKind::Virtual:  return "virtual";
+        case LinkKind::Vpn:      return "vpn";
+        case LinkKind::Loopback: return "loopback";
+        case LinkKind::Unknown:  break;
+    }
+    return "unknown";
+}
+
+namespace {
+
+bool starts_with(const std::string& s, const char* prefix) {
+    const size_t n = std::strlen(prefix);
+    return s.size() >= n && s.compare(0, n, prefix) == 0;
+}
+
+// Classified by name, which is what every platform actually gives us. The
+// kernel does expose link types, but not portably, and the naming conventions
+// below are stable across Linux, macOS and Windows' friendly names.
+LinkKind classify(const std::string& name) {
+    if (name == "lo" || starts_with(name, "Loopback")) return LinkKind::Loopback;
+    // Before the wired test: systemd names a tethered phone enp0s20u1, which
+    // starts with "en" and would otherwise read as ordinary ethernet. The "u"
+    // marks a USB path, and that is exactly the case worth singling out.
+    if (starts_with(name, "rndis") || starts_with(name, "usb")) return LinkKind::Tethered;
+    if (starts_with(name, "en") && name.find('u') != std::string::npos &&
+        name.find("usb") == std::string::npos) {
+        // enp0s20u1 / enx… : USB-attached ethernet, which is how both a
+        // tethered phone and a USB ethernet dongle appear.
+        return LinkKind::Tethered;
+    }
+    if (starts_with(name, "docker") || starts_with(name, "br-") ||
+        starts_with(name, "veth")   || starts_with(name, "virbr") ||
+        starts_with(name, "vmnet")  || starts_with(name, "bridge") ||
+        starts_with(name, "cni")    || starts_with(name, "flannel")) return LinkKind::Virtual;
+    if (starts_with(name, "tun") || starts_with(name, "tap") ||
+        starts_with(name, "wg")  || starts_with(name, "ppp") ||
+        starts_with(name, "utun")) return LinkKind::Vpn;
+    if (starts_with(name, "wl") || starts_with(name, "wifi") ||
+        starts_with(name, "Wi-Fi") || starts_with(name, "wlan") ||
+        starts_with(name, "ath")) return LinkKind::Wireless;
+    if (starts_with(name, "en") || starts_with(name, "eth") ||
+        starts_with(name, "Ethernet")) return LinkKind::Wired;
+    return LinkKind::Unknown;
+}
+
+}  // namespace
+
+bool Interface::is_private() const {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(address.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return false;
+    if (a == 10) return true;                          // 10.0.0.0/8
+    if (a == 192 && b == 168) return true;             // 192.168.0.0/16
+    if (a == 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
+    if (a == 169 && b == 254) return true;             // 169.254.0.0/16 link-local
+    return false;
+}
+
+bool Interface::is_discoverable() const {
+    if (address.empty()) return false;
+    switch (kind) {
+        // No other UniNet device is ever on the far side of these. A beacon
+        // sent here is not merely useless, it is the reason a machine with
+        // docker installed finds nothing at all by default.
+        case LinkKind::Loopback:
+        case LinkKind::Virtual:
+        case LinkKind::Vpn:
+            return false;
+        default:
+            return true;
+    }
+}
+
+Interface best_interface(const std::vector<Interface>& candidates) {
+    const Interface* best = nullptr;
+    int best_score = -1;
+    for (const auto& i : candidates) {
+        if (!i.is_discoverable()) continue;
+        int score = 0;
+        switch (i.kind) {
+            // A tethered phone was plugged in deliberately and is almost always
+            // the device being reached for, so it outranks everything.
+            case LinkKind::Tethered: score = 40; break;
+            // Wired above Wi-Fi, deliberately. A machine cabled to a switch is
+            // usually cabled to it ON PURPOSE - a lab bench, a navigation cart -
+            // while its Wi-Fi is whatever the building offers. Preferring Wi-Fi
+            // would quietly move such a setup off the network it was wired to.
+            case LinkKind::Wired:    score = 30; break;
+            case LinkKind::Wireless: score = 25; break;
+            default:                 score = 10; break;
+        }
+        // This outweighs the link type, and that is the point. A private address
+        // is a LAN, a hotspot or a tether: somewhere other UniNet devices
+        // plausibly are. A public one is a campus or hospital network where they
+        // almost never are, and where a beacon may not even be forwarded. So a
+        // cabled public address loses to a private Wi-Fi, while a cabled private
+        // network still beats the Wi-Fi beside it.
+        if (i.is_private()) score += 20;
+        if (score > best_score) { best_score = score; best = &i; }
+    }
+    return best ? *best : Interface{};
+}
+
 std::vector<Interface> local_interfaces() {
     std::vector<Interface> out;
     // czmq's ziflist rather than getifaddrs/GetAdaptersAddresses by hand: it is
@@ -67,6 +175,7 @@ std::vector<Interface> local_interfaces() {
         if (const char* a = ziflist_address(list))   iface.address = a;
         if (const char* b = ziflist_broadcast(list)) iface.broadcast = b;
         if (const char* m = ziflist_netmask(list))   iface.netmask = m;
+        iface.kind = classify(iface.name);
         out.push_back(std::move(iface));
     }
     ziflist_destroy(&list);
@@ -92,6 +201,10 @@ struct ZyreTransport::Impl {
 
     std::string  uuid;
     std::string  error;
+    // The network discovery actually settled on. Set before zyre_start, read by
+    // callers afterwards, so it needs no lock: nothing writes it once the node
+    // is running.
+    Interface    chosen_interface;
 
     // Guards everything below, which the actor thread writes and callers read.
     mutable std::mutex mu;
@@ -399,8 +512,30 @@ bool ZyreTransport::connect() {
     } else if (impl_->cfg.port > 0) {
         zyre_set_port(impl_->node, impl_->cfg.port);
     }
-    if (!impl_->cfg.iface.empty())
-        zyre_set_interface(impl_->node, impl_->cfg.iface.c_str());
+    // Which network to discover on. An explicit setting always wins; otherwise
+    // choose, rather than letting czmq take whatever the OS lists first.
+    //
+    // That default is wrong often enough to be the single most common "it finds
+    // nothing" report: on a machine with Docker installed the first interface is
+    // a container bridge, where a beacon reaches nobody, and on a laptop with a
+    // cable attached it is the wire while the other device is on Wi-Fi. Neither
+    // produces an error, only silence.
+    //
+    // NOTE, and it is a sharp one: zyre_set_interface writes czmq's
+    // zsys_interface, which is a PROCESS-GLOBAL. Two sessions in one process
+    // asking for different interfaces both get whichever was set last. Nothing
+    // here can fix that; it is recorded in the header and the README, and it is
+    // why bridging several networks needs a process per network.
+    std::string chosen = impl_->cfg.iface;
+    if (chosen.empty() && !gossip) {
+        const Interface best = best_interface(local_interfaces());
+        if (!best.name.empty()) {
+            chosen = best.name;
+            impl_->chosen_interface = best;
+        }
+    }
+    if (!chosen.empty())
+        zyre_set_interface(impl_->node, chosen.c_str());
     zyre_set_evasive_timeout(impl_->node, impl_->cfg.evasive_ms);
     zyre_set_expired_timeout(impl_->node, impl_->cfg.expired_ms);
 
@@ -533,6 +668,10 @@ const std::string& ZyreTransport::node_name() const { return impl_->name; }
 std::string ZyreTransport::last_error() const {
     std::lock_guard<std::mutex> lk(impl_->mu);
     return impl_->error;
+}
+
+Interface ZyreTransport::chosen_interface() const {
+    return impl_->chosen_interface;
 }
 
 }  // namespace uninet

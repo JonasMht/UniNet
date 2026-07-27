@@ -100,6 +100,57 @@ struct ZyreConfig {
     std::map<std::string, std::string> headers;
 };
 
+enum class LinkKind {
+    Unknown,
+    Wired,      // ethernet
+    Wireless,   // Wi-Fi
+    Tethered,   // a phone sharing its connection over USB: rndis0, usb0, enp0s20u1
+    Virtual,    // docker0, br-*, veth*, virbr*: real addresses, no other devices
+    Vpn,        // tun*, tap*, wg*: point-to-point, no broadcast domain
+    Loopback,
+};
+
+const char* link_kind_name(LinkKind kind);
+
+// One network this machine could discover on.
+struct Interface {
+    std::string name;        // "wlan0", "eth0", "Wi-Fi"
+    std::string address;     // IPv4 address on that interface
+    std::string broadcast;   // where the discovery beacon would be sent
+    std::string netmask;
+    LinkKind    kind = LinkKind::Unknown;
+
+    // True for the address ranges reserved for private networks (RFC1918) and
+    // link-local (169.254/16). A hotspot, a USB tether and a home or lab LAN
+    // are all private; a campus or hospital address usually is not.
+    bool is_private() const;
+
+    // Whether discovery is worth attempting here at all. False for loopback,
+    // container bridges and point-to-point VPN links, none of which have a
+    // broadcast domain with other UniNet devices on it.
+    bool is_discoverable() const;
+};
+
+// Every usable IPv4 interface, loopback excluded.
+//
+// Discovery binds ONE of these. Which one is not always the one you want: a
+// machine with a wired network, a VPN and a few docker bridges has several, and
+// a beacon sent on the wrong one reaches nobody while everything reports
+// healthy. That failure is invisible without a list like this, which is why
+// uninet-discover prints it when it finds nothing. Set `iface` to pick.
+std::vector<Interface> local_interfaces();
+
+// The interface discovery should use when the application does not name one.
+//
+// czmq's default is "the first one the OS lists", which on a developer machine
+// is regularly a docker bridge or the wired port while the device is on Wi-Fi.
+// This prefers, in order: a USB-tethered phone (it was plugged in on purpose,
+// so it is almost certainly the intent), then Wi-Fi, then wired, and never a
+// container bridge, a VPN or loopback. Returns an empty name when nothing is
+// usable, which is a real state on a machine with no network.
+Interface best_interface(const std::vector<Interface>& candidates);
+
+
 class ZyreTransport : public Transport {
 public:
     using PeerCallback = std::function<void(const Peer&)>;
@@ -144,6 +195,13 @@ public:
     // Why connect() failed, when it did.
     std::string last_error() const;
 
+    // The network discovery settled on, once connected. Empty in gossip mode
+    // (no beacon) and when the application named an interface itself. Worth
+    // showing in a status line: "which network am I actually on" is otherwise
+    // unanswerable from inside the application, and getting it wrong is the
+    // most common reason two devices never see each other.
+    Interface chosen_interface() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -158,21 +216,8 @@ std::string zyre_version_string();
 // machine a peer is running on.
 std::string local_hostname();
 
-// One network this machine could discover on.
-struct Interface {
-    std::string name;        // "wlan0", "eth0", "Wi-Fi"
-    std::string address;     // IPv4 address on that interface
-    std::string broadcast;   // where the discovery beacon would be sent
-    std::string netmask;
-};
-
-// Every usable IPv4 interface, loopback excluded.
-//
-// Discovery binds ONE of these. Which one is not always the one you want: a
-// machine with a wired network, a VPN and a few docker bridges has several, and
-// a beacon sent on the wrong one reaches nobody while everything reports
-// healthy. That failure is invisible without a list like this, which is why
-// uninet-discover prints it when it finds nothing. Set `iface` to pick.
-std::vector<Interface> local_interfaces();
+// What kind of network an interface is. Discovery treats these very
+// differently, and guessing from the name alone is how a beacon ends up on a
+// container bridge that routes nowhere.
 
 }  // namespace uninet
