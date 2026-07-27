@@ -384,6 +384,16 @@ blob.on_received([](const uninet::BlobInfo& info, const uninet::Bytes& data) {
 blob.send_file("/path/to/dataset.zip");
 ```
 
+```csharp
+using var blob = new Blob(net, "volumes");
+blob.Received += (info, data) => File.WriteAllBytes(info.Name, data);
+blob.Progress += (info, done) => Console.WriteLine($"{100.0 * done / info.Size:F0}%");
+blob.SendFile("/path/to/dataset.zip");
+```
+
+All three interoperate: a blob sent from Python arrives byte-identical in C# and
+C++, with its metadata intact.
+
 **Rule of thumb:** `publish()` for anything up to a few MB you want as one
 message; `Blob` for anything larger, or anything you want a progress bar on.
 

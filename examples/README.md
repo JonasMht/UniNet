@@ -114,6 +114,9 @@ integers**, which is why a list of ints is never silently converted to floats.
 | `python/volume_transfer.py` | ● | | | | ● | ● |
 | `csharp/UniNetDemo` | ● | ● | ● | ● | | |
 
+`Blob` is available in all three languages (C++ `uninet::Blob`, Python
+`uninet.Blob`, C# `UniNet.Blob`) and interoperates between them.
+
 ---
 
 ## Troubleshooting an example

@@ -129,6 +129,68 @@ namespace UniNet
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uninet_session_on_peer_lost(IntPtr session, PeerCallback cb, IntPtr user);
 
+        // ── session lifetime ──
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void uninet_session_close(IntPtr session);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_session_open(IntPtr session);
+
+        // ── large payloads ──
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate void BlobCallback(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string id,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string src,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string metaJson,
+            IntPtr data, UIntPtr len, IntPtr user);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate void BlobProgressCallback(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string id,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+            UIntPtr done, UIntPtr total, IntPtr user);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate void BlobFailedCallback(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string id,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string reason, IntPtr user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr uninet_blob_new(
+            IntPtr session, [MarshalAs(UnmanagedType.LPUTF8Str)] string subject);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void uninet_blob_free(IntPtr blob);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_blob_send(
+            IntPtr blob, [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+            byte[] data, UIntPtr len,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string metaJson,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string dst,
+            byte[] idBuf, UIntPtr idBufLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_blob_send_file(
+            IntPtr blob, [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string metaJson,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string dst,
+            byte[] idBuf, UIntPtr idBufLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_blob_on_received(IntPtr blob, BlobCallback cb, IntPtr user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_blob_on_progress(IntPtr blob, BlobProgressCallback cb, IntPtr user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_blob_on_failed(IntPtr blob, BlobFailedCallback cb, IntPtr user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_blob_incoming_count(IntPtr blob);
+
         // ── peers ──
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr uninet_session_peers(IntPtr session);

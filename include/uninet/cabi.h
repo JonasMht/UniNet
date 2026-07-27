@@ -115,6 +115,54 @@ int uninet_session_subscribe_cbor(uninet_session_t* session, const char* subject
 int uninet_session_on_peer_found(uninet_session_t* session, uninet_peer_cb cb, void* user);
 int uninet_session_on_peer_lost(uninet_session_t* session, uninet_peer_cb cb, void* user);
 
+// ── session lifetime ──────────────────────────────────────────────────────
+// Leave the network without destroying the handle. Idempotent. Useful when the
+// shutdown order matters: a garbage-collected host may finalize objects after
+// the ZeroMQ context is gone, and closing a socket after that aborts inside
+// czmq. Call this while you still control the ordering, then free later.
+void uninet_session_close(uninet_session_t* session);
+int  uninet_session_open(uninet_session_t* session);   // 1 until close() is called
+
+// ── large payloads: files, volumes, meshes ────────────────────────────────
+// publish() sends a message that must fit in memory whole on both ends. A blob
+// is chunked, streamed and reassembled, with progress at both ends, and carries
+// arbitrary metadata alongside the bytes.
+typedef struct uninet_blob uninet_blob_t;
+
+// Fired once per completed transfer. `meta` is the sender's metadata rendered as
+// JSON ("null" when none). `data`/`len` are valid only during the call.
+typedef void (*uninet_blob_cb)(const char* id, const char* name, const char* src,
+                               const char* meta_json, const uint8_t* data,
+                               size_t len, void* user);
+// Fired as chunks arrive. `done` of `total` bytes.
+typedef void (*uninet_blob_progress_cb)(const char* id, const char* name,
+                                        size_t done, size_t total, void* user);
+// Fired when a transfer is abandoned (the sender vanished, or it stalled).
+typedef void (*uninet_blob_failed_cb)(const char* id, const char* name,
+                                      const char* reason, void* user);
+
+// `subject` is a base subject; the transfer runs beneath it, so it never
+// collides with your own messages on the same prefix. The session must outlive
+// the blob.
+uninet_blob_t* uninet_blob_new(uninet_session_t* session, const char* subject);
+void           uninet_blob_free(uninet_blob_t* blob);
+
+// Send bytes, or a file. `meta_json` may be NULL. `dst` NULL or empty broadcasts;
+// otherwise only that peer receives it. Writes the transfer id into `id_buf` and
+// returns its length, or a negative error. An empty id means the transfer could
+// not start.
+int uninet_blob_send(uninet_blob_t* blob, const char* name,
+                     const uint8_t* data, size_t len, const char* meta_json,
+                     const char* dst, char* id_buf, size_t id_buflen);
+int uninet_blob_send_file(uninet_blob_t* blob, const char* path,
+                          const char* meta_json, const char* dst,
+                          char* id_buf, size_t id_buflen);
+
+int uninet_blob_on_received(uninet_blob_t* blob, uninet_blob_cb cb, void* user);
+int uninet_blob_on_progress(uninet_blob_t* blob, uninet_blob_progress_cb cb, void* user);
+int uninet_blob_on_failed(uninet_blob_t* blob, uninet_blob_failed_cb cb, void* user);
+int uninet_blob_incoming_count(uninet_blob_t* blob);
+
 // ── peer snapshot ─────────────────────────────────────────────────────────
 // A point-in-time list. The returned strings stay valid until the snapshot is
 // freed, which is what makes this safe to walk without copying as you go.
