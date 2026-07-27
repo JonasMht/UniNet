@@ -45,6 +45,7 @@ public final class MainActivity extends Activity {
     private TextView log;
     private ScrollView logScroll;
     private EditText input;
+    private EditText host;
     private Button usbButton;
     private Button wifiButton;
 
@@ -70,6 +71,10 @@ public final class MainActivity extends Activity {
             join(GOSSIP, ENDPOINT);
         } else if ("wifi".equals(mode)) {
             join("", "");
+        } else if (mode != null && mode.startsWith("host:")) {
+            // adb shell am start ... --es mode host:192.168.43.1
+            host.setText(mode.substring("host:".length()));
+            joinHost();
         } else {
             append("Pick USB or Wi-Fi to join.");
         }
@@ -89,14 +94,36 @@ public final class MainActivity extends Activity {
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
         usbButton = new Button(this);
-        usbButton.setText("Connect over USB");
+        usbButton.setText("USB");
         usbButton.setOnClickListener(v -> join(GOSSIP, ENDPOINT));
         wifiButton = new Button(this);
-        wifiButton.setText("Connect over Wi-Fi");
+        wifiButton.setText("Wi-Fi");
         wifiButton.setOnClickListener(v -> join("", ""));
         buttons.addView(usbButton, equalWidth());
         buttons.addView(wifiButton, equalWidth());
         root.addView(buttons);
+
+        // The third case, and the one the beacon cannot cover: the other
+        // machine is reachable but on a DIFFERENT subnet. That happens
+        // constantly with phone hotspots and shared connections, where the
+        // hotspot and the USB tether are separate networks. A subnet-directed
+        // broadcast is only delivered to hosts on that subnet, so discovery
+        // finds nothing however well the two can otherwise talk. Typing the
+        // address here skips the beacon and dials a rendezvous instead.
+        LinearLayout direct = new LinearLayout(this);
+        direct.setOrientation(LinearLayout.HORIZONTAL);
+        direct.setGravity(Gravity.CENTER_VERTICAL);
+        host = new EditText(this);
+        host.setHint("workstation IP, e.g. 192.168.43.1");
+        host.setInputType(InputType.TYPE_CLASS_TEXT);
+        host.setSingleLine(true);
+        Button hostButton = new Button(this);
+        hostButton.setText("Connect");
+        hostButton.setOnClickListener(v -> joinHost());
+        direct.addView(host, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        direct.addView(hostButton);
+        root.addView(direct);
 
         logScroll = new ScrollView(this);
         log = new TextView(this);
@@ -150,8 +177,63 @@ public final class MainActivity extends Activity {
         joined = true;
         usbButton.setEnabled(false);
         wifiButton.setEnabled(false);
-        append(gossip.isEmpty() ? "joined over Wi-Fi" : "joined over USB (" + gossip + ")");
+        // Named for what actually happened. Reporting every gossip join as
+        // "over USB" was wrong the moment a rendezvous on another machine was
+        // possible, and the log is the only place to see which path was taken.
+        if (gossip.isEmpty()) {
+            append("joined over Wi-Fi (beacon discovery)");
+        } else if (gossip.contains("127.0.0.1")) {
+            append("joined over USB (rendezvous " + gossip + ")");
+        } else {
+            append("joined via rendezvous " + gossip);
+        }
         handler.postDelayed(heartbeat, 2000);
+    }
+
+    /**
+     * Dial a rendezvous on another machine, across subnets.
+     *
+     * Unlike the USB case, this device's own endpoint cannot be loopback: the
+     * far side has to dial back, so it must be an address that machine can
+     * reach. Binding the wildcard is not enough either, because a node
+     * advertises the address it BOUND, and "0.0.0.0" is not something anyone
+     * can connect to. So the real address is looked up and used.
+     */
+    private void joinHost() {
+        String target = host.getText().toString().trim();
+        if (target.isEmpty()) {
+            append("! type the workstation's IP address first");
+            return;
+        }
+        String mine = localAddress();
+        if (mine == null) {
+            append("! this device has no usable network address");
+            return;
+        }
+        append("dialling " + target + " from " + mine);
+        join("tcp://" + target + ":31337", "tcp://" + mine + ":31338");
+    }
+
+    /** This device's own IPv4 address, or null. */
+    private static String localAddress() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> ifs =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (ifs.hasMoreElements()) {
+                java.net.NetworkInterface ni = ifs.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                java.util.Enumeration<java.net.InetAddress> addrs = ni.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    java.net.InetAddress a = addrs.nextElement();
+                    if (!a.isLoopbackAddress() && a instanceof java.net.Inet4Address) {
+                        return a.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            return null;
+        }
+        return null;
     }
 
     private void sendTyped() {
