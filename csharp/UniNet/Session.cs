@@ -97,11 +97,51 @@ namespace UniNet
         private IntPtr _handle;
         private readonly bool _marshalToCaller;
 
-        // Every delegate handed to native code is rooted here for the lifetime of
-        // the native handle. Without this the GC is free to collect them while
-        // the network thread still holds the pointers.
-        private readonly List<Delegate> _rooted = new List<Delegate>();
-        private readonly List<Action<Message>> _handlersKeepAlive = new List<Action<Message>>();
+        // Every delegate handed to native code is a static thunk rooted in a
+        // static field below, so the GC can never collect one while the network
+        // thread still holds the pointer. What varies per registration - which
+        // session, which handler - travels through the `user` pointer as a
+        // GCHandle, and those are the handles kept here.
+        private readonly List<GCHandle> _contexts = new List<GCHandle>();
+        private readonly List<object> _contextRoots = new List<object>();
+
+        /// <summary>Pin <paramref name="context"/> and return the `user` pointer for it.</summary>
+        /// <remarks>
+        /// The handle is Weak, and an ordinary reference in _contextRoots is what
+        /// actually keeps the context alive. A strong GCHandle would be a GC root,
+        /// so a session the application forgot to dispose could never be collected,
+        /// its finalizer would never run, and it would sit on the network
+        /// advertising itself forever. In the Unity editor that shows up as
+        /// phantom peers piling up across play/stop cycles. This way an
+        /// unreachable session still finalizes, and until it does the weak handle
+        /// resolves normally.
+        /// </remarks>
+        private IntPtr Pin(object context)
+        {
+            var handle = GCHandle.Alloc(context, GCHandleType.Weak);
+            lock (_contexts)
+            {
+                _contexts.Add(handle);
+                _contextRoots.Add(context);
+            }
+            return GCHandle.ToIntPtr(handle);
+        }
+
+        /// <summary>
+        /// Release the pinned contexts. Only ever called after the native handle
+        /// is freed: doing it earlier leaves the network thread dereferencing a
+        /// handle that no longer exists, which is a hard crash rather than an
+        /// exception.
+        /// </summary>
+        private void FreeContexts()
+        {
+            lock (_contexts)
+            {
+                foreach (var handle in _contexts)
+                    if (handle.IsAllocated) handle.Free();
+                _contexts.Clear();
+            }
+        }
 
         // Events queued off the network thread, drained by Update().
         private readonly ConcurrentQueue<Action> _pending = new ConcurrentQueue<Action>();
@@ -288,34 +328,116 @@ namespace UniNet
 
         private void HookPresence()
         {
-            Native.PeerCallback found = (uuid, n, addr, role, app, _) =>
-            {
-                // A managed exception must never cross back over a reverse
-                // P/Invoke boundary: it terminates the process.
-                try
-                {
-                    var peer = new Peer(uuid, n, addr, role, app);
-                    Dispatch(() => PeerFound?.Invoke(peer));
-                }
-                catch { }
-            };
-            Native.PeerCallback lost = (uuid, n, addr, role, app, _) =>
-            {
-                try
-                {
-                    var peer = new Peer(uuid, n, addr, role, app);
-                    Dispatch(() => PeerLost?.Invoke(peer));
-                }
-                catch { }
-            };
-            _rooted.Add(found);
-            _rooted.Add(lost);
+            IntPtr self = Pin(this);
             // Checked, not discarded: a failed registration would otherwise mean
             // presence events silently never arrive, with nothing to point at.
-            if (Native.uninet_session_on_peer_found(_handle, found, IntPtr.Zero) != Status.Ok ||
-                Native.uninet_session_on_peer_lost(_handle, lost, IntPtr.Zero) != Status.Ok)
+            if (Native.uninet_session_on_peer_found(_handle, PeerFoundThunk, self) != Status.Ok ||
+                Native.uninet_session_on_peer_lost(_handle, PeerLostThunk, self) != Status.Ok)
                 throw new InvalidOperationException(
                     "UniNet: could not register presence callbacks: " + Native.LastError());
+        }
+
+        // ── native callbacks ──────────────────────────────────────────────────
+        // Static and attributed so IL2CPP can reach them, and rooted in static
+        // fields so the GC cannot collect them. See rule 3 in Native.cs for why
+        // a lambda here would compile fine and then fail on a Quest.
+        private static readonly Native.PeerCallback PeerFoundThunk = OnPeerFound;
+        private static readonly Native.PeerCallback PeerLostThunk  = OnPeerLost;
+        private static readonly Native.JsonCallback JsonThunk      = OnJson;
+        private static readonly Native.CborCallback CborThunk      = OnCbor;
+
+        [AOT.MonoPInvokeCallback(typeof(Native.PeerCallback))]
+        private static void OnPeerFound(IntPtr uuid, IntPtr name, IntPtr address,
+                                        IntPtr role, IntPtr app, IntPtr user)
+        {
+            // A managed exception must never cross back over a reverse P/Invoke
+            // boundary: it terminates the process.
+            try
+            {
+                var self = Native.Context<Session>(user);
+                if (self == null) return;
+                var peer = new Peer(Native.Str(uuid), Native.Str(name), Native.Str(address),
+                                    Native.Str(role), Native.Str(app));
+                self.Dispatch(() => self.PeerFound?.Invoke(peer));
+            }
+            catch { }
+        }
+
+        [AOT.MonoPInvokeCallback(typeof(Native.PeerCallback))]
+        private static void OnPeerLost(IntPtr uuid, IntPtr name, IntPtr address,
+                                       IntPtr role, IntPtr app, IntPtr user)
+        {
+            try
+            {
+                var self = Native.Context<Session>(user);
+                if (self == null) return;
+                var peer = new Peer(Native.Str(uuid), Native.Str(name), Native.Str(address),
+                                    Native.Str(role), Native.Str(app));
+                self.Dispatch(() => self.PeerLost?.Invoke(peer));
+            }
+            catch { }
+        }
+
+        // One of these is pinned per Subscribe call: the static thunk has no
+        // other way to know which handler the message belongs to.
+        private sealed class JsonSub
+        {
+            internal readonly Session Session;
+            internal readonly Action<Message> Handler;
+            internal JsonSub(Session session, Action<Message> handler)
+            {
+                Session = session; Handler = handler;
+            }
+        }
+
+        private sealed class CborSub
+        {
+            internal readonly Session Session;
+            internal readonly Action<string, string, byte[]> Handler;
+            internal CborSub(Session session, Action<string, string, byte[]> handler)
+            {
+                Session = session; Handler = handler;
+            }
+        }
+
+        [AOT.MonoPInvokeCallback(typeof(Native.JsonCallback))]
+        private static void OnJson(IntPtr subject, IntPtr src, IntPtr json, IntPtr user)
+        {
+            try
+            {
+                var sub = Native.Context<JsonSub>(user);
+                if (sub == null) return;
+                var message = new Message(Native.Str(subject), Native.Str(src), Native.Str(json));
+                var handler = sub.Handler;
+                sub.Session.Dispatch(() => handler(message));
+            }
+            catch { }
+        }
+
+        [AOT.MonoPInvokeCallback(typeof(Native.CborCallback))]
+        private static void OnCbor(IntPtr subject, IntPtr src, IntPtr data, UIntPtr len, IntPtr user)
+        {
+            try
+            {
+                var sub = Native.Context<CborSub>(user);
+                if (sub == null) return;
+                ulong total = len.ToUInt64();
+                if (total > int.MaxValue)
+                {
+                    // Reported rather than dropped: a payload this large used to
+                    // vanish with no handler call and nothing logged.
+                    Console.Error.WriteLine(
+                        $"UniNet: a {total}-byte message is larger than a .NET array can hold; dropped");
+                    return;
+                }
+                int n = (int)total;
+                var bytes = new byte[n];
+                if (n > 0) Marshal.Copy(data, bytes, 0, n);
+                string subj = Native.Str(subject), from = Native.Str(src);
+                var handler = sub.Handler;
+                sub.Session.Dispatch(() => handler(subj, from, bytes));
+            }
+            catch { }
         }
 
 
@@ -390,19 +512,9 @@ namespace UniNet
         {
             ThrowIfDisposed();
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            _handlersKeepAlive.Add(handler);
 
-            Native.JsonCallback cb = (subj, src, json, _) =>
-            {
-                try
-                {
-                    var msg = new Message(subj, src, json);
-                    Dispatch(() => handler(msg));
-                }
-                catch { }
-            };
-            _rooted.Add(cb);
-            int rc = Native.uninet_session_subscribe_json(_handle, subject, cb, IntPtr.Zero);
+            int rc = Native.uninet_session_subscribe_json(
+                _handle, subject, JsonThunk, Pin(new JsonSub(this, handler)));
             if (rc != Status.Ok)
                 throw new InvalidOperationException("UniNet subscribe: " + Native.LastError());
         }
@@ -417,21 +529,8 @@ namespace UniNet
             ThrowIfDisposed();
             if (handler == null) throw new ArgumentNullException(nameof(handler));
 
-            Native.CborCallback cb = (subj, src, data, len, _) =>
-            {
-                try
-                {
-                    ulong total = len.ToUInt64();
-                    if (total > int.MaxValue) return;
-                    int n = (int)total;
-                    var bytes = new byte[n];
-                    if (n > 0) Marshal.Copy(data, bytes, 0, n);
-                    Dispatch(() => handler(subj, src, bytes));
-                }
-                catch { }
-            };
-            _rooted.Add(cb);
-            int rc = Native.uninet_session_subscribe_cbor(_handle, subject, cb, IntPtr.Zero);
+            int rc = Native.uninet_session_subscribe_cbor(
+                _handle, subject, CborThunk, Pin(new CborSub(this, handler)));
             if (rc != Status.Ok)
                 throw new InvalidOperationException("UniNet subscribe: " + Native.LastError());
         }
@@ -572,13 +671,14 @@ namespace UniNet
             // reverse order leaves a window where native code holds a pointer to
             // a delegate the GC may already have collected.
             Native.uninet_session_free(handle);
+            // Only now: while the native handle lived, the network thread could
+            // still be inside a thunk holding one of these.
+            FreeContexts();
             // Drop ourselves from the ProcessExit list, which otherwise grew by
             // one entry per session for the life of the process.
             lock (_live) _live.RemoveAll(w => !w.TryGetTarget(out var t) || ReferenceEquals(t, this));
             // Anything still queued refers to a session that no longer exists.
             while (_pending.TryDequeue(out _)) { }
-            _rooted.Clear();
-            _handlersKeepAlive.Clear();
             GC.SuppressFinalize(this);
         }
 

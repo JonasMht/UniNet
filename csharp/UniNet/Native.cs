@@ -12,8 +12,22 @@
 //  2. **Delegates must be rooted.** A delegate handed to native code is not kept
 //     alive by the native pointer holding it. If the GC collects it while
 //     UniNet's network thread still has that pointer, the next message is a hard
-//     crash. Session keeps every delegate in a field for as long as the native
-//     handle lives.
+//     crash. Session keeps every delegate in a static field, so they live for the
+//     process.
+//
+// A third rule governs the callbacks specifically, and it is what makes UniNet
+// work on a Quest, an iPhone or a console:
+//
+//  3. **Callbacks are static, attributed, and take IntPtr.** Under IL2CPP - which
+//     Unity requires for Android and iOS, and which has no JIT - a delegate over
+//     a closure cannot be turned into a function pointer. It compiles, and then
+//     fails on the device with "To marshal a managed method, please add an
+//     attribute named 'MonoPInvokeCallback'". So every callback below is a static
+//     method carrying that attribute, and the per-registration state it needs
+//     travels through the `user` pointer the C ABI already passes: a GCHandle.
+//     Their string parameters are IntPtr rather than marshalled strings, because
+//     reverse-direction string marshalling is the other thing AOT backends
+//     disagree about. Str() converts them by hand.
 using System;
 using System.Runtime.InteropServices;
 
@@ -39,28 +53,19 @@ namespace UniNet
 
         // ── callbacks ──
         // Invoked from UniNet's network thread. See Session for the main-thread
-        // marshalling that makes them safe to use from Unity.
+        // marshalling that makes them safe to use from Unity. Every parameter that
+        // is a C string arrives as IntPtr; see rule 3 at the top of this file.
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        internal delegate void JsonCallback(
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string subject,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUuid,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string json,
-            IntPtr user);
+        internal delegate void JsonCallback(IntPtr subject, IntPtr srcUuid, IntPtr json,
+                                            IntPtr user);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        internal delegate void CborCallback(
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string subject,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUuid,
-            IntPtr data, UIntPtr len, IntPtr user);
+        internal delegate void CborCallback(IntPtr subject, IntPtr srcUuid,
+                                            IntPtr data, UIntPtr len, IntPtr user);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        internal delegate void PeerCallback(
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string uuid,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string address,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string role,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string app,
-            IntPtr user);
+        internal delegate void PeerCallback(IntPtr uuid, IntPtr name, IntPtr address,
+                                            IntPtr role, IntPtr app, IntPtr user);
 
         // ── session ──
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -177,24 +182,16 @@ namespace UniNet
 
         // ── large payloads ──
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        internal delegate void BlobCallback(
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string id,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string src,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string metaJson,
-            IntPtr data, UIntPtr len, IntPtr user);
+        internal delegate void BlobCallback(IntPtr id, IntPtr name, IntPtr src, IntPtr metaJson,
+                                            IntPtr data, UIntPtr len, IntPtr user);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        internal delegate void BlobProgressCallback(
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string id,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
-            UIntPtr done, UIntPtr total, IntPtr user);
+        internal delegate void BlobProgressCallback(IntPtr id, IntPtr name,
+                                                    UIntPtr done, UIntPtr total, IntPtr user);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        internal delegate void BlobFailedCallback(
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string id,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string reason, IntPtr user);
+        internal delegate void BlobFailedCallback(IntPtr id, IntPtr name, IntPtr reason,
+                                                  IntPtr user);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr uninet_blob_new(
@@ -285,8 +282,38 @@ namespace UniNet
 
         // ── helpers ──
         /// <summary>A NUL-terminated UTF-8 pointer from native code, as a string.</summary>
-        internal static string Str(IntPtr p) =>
-            p == IntPtr.Zero ? string.Empty : (Marshal.PtrToStringUTF8(p) ?? string.Empty);
+        /// <remarks>
+        /// Decoded by hand rather than with Marshal.PtrToStringUTF8, which does not
+        /// exist under .NET Standard 2.0 - the default API Compatibility Level on
+        /// many Unity projects. Using it made the binding fail to compile there,
+        /// for no benefit: this is the same work.
+        /// </remarks>
+        internal static string Str(IntPtr p)
+        {
+            if (p == IntPtr.Zero) return string.Empty;
+            int len = 0;
+            while (Marshal.ReadByte(p, len) != 0) ++len;
+            if (len == 0) return string.Empty;
+            var buf = new byte[len];
+            Marshal.Copy(p, buf, 0, len);
+            return System.Text.Encoding.UTF8.GetString(buf);
+        }
+
+        /// <summary>
+        /// The object behind a `user` pointer, or null if it is gone. Every
+        /// callback below starts here: the GCHandle is how per-registration state
+        /// reaches a static thunk.
+        /// </summary>
+        internal static T? Context<T>(IntPtr user) where T : class
+        {
+            if (user == IntPtr.Zero) return null;
+            try
+            {
+                GCHandle h = GCHandle.FromIntPtr(user);
+                return h.IsAllocated ? h.Target as T : null;
+            }
+            catch (InvalidOperationException) { return null; }   // already freed
+        }
 
         /// <summary>Why the last call on this thread failed.</summary>
         internal static string LastError() => Str(uninet_last_error());
@@ -319,3 +346,20 @@ namespace UniNet
         }
     }
 }
+
+#if !UNITY_5_3_OR_NEWER
+// Unity declares this attribute in UnityEngine; its AOT compiler looks for it by
+// name on any method reachable from native code. Outside Unity nothing declares
+// it, so the same sources would not compile for a console app or the test suite.
+// Declaring it here keeps one set of sources building everywhere; inside Unity
+// this block is skipped and Unity's own attribute is used.
+namespace AOT
+{
+    [AttributeUsage(AttributeTargets.Method)]
+    internal sealed class MonoPInvokeCallbackAttribute : Attribute
+    {
+        public MonoPInvokeCallbackAttribute(Type delegateType) { DelegateType = delegateType; }
+        public Type DelegateType { get; }
+    }
+}
+#endif

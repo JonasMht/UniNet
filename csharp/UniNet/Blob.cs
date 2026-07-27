@@ -52,7 +52,7 @@ namespace UniNet
     {
         private IntPtr _handle;
         private readonly Session _session;    // held so it cannot be finalized first
-        private readonly List<Delegate> _rooted = new List<Delegate>();
+        private GCHandle _context;            // this Blob, as seen by the static thunks
 
         /// <summary>A transfer completed. `data` is valid only inside the handler.</summary>
         public event Action<BlobInfo, byte[]>? Received;
@@ -76,62 +76,15 @@ namespace UniNet
             if (_handle == IntPtr.Zero)
                 throw new InvalidOperationException("UniNet: " + Native.LastError());
 
-            Native.BlobCallback received = (id, name, src, meta, data, len, _) =>
-            {
-                // A managed exception must never cross back over a reverse P/Invoke.
-                try
-                {
-                    ulong total = len.ToUInt64();
-                    // A .NET array cannot exceed int.MaxValue. Left to throw
-                    // inside the catch below, a transfer over 2 GiB vanished
-                    // with no Received, no Failed and no log.
-                    if (total > int.MaxValue)
-                    {
-                        var big = new BlobInfo(id, name, src, meta, (long)total);
-                        session.Dispatch(() => Failed?.Invoke(big,
-                            $"the transfer is {total} bytes, larger than a .NET array can hold"));
-                        return;
-                    }
-                    int n = (int)total;
-                    var bytes = new byte[n];
-                    if (n > 0) Marshal.Copy(data, bytes, 0, n);
-                    var info = new BlobInfo(id, name, src, meta, n);
-                    session.Dispatch(() => Received?.Invoke(info, bytes));
-                }
-                catch (Exception e)
-                {
-                    Console.Error.WriteLine("UniNet blob receive failed: " + e);
-                }
-            };
-            Native.BlobProgressCallback progress = (id, name, done, total, _) =>
-            {
-                try
-                {
-                    long d = (long)done.ToUInt64(), t = (long)total.ToUInt64();
-                    var info = new BlobInfo(id, name, string.Empty, "null", t);
-                    session.Dispatch(() => Progress?.Invoke(info, d));
-                }
-                catch { }
-            };
-            Native.BlobFailedCallback failed = (id, name, reason, _) =>
-            {
-                try
-                {
-                    var info = new BlobInfo(id, name, string.Empty, "null", 0);
-                    session.Dispatch(() => Failed?.Invoke(info, reason));
-                }
-                catch { }
-            };
+            // The `user` pointer is this Blob, weakly: the thunks are static, so
+            // there is no other way for them to find it. See Session.Pin and
+            // rule 3 in Native.cs.
+            _context = GCHandle.Alloc(this, GCHandleType.Weak);
+            IntPtr user = GCHandle.ToIntPtr(_context);
 
-            // Rooted for as long as the native handle lives: the GC does not know
-            // native code is holding these function pointers.
-            _rooted.Add(received);
-            _rooted.Add(progress);
-            _rooted.Add(failed);
-
-            Check(Native.uninet_blob_on_received(_handle, received, IntPtr.Zero), "on_received");
-            Check(Native.uninet_blob_on_progress(_handle, progress, IntPtr.Zero), "on_progress");
-            Check(Native.uninet_blob_on_failed(_handle, failed, IntPtr.Zero), "on_failed");
+            Check(Native.uninet_blob_on_received(_handle, ReceivedThunk, user), "on_received");
+            Check(Native.uninet_blob_on_progress(_handle, ProgressThunk, user), "on_progress");
+            Check(Native.uninet_blob_on_failed(_handle, FailedThunk, user), "on_failed");
 
             // The native blob holds a raw C++ reference to the session. Telling
             // the session about it lets Dispose() neutralise this object first;
@@ -148,6 +101,7 @@ namespace UniNet
             catch
             {
                 Native.uninet_blob_free(Interlocked.Exchange(ref _handle, IntPtr.Zero));
+                if (_context.IsAllocated) _context.Free();
                 throw;
             }
         }
@@ -156,6 +110,79 @@ namespace UniNet
         {
             if (rc != Status.Ok)
                 throw new InvalidOperationException($"UniNet blob {what}: {Native.LastError()}");
+        }
+
+        // ── native callbacks ──────────────────────────────────────────────────
+        // Static, attributed and rooted for the process, so IL2CPP can turn them
+        // into function pointers. See rule 3 in Native.cs.
+        private static readonly Native.BlobCallback         ReceivedThunk = OnReceived;
+        private static readonly Native.BlobProgressCallback ProgressThunk = OnProgress;
+        private static readonly Native.BlobFailedCallback   FailedThunk   = OnFailed;
+
+        [AOT.MonoPInvokeCallback(typeof(Native.BlobCallback))]
+        private static void OnReceived(IntPtr idPtr, IntPtr namePtr, IntPtr srcPtr,
+                                       IntPtr metaPtr, IntPtr data, UIntPtr len, IntPtr user)
+        {
+            // A managed exception must never cross back over a reverse P/Invoke.
+            try
+            {
+                var self = Native.Context<Blob>(user);
+                if (self == null) return;
+                string id = Native.Str(idPtr), name = Native.Str(namePtr);
+                string src = Native.Str(srcPtr), meta = Native.Str(metaPtr);
+
+                ulong total = len.ToUInt64();
+                // A .NET array cannot exceed int.MaxValue. Left to throw inside
+                // the catch below, a transfer over 2 GiB vanished with no
+                // Received, no Failed and no log.
+                if (total > int.MaxValue)
+                {
+                    var big = new BlobInfo(id, name, src, meta, (long)total);
+                    self._session.Dispatch(() => self.Failed?.Invoke(big,
+                        $"the transfer is {total} bytes, larger than a .NET array can hold"));
+                    return;
+                }
+                int n = (int)total;
+                var bytes = new byte[n];
+                if (n > 0) Marshal.Copy(data, bytes, 0, n);
+                var info = new BlobInfo(id, name, src, meta, n);
+                self._session.Dispatch(() => self.Received?.Invoke(info, bytes));
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine("UniNet blob receive failed: " + e);
+            }
+        }
+
+        [AOT.MonoPInvokeCallback(typeof(Native.BlobProgressCallback))]
+        private static void OnProgress(IntPtr idPtr, IntPtr namePtr,
+                                       UIntPtr done, UIntPtr total, IntPtr user)
+        {
+            try
+            {
+                var self = Native.Context<Blob>(user);
+                if (self == null) return;
+                long d = (long)done.ToUInt64(), t = (long)total.ToUInt64();
+                var info = new BlobInfo(Native.Str(idPtr), Native.Str(namePtr),
+                                        string.Empty, "null", t);
+                self._session.Dispatch(() => self.Progress?.Invoke(info, d));
+            }
+            catch { }
+        }
+
+        [AOT.MonoPInvokeCallback(typeof(Native.BlobFailedCallback))]
+        private static void OnFailed(IntPtr idPtr, IntPtr namePtr, IntPtr reasonPtr, IntPtr user)
+        {
+            try
+            {
+                var self = Native.Context<Blob>(user);
+                if (self == null) return;
+                var info = new BlobInfo(Native.Str(idPtr), Native.Str(namePtr),
+                                        string.Empty, "null", 0);
+                string reason = Native.Str(reasonPtr);
+                self._session.Dispatch(() => self.Failed?.Invoke(info, reason));
+            }
+            catch { }
         }
 
         /// <summary>
@@ -205,9 +232,9 @@ namespace UniNet
             IntPtr handle = Interlocked.Exchange(ref _handle, IntPtr.Zero);
             if (handle == IntPtr.Zero) return;
             // Free the native handle first: that is what stops the network thread
-            // calling back. Only then may the delegates become collectable.
+            // calling back. Only then may the context handle be released.
             Native.uninet_blob_free(handle);
-            _rooted.Clear();
+            if (_context.IsAllocated) _context.Free();
             _session.Unregister(this);
             GC.SuppressFinalize(this);
         }
