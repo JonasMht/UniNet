@@ -31,9 +31,16 @@ REALM="uninet-demo-$$"
 LOGDIR="$(mktemp -d)"
 PIDS=()
 
-cleanup() {
+# Stopping the devices and throwing away their logs are two different things.
+# They used to be one function, which the main flow called before printing the
+# logs, so the demo deleted its own output and then printed nothing but "cat:
+# No such file or directory" three times.
+stop_devices() {
     for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
+}
+cleanup() {
+    stop_devices
     rm -rf "$LOGDIR"
 }
 trap cleanup EXIT INT TERM
@@ -54,7 +61,7 @@ sleep 1
 start "Laptop"   viewer
 
 sleep "$DURATION"
-cleanup
+stop_devices
 sleep 0.5
 
 for role in server headset viewer; do

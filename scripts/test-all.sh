@@ -71,14 +71,19 @@ else
 fi
 
 stage "Python"
-if PYTHONPATH="$HERE/python" python3 -c 'import uninet' >/dev/null 2>&1; then
+PY_IMPORT_ERR="$(PYTHONPATH="$HERE/python" python3 -c 'import uninet' 2>&1)"
+if [ -z "$PY_IMPORT_ERR" ]; then
     if PYTHONPATH="$HERE/python" python3 -m pytest python/tests -q 2>&1 | tail -3; then
         pass "pytest"
     else
         fail "pytest"
     fi
 else
-    skip "pytest" "the uninet module is not built (configure with -DUNINET_BUILD_PYTHON=ON)"
+    # The reason, not a guess at it. This used to claim the module was not
+    # built even when it was there but unloadable, which sent the reader to
+    # re-run a configure that was already correct.
+    echo "$PY_IMPORT_ERR" | tail -3
+    skip "pytest" "the uninet module could not be imported (see above)"
 fi
 
 stage "cross-language interop"
@@ -107,7 +112,14 @@ if [ "$USE_SAN" -eq 1 ]; then
     # synchronisation it could not observe. Built from source under TSan, the
     # same run reports zero.
     SAN_TSAN="$HERE/build-tsan"
+    # UNINET_BUILD_PYTHON=OFF is load-bearing, not tidiness. The extension's
+    # output directory is python/uninet/ in the SOURCE tree, so every build
+    # configuration writes the same file. A sanitizer build therefore replaces
+    # the importable module with an instrumented one that a plain interpreter
+    # refuses to load ("ASan runtime does not come first"), and the Python stage
+    # of a later run silently reports the module as not built.
     if cmake -S . -B "$SAN_TSAN" -DCMAKE_BUILD_TYPE=Debug -DUNINET_SYSTEM_ZYRE=OFF \
+            -DUNINET_BUILD_PYTHON=OFF \
             -DCMAKE_C_FLAGS="-fsanitize=thread -g -O1" \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" >/dev/null 2>&1 \
@@ -152,7 +164,7 @@ if [ "$USE_SAN" -eq 1 ]; then
     # stage may or may not instrument the dependencies depending on what someone
     # last did here, and the result changes with it.
     if cmake -S . -B "$SAN_ASAN" -DCMAKE_BUILD_TYPE=Debug -DUNINET_BUILD_CABI=ON \
-            -DUNINET_SYSTEM_ZYRE=ON \
+            -DUNINET_SYSTEM_ZYRE=ON -DUNINET_BUILD_PYTHON=OFF \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" >/dev/null 2>&1 \
        && cmake --build "$SAN_ASAN" -j"$(nproc 2>/dev/null || echo 4)" >/dev/null 2>&1; then
