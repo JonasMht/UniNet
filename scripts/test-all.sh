@@ -157,9 +157,22 @@ if [ "$USE_DOCKER" -eq 1 ]; then
     else
         # The host resolver is often 127.0.0.53 (systemd-resolved), which a
         # container cannot reach; --network host sidesteps it for the build.
+        # Build and run are reported separately on purpose. Folded into one
+        # `docker build ... && docker run ...` with the build output discarded,
+        # a broken base image or an apt mirror having a bad day reads as "the
+        # tests failed", and the actual reason is nowhere on screen.
+        docker_image() {   # docker_image <tag> <dockerfile>
+            local out
+            if ! out="$(docker build --network host -f "$2" -t "$1" . 2>&1)"; then
+                echo "could not build the $1 image:"
+                tail -15 <<<"$out"
+                return 1
+            fi
+            return 0
+        }
+
         stage "Linux container (Zyre from source, C++/Python/C#)"
-        if docker build --network host -f tests/docker/Dockerfile.linux \
-                -t uninet-test . >/dev/null 2>&1 \
+        if docker_image uninet-test tests/docker/Dockerfile.linux \
            && docker run --rm --network host -v "$PWD":/src:ro uninet-test 2>&1 | tail -25; then
             pass "linux container"
         else
@@ -167,8 +180,7 @@ if [ "$USE_DOCKER" -eq 1 ]; then
         fi
 
         stage "Windows compile check (MinGW)"
-        if docker build --network host -f tests/docker/Dockerfile.windows-check \
-                -t uninet-wincheck . >/dev/null 2>&1 \
+        if docker_image uninet-wincheck tests/docker/Dockerfile.windows-check \
            && docker run --rm -v "$PWD":/src:ro uninet-wincheck 2>&1 | tail -16; then
             pass "windows compile"
         else
@@ -179,8 +191,7 @@ if [ "$USE_DOCKER" -eq 1 ]; then
         # Runs the real .exe files. Covers the codec, JSON and C ABI on Windows;
         # discovery stops at a Wine limitation, which the runner treats as an
         # expected stop rather than a pass. See the Dockerfile for why.
-        if docker build --network host -f tests/docker/Dockerfile.windows-run \
-                -t uninet-winrun . >/dev/null 2>&1 \
+        if docker_image uninet-winrun tests/docker/Dockerfile.windows-run \
            && docker run --rm --network host -v "$PWD":/src:ro uninet-winrun 2>&1 | tail -20; then
             pass "windows runtime (network layer not covered: needs real Windows)"
         else

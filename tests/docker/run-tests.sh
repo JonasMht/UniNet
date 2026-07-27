@@ -52,16 +52,22 @@ echo
 # build had already put the file. So: install it, then import it from a
 # directory where the source tree cannot possibly shadow it.
 echo "=== pip wheel, imported from outside the source tree ==="
-if python3 -m venv /tmp/wheelenv >/dev/null 2>&1 && \
-   /tmp/wheelenv/bin/pip install -q . >/dev/null 2>&1; then
+# Output kept, not discarded. Hiding it here cost a debugging round: the venv
+# step failed because the image lacked python3-venv, and all the suite could
+# say was "WHEEL BUILD FAILED".
+WHEEL_LOG=/tmp/wheel-build.log
+if python3 -m venv /tmp/wheelenv > "$WHEEL_LOG" 2>&1 && \
+   /tmp/wheelenv/bin/pip install . >> "$WHEEL_LOG" 2>&1; then
     if (cd /tmp && env -u PYTHONPATH /tmp/wheelenv/bin/python -c "
 import uninet, os
 from uninet import _uninet
 assert 'site-packages' in uninet.__file__, uninet.__file__
 print('wheel OK:', uninet.__version__, os.path.basename(_uninet.__file__))
-"); then :; else echo "WHEEL FAILED"; FAILED=1; fi
+"); then :; else echo "WHEEL IMPORT FAILED"; FAILED=1; fi
 else
-    echo "WHEEL BUILD FAILED"; FAILED=1
+    echo "WHEEL BUILD FAILED:"
+    tail -25 "$WHEEL_LOG"
+    FAILED=1
 fi
 echo
 

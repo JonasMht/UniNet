@@ -21,9 +21,13 @@
 #     fails with an undefined symbol naming czmq rather than the missing
 #     library. UniNet's CMakeLists links it whenever ANDROID is set.
 #
-#  3. **LZ4 is off.** liblz4 is not part of the NDK, so the build uses zlib,
-#     which is. Messages stay fully interoperable: the compression tier is
-#     negotiated per message, so a zlib-only peer talks to an LZ4 peer.
+#  3. **LZ4 is built from source, and must be.** liblz4 is not part of the NDK.
+#     Leaving it out looks harmless and is not: the compression tier is chosen
+#     by the SENDER and travels on the wire, so a device without LZ4 silently
+#     discards every message from a desktop peer that has it. Discovery still
+#     works, presence still works, the device can still send, and only the
+#     inbound payloads vanish, with no error at either end. UniNet's CMake
+#     fetches liblz4 when the system has none, so nothing extra is needed here.
 set -euo pipefail
 
 ABI="${2:-arm64-v8a}"
@@ -118,7 +122,7 @@ done
 
 echo "building UniNet..."
 cmake -S "$HERE" -B "$HERE/build-android" "${COMMON[@]}" \
-      -DUNINET_BUILD_CABI=ON -DUNINET_LZ4=OFF \
+      -DUNINET_BUILD_CABI=ON \
       -DZLIB_LIBRARY="$PREFIX/lib/libz.a" -DZLIB_INCLUDE_DIR="$PREFIX/include" >/dev/null
 cmake --build "$HERE/build-android" -j"$(nproc)" --target uninet_c
 
@@ -128,6 +132,18 @@ file "$OUT"
 READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
 echo "depends on:"
 "$READELF" -d "$OUT" | sed -n 's/.*Shared library: \[\(.*\)\]/  \1/p'
+
+# Asserted, not assumed: see note 3. A build that quietly loses LZ4 still links,
+# still passes every on-device test, still discovers peers, and then drops every
+# message a desktop peer sends it. Catch it here instead.
+NM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+if [ "$("$NM" "$OUT" 2>/dev/null | grep -c 'LZ4F_')" -eq 0 ]; then
+    echo
+    echo "FAILED: this build has no LZ4 support." >&2
+    echo "It would silently discard every message from a peer that has it." >&2
+    exit 1
+fi
+echo "  LZ4 tier: present (can decode frames from any other UniNet build)"
 echo
 echo "Copy it into your Unity project:"
 echo "  cp $OUT <UnityProject>/Assets/Plugins/Android/libs/$ABI/"
