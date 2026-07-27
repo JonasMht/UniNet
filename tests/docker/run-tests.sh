@@ -33,7 +33,7 @@ echo "build OK (${WARNINGS} warnings)"
 echo
 
 echo "=== ctest (C++ core, network, C ABI) ==="
-ctest --test-dir build -L uninet --output-on-failure 2>&1 | tail -12 || FAILED=1
+ctest --test-dir build -L uninet --no-tests=error --output-on-failure 2>&1 | tail -12 || FAILED=1
 echo
 
 echo "=== python ==="

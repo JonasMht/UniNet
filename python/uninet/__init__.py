@@ -14,7 +14,7 @@ no server to run, no IP address for anyone to type::
 
 A dict goes in and a dict comes out. The same dict published from Python arrives
 as the same object in C++ and the same JSON in C#, because all three share one
-CBOR codec (see ``docs/PROTOCOL).md``.
+CBOR codec (see ``docs/PROTOCOL.md``).
 """
 from __future__ import annotations
 

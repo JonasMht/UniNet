@@ -22,6 +22,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace UniNet
 {
@@ -136,7 +137,19 @@ namespace UniNet
             // the session about it lets Dispose() neutralise this object first;
             // otherwise a session disposed before its blob left that reference
             // dangling and the next Send() segfaulted with no exception.
-            session.Register(this);
+            // Must come after the native blob exists, and must fail if the
+            // session is already disposing: otherwise the registration lands
+            // after DisposeBlobs has run and the native Blob keeps a reference
+            // to a freed Session.
+            try
+            {
+                session.Register(this);
+            }
+            catch
+            {
+                Native.uninet_blob_free(Interlocked.Exchange(ref _handle, IntPtr.Zero));
+                throw;
+            }
         }
 
         private static void Check(int rc, string what)
@@ -185,13 +198,17 @@ namespace UniNet
 
         public void Dispose()
         {
-            if (_handle == IntPtr.Zero) return;
-            IntPtr handle = _handle;
-            _handle = IntPtr.Zero;
+            // Interlocked, not read-test-clear: two threads could both see a
+            // non-zero handle and both free it. The realistic trigger is the
+            // finalizer racing Session.DisposeBlobs, which resurrects a
+            // finalizable Blob through its weak reference.
+            IntPtr handle = Interlocked.Exchange(ref _handle, IntPtr.Zero);
+            if (handle == IntPtr.Zero) return;
             // Free the native handle first: that is what stops the network thread
             // calling back. Only then may the delegates become collectable.
             Native.uninet_blob_free(handle);
             _rooted.Clear();
+            _session.Unregister(this);
             GC.SuppressFinalize(this);
         }
 

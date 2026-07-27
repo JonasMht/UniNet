@@ -9,7 +9,7 @@
 # its own quirks that say nothing about UniNet. Only their headers are needed to
 # compile against, and those are copied in from the build host.
 #
-# A real MSVC build with vcpkg runs in CI (see .gitlab-ci.yml.
+# A real MSVC build with vcpkg runs in CI (see .gitlab-ci.yml).
 #
 #   docker build -f tests/docker/Dockerfile.windows-check -t uninet-wincheck .
 #   docker run --rm -v "$PWD":/src:ro uninet-wincheck

@@ -97,6 +97,10 @@ Dot-separated, with a trailing `>` wildcard for subscriptions:
 | `domain.>` | matches `domain.D1`, `domain.D2.feed`, ... (one or more trailing tokens) |
 | `>` | matches everything |
 
+**`uninet.*` is reserved.** The library uses it for its own traffic
+(`uninet.blob.<subject>` today). An application subscribing to `uninet.>` or to
+`>` will receive those frames; nothing else collides.
+
 `>` is the **only** wildcard. There is no `*`; a pattern containing one matches
 nothing, rather than silently behaving differently from a subscriber's
 expectation.

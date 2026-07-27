@@ -137,7 +137,11 @@ Cbor py_to_cbor(const py::handle& obj, int depth) {
                 expected *= info.shape[d];
             }
         }
-        if (contiguous && info.size > 0) {
+        // ndim <= 1 only. A contiguous 2-D array took the fast path and was
+        // FLATTENED, losing its shape, while the same array in Fortran order
+        // fell through to tolist() and kept its nesting: one logical value with
+        // two different wire shapes depending on memory order.
+        if (contiguous && info.size > 0 && info.ndim <= 1) {
             const size_t n = size_t(info.size);
             if (info.format == py::format_descriptor<float>::format())
                 return Cbor::f32_array(static_cast<const float*>(info.ptr), n);
@@ -325,11 +329,33 @@ PYBIND11_MODULE(_uninet, m) {
             return c.as_text();
         })
         .def("as_bytes", [](const Cbor& c) {
+            if (!c.is_bytes()) throw py::type_error("uninet: this value is not bytes");
             const Bytes& b = c.as_bytes();
             return py::bytes(reinterpret_cast<const char*>(b.data()), b.size());
         })
-        .def("f32_items", &Cbor::f32_items)
-        .def("f64_items", &Cbor::f64_items)
+        // Both accept either float-array kind and convert. f32_items() on a
+        // value that really was a float array returned [] whenever the decoder
+        // had chosen F64, which it does for most wire data.
+        .def("f32_items", [](const Cbor& c) {
+            std::vector<float> out;
+            if (c.kind() == Cbor::Kind::F32Array) return c.f32_items();
+            if (c.kind() == Cbor::Kind::F64Array) {
+                out.reserve(c.f64_items().size());
+                for (double d : c.f64_items()) out.push_back(float(d));
+                return out;
+            }
+            throw py::type_error("uninet: this value is not a float array");
+        })
+        .def("f64_items", [](const Cbor& c) {
+            std::vector<double> out;
+            if (c.kind() == Cbor::Kind::F64Array) return c.f64_items();
+            if (c.kind() == Cbor::Kind::F32Array) {
+                out.reserve(c.f32_items().size());
+                for (float f : c.f32_items()) out.push_back(double(f));
+                return out;
+            }
+            throw py::type_error("uninet: this value is not a float array");
+        })
         .def("has", &Cbor::has)
         // Both refuse a mismatched kind. push_back() on a non-array left kind_
         // alone, so the elements were accepted and then silently vanished at
@@ -386,10 +412,18 @@ PYBIND11_MODULE(_uninet, m) {
             return out;
         }, "(key, Cbor) pairs, in insertion order.")
         .def("values", [](const Cbor& c) {
+            // F32Array/F64Array are what the decoder produces for ANY all-float
+            // wire array, so testing is_array() alone made a genuinely received
+            // float array non-iterable while len() and [i] both worked on it.
             py::list out;
-            if (c.is_map())        for (const auto& kv : c.map_items()) out.append(kv.second);
-            else if (c.is_array()) for (const auto& v : c.array_items()) out.append(v);
-            else throw py::type_error("uninet: this value is not a map or array");
+            if (c.is_map()) {
+                for (const auto& kv : c.map_items()) out.append(kv.second);
+            } else if (c.is_array() || c.kind() == Cbor::Kind::F32Array ||
+                       c.kind() == Cbor::Kind::F64Array) {
+                for (size_t i = 0; i < c.size(); ++i) out.append(c[i]);
+            } else {
+                throw py::type_error("uninet: this value is not a map or array");
+            }
             return out;
         }, "Values of a map, or elements of an array, without converting them.")
         .def("__iter__", [](const Cbor& c) {
@@ -397,9 +431,14 @@ PYBIND11_MODULE(_uninet, m) {
             // elements. Without this, inspecting a Cbor meant converting the
             // whole thing with to_value() and losing the Cbor layer.
             py::list out;
-            if (c.is_map())        for (const auto& kv : c.map_items()) out.append(py::str(kv.first));
-            else if (c.is_array()) for (const auto& v : c.array_items()) out.append(v);
-            else throw py::type_error("uninet: this value is not iterable");
+            if (c.is_map()) {
+                for (const auto& kv : c.map_items()) out.append(py::str(kv.first));
+            } else if (c.is_array() || c.kind() == Cbor::Kind::F32Array ||
+                       c.kind() == Cbor::Kind::F64Array) {
+                for (size_t i = 0; i < c.size(); ++i) out.append(c[i]);
+            } else {
+                throw py::type_error("uninet: this value is not iterable");
+            }
             return py::iter(out);
         })
         .def("__repr__", [](const Cbor& c) { return "<uninet.Cbor " + to_json(c) + ">"; });

@@ -168,6 +168,13 @@ int main(void) {
               "join without a name is refused");
     }
 
+    /* A marker the Windows/Wine runner requires before it will accept a stop
+     * at the network boundary. Without it, a regression that reached the stop
+     * on the FIRST call would skip every assertion above and still report a
+     * clean pass. */
+    printf("PRE-NETWORK OK\n");
+    fflush(stdout);
+
     /* ── two sessions, no address configured anywhere ── */
     printf("discovery and messaging\n");
     {

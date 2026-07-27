@@ -102,7 +102,7 @@ nothing to install on a server, because there is no server.
 | **Three languages** | C++, Python, C#, one data model, identical bytes on the wire. |
 | **Presence** | Know who is on the network, and when someone joins or leaves. |
 | **JSON or CBOR** | Write JSON, send compact binary, read JSON. Your choice per call. |
-| **Fast** | 18k messages/s at 60 KB each; 2.3 GB/s at 240 KB. |
+| **Fast** | 18k messages/s at 60 KB each, same-host loopback (see [Performance](#performance)). |
 
 ---
 
@@ -149,7 +149,7 @@ To force a source build of everything, pass `-DUNINET_SYSTEM_ZYRE=OFF`.
 git clone <this repo> && cd UniNet
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUNINET_BUILD_CABI=ON
 cmake --build build -j
-ctest --test-dir build -L uninet --output-on-failure
+ctest --test-dir build -L uninet --no-tests=error --output-on-failure
 ```
 
 That produces:
@@ -224,12 +224,11 @@ add_subdirectory(UniNet)
 target_link_libraries(your_app PRIVATE uninet)
 ```
 
-Or, after `cmake --install`:
-
-```cmake
-find_package(UniNet REQUIRED)
-target_link_libraries(your_app PRIVATE uninet)
-```
+`add_subdirectory` is the supported route. There is deliberately no
+`find_package(UniNet)`: the library links publicly against either a
+pkg-config-imported Zyre or a Zyre built from source in your tree, and neither
+survives a CMake export set, so a config file would work in one case and fail
+confusingly in the other.
 
 **Configuration**, when you need it: the defaults are right for a single
 network:
@@ -504,6 +503,12 @@ never changes what you see.
 > **`address` is the address the connection actually came from**, not one the
 > peer claims. A device's own idea of its address is wrong behind NAT and
 > forgeable everywhere.
+
+---
+
+> **`uninet.*` is reserved** for the library's own traffic (large transfers use
+> `uninet.blob.<subject>`). Subscribing to `uninet.>` or to `>` will deliver
+> those internal frames to your handler.
 
 ---
 
@@ -838,13 +843,17 @@ decompress → decode → dispatch:
 
 **Cold-start discovery: 2 ms** for two processes on one machine.
 
-> **On a real network, expect discovery to take about a second**, not two
-> milliseconds. ZRE's beacon interval and the Wi-Fi association dominate, and the
-> 2 ms figure only reflects a same-host loopback. Treat ~1 s as the number to
-> design around, and the 2 ms as a floor.
+> **These are same-host loopback figures.** Both sessions run on one machine, so
+> what is measured is the protocol's own cost, not a network. A 1 GbE link caps
+> at roughly 118 MB/s and Wi-Fi well below that, so the MB/s column is a ceiling
+> on the software, not a rate you will see between two machines.
+>
+> **Expect discovery to take about a second on a real network**, not two
+> milliseconds. ZRE's beacon interval and the Wi-Fi association dominate. Treat
+> ~1 s as the number to design around and the 2 ms as a floor.
 
 Codec-level numbers (encode/compress/frame in isolation) come from the separate
-`benchmark` target and are logged to `uninet_bench_log.csv`.
+`uninet-benchmark-codec` target and are logged to `uninet_bench_log.csv`.
 
 **What this means in practice:** the MR peer streams at ~20 Hz. UniNet sustains
 roughly 900× that rate at the same payload size, so the protocol layer is not
@@ -881,9 +890,9 @@ include/uninet/   session.h  ← start here
 src/              one .cpp per header
 python/           bindings.cpp (pybind11) · uninet/ (package) · tests/
 csharp/           UniNet/ (Session.cs, Native.cs) · UniNetDemo/
-examples/         demo.cpp · file_transfer.cpp · python/ (see examples/README).md
+examples/         demo.cpp · file_transfer.cpp · python/ (see examples/README.md)
 tests/            test_roundtrip (codec) · test_network · test_cabi (C)
-                  benchmark (codec) · benchmark_network (end-to-end)
+                  benchmark_codec.cpp (codec) · benchmark_network.cpp (end-to-end)
                   interop/: the three-language interop participants
                   docker/ : Linux and Windows-cross test images
 tools/            uninet_discover.cpp
@@ -923,7 +932,7 @@ is MIT.
 Or run a suite directly:
 
 ```bash
-ctest --test-dir build -L uninet --output-on-failure   # C++ core, network, C ABI
+ctest --test-dir build -L uninet --no-tests=error --output-on-failure   # C++ core, network, C ABI
 PYTHONPATH=python pytest python/tests -v       # Python
 ./scripts/test-interop.sh                      # C++ <-> Python <-> C#
 ```

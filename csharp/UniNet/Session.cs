@@ -114,23 +114,48 @@ namespace UniNet
         // no managed exception, so the session neutralises its blobs on the way
         // out. Weak, so a dropped Blob is still collectable.
         private readonly List<WeakReference<Blob>> _blobs = new List<WeakReference<Blob>>();
+        private bool _blobsClosed;
 
         internal void Register(Blob blob)
         {
-            lock (_blobs) _blobs.Add(new WeakReference<Blob>(blob));
+            lock (_blobs)
+            {
+                // Refuse once teardown has begun. Registering after DisposeBlobs
+                // has run left the native Blob holding a reference to a Session
+                // that was about to be freed.
+                if (_blobsClosed)
+                    throw new ObjectDisposedException(nameof(Session),
+                        "the session is closing; a Blob cannot be created on it");
+                // Compact dead entries so a create/dispose loop does not grow
+                // this list forever.
+                _blobs.RemoveAll(w => !w.TryGetTarget(out _));
+                _blobs.Add(new WeakReference<Blob>(blob));
+            }
+        }
+
+        internal void Unregister(Blob blob)
+        {
+            // Never blocks on the blob itself: DisposeBlobs calls Dispose with
+            // the list already detached, so this cannot re-enter that walk.
+            lock (_blobs) _blobs.RemoveAll(w => !w.TryGetTarget(out var t) || ReferenceEquals(t, blob));
         }
 
         private void DisposeBlobs()
         {
+            List<WeakReference<Blob>> snapshot;
             lock (_blobs)
             {
-                foreach (var weak in _blobs)
-                    if (weak.TryGetTarget(out var b))
-                    {
-                        try { b.Dispose(); } catch { }
-                    }
+                _blobsClosed = true;
+                snapshot = new List<WeakReference<Blob>>(_blobs);
                 _blobs.Clear();
             }
+            // Disposed outside the lock: Blob.Dispose calls Unregister, which
+            // takes the same lock.
+            foreach (var weak in snapshot)
+                if (weak.TryGetTarget(out var b))
+                {
+                    try { b.Dispose(); } catch { }
+                }
         }
 
         /// <summary>A device appeared. Also fires for devices already present.</summary>
@@ -168,7 +193,11 @@ namespace UniNet
         {
             _handle = handle;
             _marshalToCaller = marshalToCaller;
-            lock (_live) _live.Add(new WeakReference<Session>(this));
+            lock (_live)
+            {
+                _live.RemoveAll(w => !w.TryGetTarget(out _));
+                _live.Add(new WeakReference<Session>(this));
+            }
         }
 
         /// <summary>
@@ -191,6 +220,10 @@ namespace UniNet
         /// <param name="endpoint">This node's own data endpoint, in gossip mode.</param>
         /// <param name="advertisedEndpoint">What to tell peers this node's
         /// endpoint is, when that differs from what it binds (a forwarded port).</param>
+        /// <param name="headers">Extra key/value advertised to every peer, readable
+        /// through <see cref="Peer.Header"/>.</param>
+        /// <param name="compression">Wire compression: 0 none, 1 zlib, 2 LZ4.
+        /// -1 keeps the build's default, which is the fastest tier available.</param>
         public static Session Join(string name,
                                    string role = "",
                                    string app = "",
@@ -201,15 +234,50 @@ namespace UniNet
                                    string gossipBind = "",
                                    string gossipConnect = "",
                                    string endpoint = "",
-                                   string advertisedEndpoint = "")
+                                   string advertisedEndpoint = "",
+                                   IReadOnlyDictionary<string, string>? headers = null,
+                                   int compression = -1)
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException("a device name is required", nameof(name));
 
-            IntPtr handle = Native.uninet_session_join_ex(
-                name, role ?? "", app ?? "", realm ?? "uninet", iface ?? "", port,
-                gossipBind ?? "", gossipConnect ?? "", endpoint ?? "",
-                advertisedEndpoint ?? "");
+            IntPtr handle;
+            if (headers != null || compression >= 0)
+            {
+                // The config-handle path, which is the only way to reach headers
+                // and compression. join_ex cannot express either.
+                IntPtr cfg = Native.uninet_config_new();
+                if (cfg == IntPtr.Zero)
+                    throw new InvalidOperationException("UniNet: " + Native.LastError());
+                try
+                {
+                    Native.uninet_config_set_role(cfg, role ?? "");
+                    Native.uninet_config_set_app(cfg, app ?? "");
+                    Native.uninet_config_set_realm(cfg, realm ?? "uninet");
+                    Native.uninet_config_set_interface(cfg, iface ?? "");
+                    if (port > 0) Native.uninet_config_set_port(cfg, port);
+                    Native.uninet_config_set_gossip(cfg, gossipBind ?? "", gossipConnect ?? "",
+                                                    endpoint ?? "", advertisedEndpoint ?? "");
+                    if (headers != null)
+                        foreach (var kv in headers)
+                            if (Native.uninet_config_set_header(cfg, kv.Key, kv.Value) != Status.Ok)
+                                throw new InvalidOperationException(
+                                    "UniNet header '" + kv.Key + "': " + Native.LastError());
+                    if (compression >= 0 &&
+                        Native.uninet_config_set_compression(cfg, compression) != Status.Ok)
+                        throw new ArgumentOutOfRangeException(
+                            nameof(compression), "UniNet: " + Native.LastError());
+                    handle = Native.uninet_session_join_cfg(name, cfg);
+                }
+                finally { Native.uninet_config_free(cfg); }
+            }
+            else
+            {
+                handle = Native.uninet_session_join_ex(
+                    name, role ?? "", app ?? "", realm ?? "uninet", iface ?? "", port,
+                    gossipBind ?? "", gossipConnect ?? "", endpoint ?? "",
+                    advertisedEndpoint ?? "");
+            }
             if (handle == IntPtr.Zero)
                 throw new InvalidOperationException("UniNet: " + Native.LastError());
 
@@ -491,9 +559,10 @@ namespace UniNet
         /// </summary>
         public void Dispose()
         {
-            if (_handle == IntPtr.Zero) return;
-            IntPtr handle = _handle;
-            _handle = IntPtr.Zero;
+            // Interlocked, not read-test-clear: two threads could both see a
+            // non-zero handle and both call uninet_session_free on it.
+            IntPtr handle = Interlocked.Exchange(ref _handle, IntPtr.Zero);
+            if (handle == IntPtr.Zero) return;
 
             // Blobs first: each holds a raw C++ reference to this session, so
             // freeing the session under them is a dangling pointer.
@@ -503,6 +572,9 @@ namespace UniNet
             // reverse order leaves a window where native code holds a pointer to
             // a delegate the GC may already have collected.
             Native.uninet_session_free(handle);
+            // Drop ourselves from the ProcessExit list, which otherwise grew by
+            // one entry per session for the life of the process.
+            lock (_live) _live.RemoveAll(w => !w.TryGetTarget(out var t) || ReferenceEquals(t, this));
             // Anything still queued refers to a session that no longer exists.
             while (_pending.TryDequeue(out _)) { }
             _rooted.Clear();

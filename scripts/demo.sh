@@ -34,6 +34,7 @@ PIDS=()
 cleanup() {
     for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
+    rm -rf "$LOGDIR"
 }
 trap cleanup EXIT INT TERM
 

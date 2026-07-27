@@ -12,6 +12,25 @@
 #   UNINET_NO_PYTHON=1   never build the Python extension
 set -euo pipefail
 
+usage() {
+    cat <<'USAGE'
+bootstrap.sh: install prerequisites, build UniNet, run the tests.
+
+  ./scripts/bootstrap.sh              C++ library, C ABI, tests
+  ./scripts/bootstrap.sh --python     also build the Python extension
+  ./scripts/bootstrap.sh --help       this message
+
+Zyre is not packaged by Ubuntu, Debian or Fedora, so CMake fetches and builds it
+on the first configure. Nothing else is needed from you.
+USAGE
+}
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) usage; exit 0 ;;
+    esac
+done
+
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
@@ -61,14 +80,20 @@ fi
 
 # ── 3. configure + build ────────────────────────────────────────────────────
 say "Configuring (Release, C ABI on)"
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUNINET_BUILD_CABI=ON "${CMAKE_EXTRA[@]}"
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUNINET_BUILD_CABI=ON "${CMAKE_EXTRA[@]:-}"
 
 say "Building"
 cmake --build build -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
 
 # ── 4. test ──────────────────────────────────────────────────────────────────
 say "Running tests"
-ctest --test-dir build --output-on-failure
+ctest --test-dir build -L uninet --no-tests=error --output-on-failure
 
-ok "Done. C++ lib + C ABI are in build/. Try: ./build/benchmark 4096 300"
-[[ "$BUILD_PYTHON" == "1" ]] && ok "Python: PYTHONPATH=python python3 -c 'import uninet; print(uninet.__version__)'"
+ok "Done. C++ lib + C ABI are in build/. Try: ./build/uninet-benchmark 300"
+if [[ "$BUILD_PYTHON" == "1" ]]; then
+  ok "Python: PYTHONPATH=python python3 -c 'import uninet; print(uninet.__version__)'"
+fi
+# An `&&` list as the last command returns 1 when the test is false, so a
+# perfectly successful default run (BUILD_PYTHON=0) exited non-zero and any
+# wrapper or CI step read it as a failure.
+exit 0
