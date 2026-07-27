@@ -30,8 +30,16 @@ public:
     Node(std::string name, std::string uuid, Transport* transport,
          Compression compress = DEFAULT_COMPRESSION);
 
-    const std::string& uuid() const { return uuid_; }
+    std::string uuid() const;
     const std::string& name() const { return name_; }
+
+    // Adopt a new identity, after the transport rebuilt itself on another
+    // network. ZRE mints a fresh uuid every time its node is created, and this
+    // one is what outgoing messages carry and what incoming `dst` is matched
+    // against: leaving it stale makes every addressed message to this device be
+    // dropped, silently, while broadcasts keep working. Session wires this to
+    // ZyreTransport::on_reconnected.
+    void set_uuid(std::string uuid);
     Transport* transport() const { return transport_; }
 
     bool connect();
@@ -56,6 +64,10 @@ public:
 
 private:
     std::string name_;
+    // Written by a reconnect on the network thread, read by publish() on any
+    // caller thread, so it is guarded. The lock is uncontended and costs far
+    // less than the framing and compression that follow it.
+    mutable std::mutex uuid_mu_;
     std::string uuid_;
     Transport* transport_;
     Compression compress_;

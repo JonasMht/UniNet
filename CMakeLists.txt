@@ -285,6 +285,20 @@ add_test(NAME network COMMAND test_network)
 # loaded CI box before calling it a failure.
 set_tests_properties(network PROPERTIES TIMEOUT 90 LABELS uninet)
 
+# Surviving a network change: Wi-Fi dropping, a phone tethered, a cable pulled.
+# Driven through a wrapper because it creates and destroys interfaces, which it
+# does inside a private network namespace so it needs no root and cannot touch
+# the machine's real networking. Where namespaces are unavailable both the
+# wrapper and the test skip, rather than failing for the wrong reason.
+add_executable(test_reconnect tests/test_reconnect.cpp)
+target_link_libraries(test_reconnect PRIVATE uninet uninet_warnings)
+if(UNIX AND NOT APPLE)
+    add_test(NAME reconnect
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test-reconnect.sh
+                     $<TARGET_FILE:test_reconnect>)
+    set_tests_properties(reconnect PROPERTIES TIMEOUT 120 LABELS uninet)
+endif()
+
 # ── Benchmarks ──
 # Two, with names that say which is which: the codec in isolation, and what a
 # user actually experiences (two real nodes over the network).

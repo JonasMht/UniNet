@@ -40,6 +40,14 @@ void Session::close() {
         node = std::move(impl_->node);
         transport = std::move(impl_->transport);
     }
+    // Stop the network before EITHER is destroyed.
+    //
+    // The transport's reconnect callback holds a raw Node*, and locals are
+    // destroyed in reverse order of declaration: `node` above is declared last,
+    // so it dies FIRST, while the transport's watchdog thread is still running
+    // and still able to fire that callback. Disconnecting here joins the
+    // watchdog and the actor, so nothing can call into the Node afterwards.
+    if (transport) transport->disconnect();
 }
 
 bool Session::open() const {
@@ -59,6 +67,8 @@ std::unique_ptr<Session> Session::join(const std::string& name, SessionConfig cf
     zcfg.gossip_connect       = cfg.gossip_connect;
     zcfg.endpoint             = cfg.endpoint;
     zcfg.advertised_endpoint  = cfg.advertised_endpoint;
+    zcfg.auto_reconnect       = cfg.auto_reconnect;
+    zcfg.reconnect_poll_ms    = cfg.reconnect_poll_ms;
     zcfg.headers   = cfg.headers;
     // Role and app ride the discovery beacon, so a peer list is complete the
     // moment a device appears, no follow-up query to ask what it is.
@@ -79,6 +89,19 @@ std::unique_ptr<Session> Session::join(const std::string& name, SessionConfig cf
     s->impl_->node = std::make_unique<Node>(name, s->impl_->transport->uuid(),
                                             s->impl_->transport.get(), cfg.compression);
     s->impl_->node->connect();
+
+    // A network change rebuilds the ZRE node, and ZRE mints a new identity every
+    // time. The Node has to adopt it: outgoing messages carry that uuid and
+    // incoming `dst` is matched against it, so a stale one means every addressed
+    // message to this device is dropped while broadcasts still arrive - a
+    // half-working session that reports itself healthy.
+    //
+    // Raw pointers are safe only because Session::close() disconnects the
+    // transport before releasing either object, which joins the thread this
+    // fires on. See the note there; without it this is a use-after-free.
+    Node* node = s->impl_->node.get();
+    ZyreTransport* transport = s->impl_->transport.get();
+    transport->on_reconnected([node, transport] { node->set_uuid(transport->uuid()); });
     return s;
 }
 
@@ -120,10 +143,9 @@ bool Session::connected() const {
     return impl_->transport && impl_->transport->connected();
 }
 const std::string& Session::name() const { return impl_->name; }
-const std::string& Session::uuid() const {
+std::string Session::uuid() const {
     std::shared_lock<std::shared_timed_mutex> lk(impl_->mu);
-    static const std::string kNone;
-    return impl_->transport ? impl_->transport->uuid() : kNone;
+    return impl_->transport ? impl_->transport->uuid() : std::string();
 }
 
 Node& Session::node() {

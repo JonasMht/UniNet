@@ -49,6 +49,17 @@ struct SessionConfig {
 
     Compression compression = DEFAULT_COMPRESSION;
 
+    // Follow the machine's networks: rebuild when the one in use goes away or a
+    // better one appears. Wi-Fi dropping, moving between access points, a cable
+    // pulled, a phone tethered, a laptop waking up.
+    //
+    // On by default because the alternative is silent: ZRE binds an interface
+    // once, and without this a session stays attached to one that no longer
+    // exists, deaf and invisible, reporting no error. Turn it off only if
+    // something else in your application owns reconnection.
+    bool auto_reconnect = true;
+    int  reconnect_poll_ms = 2000;
+
     // Extra key/value advertised to every peer, readable via Peer::header().
     std::map<std::string, std::string> headers;
 };
@@ -115,7 +126,9 @@ public:
     // ── identity and state ──
     bool connected() const;
     const std::string& name() const;
-    const std::string& uuid() const;   // address other devices publish to
+    // By value: a network change replaces the identity underneath, so a
+    // reference could dangle. See ZyreTransport::uuid().
+    std::string uuid() const;   // address other devices publish to
     // One plain sentence for a status bar: no jargon, no addresses.
     std::string describe() const;
 
