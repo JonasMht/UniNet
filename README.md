@@ -983,7 +983,7 @@ tests/            test_roundtrip (codec) · test_network · test_cabi (C)
 tools/            uninet_discover.cpp
 scripts/          test-all.sh · test-interop.sh · demo.sh · bootstrap.{sh,ps1}
                   build-for-android.sh · build-for-slicer.sh
-                  test-on-android.sh · check-il2cpp.sh
+                  test-on-android.sh · test-on-emulator.sh · check-il2cpp.sh
 docs/             PROTOCOL.md · unity/UniNetMulticastLock.cs
 ```
 
@@ -1032,6 +1032,7 @@ PYTHONPATH=python pytest python/tests -v       # Python
 | `python/tests` | dict round-trips, numpy volumes, discovery, wildcards, threading, error handling |
 | `scripts/test-interop.sh` | a C++, a Python and a C# node in one realm, each verifying the others' payloads field by field |
 | `scripts/test-on-android.sh` | the codec, the C ABI and discovery running **on a connected Android device**, plus two nodes finding each other across the USB cable with no network |
+| `scripts/test-on-emulator.sh` | the same suite on an **emulator**, so it runs with no hardware attached. Downloads the emulator and a system image once (~6 GB) into a scratch directory, boots headless, tests, shuts down. It is real Android userspace, but x86_64 and with emulated Wi-Fi, so it cannot answer questions about the multicast filtering that needs a `MulticastLock`: use a physical device for those |
 | `scripts/check-il2cpp.sh` | compiles the C# binding with Unity's AOT class library and runs the real IL2CPP compiler over it, asserting every callback converts. Catches the Unity-only failure described under [Unity / Meta Quest](#unity--meta-quest), which no ordinary build or test run can see |
 
 Every network test runs in a realm unique to its process, so a demo on the same

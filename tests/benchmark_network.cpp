@@ -36,6 +36,13 @@ namespace {
 
 using clock_t_ = std::chrono::steady_clock;
 
+// One origin for both sides, so a send stamp and an arrival stamp are
+// comparable. Both threads read the same steady clock.
+double now_ms() {
+    static const auto epoch = clock_t_::now();
+    return std::chrono::duration<double, std::milli>(clock_t_::now() - epoch).count();
+}
+
 double seconds_since(clock_t_::time_point t0) {
     return std::chrono::duration<double>(clock_t_::now() - t0).count();
 }
@@ -84,9 +91,14 @@ struct Result {
 // One publisher, `count` messages of `verts` vertices. The receiver's counter is
 // passed in rather than the session itself: the subscription is registered once,
 // outside the timed loop, so re-subscribing cannot skew a run.
+// Latency is measured by pairing the Nth message sent with the Nth received.
+// That works because one publisher over one TCP connection delivers in order,
+// and it costs nothing per message beyond a clock read: stamping a timestamp
+// INTO the payload would mean copying a 245 KB mesh for every send and would
+// distort the throughput number this same run is producing.
 Result run_throughput(uninet::Session& tx,
                       std::atomic<int>& received,
-                      std::vector<double>& latencies_ms,
+                      std::vector<double>& arrivals_ms,
                       int verts, int count) {
     Result r;
     r.verts = verts;
@@ -96,17 +108,25 @@ Result run_throughput(uninet::Session& tx,
     r.payload_bytes = uninet::encode(payload).size();
 
     received.store(0);
-    latencies_ms.clear();
-    latencies_ms.reserve(size_t(count));
+    // Zeroed, never resized. The receiver writes into this from the network
+    // thread, and a straggler from the previous size can still be in flight
+    // when the next run begins: reallocating underneath it would be a data
+    // race. main() sizes it once, big enough for every run.
+    std::fill(arrivals_ms.begin(), arrivals_ms.end(), 0.0);
 
     // Warm up: the first message pays for buffer growth and the TCP window.
+    // Sent on a subject the receiver does not subscribe to, so it cannot land
+    // in the timings.
     for (int i = 0; i < 5; ++i) tx.publish("bench.warmup", payload);
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     received.store(0);
-    latencies_ms.clear();
 
+    std::vector<double> sends_ms(size_t(count), 0.0);
     const auto t0 = clock_t_::now();
-    for (int i = 0; i < count; ++i) tx.publish("bench.mesh", payload);
+    for (int i = 0; i < count; ++i) {
+        sends_ms[size_t(i)] = now_ms();
+        tx.publish("bench.mesh", payload);
+    }
     const double send_s = seconds_since(t0);
 
     // Let the tail arrive. A slow receiver is a real result, not a reason to
@@ -121,11 +141,19 @@ Result run_throughput(uninet::Session& tx,
     r.mb_per_s   = double(r.delivered) * double(r.payload_bytes) / total_s / (1024.0 * 1024.0);
     (void)send_s;
 
-    if (!latencies_ms.empty()) {
-        std::vector<double> sorted = latencies_ms;
+    // Pair them up. Only messages that actually arrived are counted; a run that
+    // dropped some should not report a latency for messages that never came.
+    std::vector<double> sorted;
+    sorted.reserve(size_t(r.delivered));
+    for (int i = 0; i < r.delivered && i < count; ++i) {
+        const double dt = arrivals_ms[size_t(i)] - sends_ms[size_t(i)];
+        if (dt >= 0.0) sorted.push_back(dt);
+    }
+    if (!sorted.empty()) {
         std::sort(sorted.begin(), sorted.end());
         r.median_latency_ms = sorted[sorted.size() / 2];
-        r.p99_latency_ms    = sorted[size_t(double(sorted.size()) * 0.99)];
+        r.p99_latency_ms    = sorted[std::min(sorted.size() - 1,
+                                              size_t(double(sorted.size()) * 0.99))];
     }
     return r;
 }
@@ -198,21 +226,29 @@ int main(int argc, char** argv) {
     }
 
     std::atomic<int> received{0};
-    std::vector<double> latencies_ms;
+    // Sized once, here, for the largest run. See run_throughput.
+    std::vector<double> arrivals_ms(size_t(count), 0.0);
     rx->subscribe("bench.mesh", [&](const uninet::Envelope&) {
-        received.fetch_add(1);
+        // fetch_add returns the index this message occupies, so no separate
+        // counter is needed and two deliveries can never claim the same slot.
+        const int i = received.fetch_add(1);
+        if (i >= 0 && size_t(i) < arrivals_ms.size()) arrivals_ms[size_t(i)] = now_ms();
     });
 
     const int sizes[] = {512, 4096, 16384};
     std::vector<Result> rows;
-    std::printf("%-9s %12s %12s %12s %10s\n",
-                "VERTS", "PAYLOAD", "MSGS/S", "MB/S", "DELIVERED");
+    // Latency is shown, not just written to the CSV. For a 20 Hz mesh stream
+    // the throughput number is the less interesting one: what decides whether
+    // the picture judders is how long a single message takes, and especially
+    // the tail. p99 is in the table for that reason.
+    std::printf("%-9s %12s %12s %12s %10s %10s %10s\n",
+                "VERTS", "PAYLOAD", "MSGS/S", "MB/S", "MED ms", "P99 ms", "DELIVERED");
     for (int verts : sizes) {
-        Result r = run_throughput(*tx, received, latencies_ms, verts, count);
+        Result r = run_throughput(*tx, received, arrivals_ms, verts, count);
         rows.push_back(r);
-        std::printf("%-9d %9zu B %12.0f %12.1f %6d/%d\n",
+        std::printf("%-9d %9zu B %12.0f %12.1f %10.2f %10.2f %6d/%d\n",
                     r.verts, r.payload_bytes, r.msgs_per_s, r.mb_per_s,
-                    r.delivered, r.sent);
+                    r.median_latency_ms, r.p99_latency_ms, r.delivered, r.sent);
         std::fflush(stdout);
     }
 
