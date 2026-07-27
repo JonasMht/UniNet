@@ -37,6 +37,7 @@
 #include "uninet/session.h"
 #include "uninet/zyre_transport.h"
 
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -371,6 +372,36 @@ PYBIND11_MODULE(_uninet, m) {
             if (i >= c.size()) throw py::index_error("index out of range");
             return c[i];
         })
+        .def("keys", [](const Cbor& c) {
+            if (!c.is_map()) throw py::type_error("uninet: this value is not a map");
+            py::list out;
+            for (const auto& kv : c.map_items()) out.append(py::str(kv.first));
+            return out;
+        }, "The map's keys, in insertion order.")
+        .def("items", [](const Cbor& c) {
+            if (!c.is_map()) throw py::type_error("uninet: this value is not a map");
+            py::list out;
+            for (const auto& kv : c.map_items())
+                out.append(py::make_tuple(py::str(kv.first), kv.second));
+            return out;
+        }, "(key, Cbor) pairs, in insertion order.")
+        .def("values", [](const Cbor& c) {
+            py::list out;
+            if (c.is_map())        for (const auto& kv : c.map_items()) out.append(kv.second);
+            else if (c.is_array()) for (const auto& v : c.array_items()) out.append(v);
+            else throw py::type_error("uninet: this value is not a map or array");
+            return out;
+        }, "Values of a map, or elements of an array, without converting them.")
+        .def("__iter__", [](const Cbor& c) {
+            // A map yields its keys, matching dict; an array yields its
+            // elements. Without this, inspecting a Cbor meant converting the
+            // whole thing with to_value() and losing the Cbor layer.
+            py::list out;
+            if (c.is_map())        for (const auto& kv : c.map_items()) out.append(py::str(kv.first));
+            else if (c.is_array()) for (const auto& v : c.array_items()) out.append(v);
+            else throw py::type_error("uninet: this value is not iterable");
+            return py::iter(out);
+        })
         .def("__repr__", [](const Cbor& c) { return "<uninet.Cbor " + to_json(c) + ">"; });
 
     m.def("encode", [](const py::object& v) {
@@ -455,6 +486,10 @@ PYBIND11_MODULE(_uninet, m) {
         .def_readwrite("gossip_connect", &ZyreConfig::gossip_connect)
         .def_readwrite("endpoint", &ZyreConfig::endpoint)
         .def_readwrite("advertised_endpoint", &ZyreConfig::advertised_endpoint)
+        .def_readwrite("evasive_ms", &ZyreConfig::evasive_ms,
+                       "Milliseconds of silence before a peer is pinged.")
+        .def_readwrite("expired_ms", &ZyreConfig::expired_ms,
+                       "Milliseconds of silence before a peer is declared gone.")
         .def_readwrite("headers", &ZyreConfig::headers);
 
     py::class_<ZyreTransport, Transport>(m, "ZyreTransport",
@@ -467,7 +502,13 @@ PYBIND11_MODULE(_uninet, m) {
         .def("connected", &ZyreTransport::connected)
         .def("peers", &ZyreTransport::peers)
         .def("uuid", &ZyreTransport::uuid)
-        .def("last_error", &ZyreTransport::last_error);
+        .def("last_error", &ZyreTransport::last_error)
+        .def("unsubscribe", &ZyreTransport::unsubscribe, py::arg("subject"))
+        .def("set_header", &ZyreTransport::set_header, py::arg("key"), py::arg("value"),
+             "Advertise a key/value. Must be called before connect(); returns "
+             "False and sets last_error() afterwards, when it cannot take effect.")
+        .def("node_name", &ZyreTransport::node_name)
+        .def("can_address", &ZyreTransport::can_address);
 
     py::class_<Node>(m, "Node")
         // keep_alive<1,3>: the transport (arg 3) must outlive the Node (arg 1).
@@ -481,6 +522,9 @@ PYBIND11_MODULE(_uninet, m) {
         .def("name", &Node::name)
         .def("connect", &Node::connect, py::call_guard<py::gil_scoped_release>())
         .def("connected", &Node::connected)
+        .def("retry_connect", &Node::retry_connect,
+             py::arg("attempts"), py::arg("base_sleep_s") = 0.1,
+             py::call_guard<py::gil_scoped_release>())
         .def("publish", [](Node& n, const std::string& subject, const py::object& data,
                            const std::string& dst) {
             Cbor c = py_to_cbor(data);          // convert while we hold the GIL
@@ -506,6 +550,7 @@ PYBIND11_MODULE(_uninet, m) {
         .def_readwrite("gossip_connect", &SessionConfig::gossip_connect)
         .def_readwrite("endpoint", &SessionConfig::endpoint)
         .def_readwrite("advertised_endpoint", &SessionConfig::advertised_endpoint)
+        .def_readwrite("compression", &SessionConfig::compression)
         .def_readwrite("headers", &SessionConfig::headers);
 
     py::class_<Session>(m, "Session", "A device on the network. Created by uninet.join().")
@@ -546,6 +591,12 @@ PYBIND11_MODULE(_uninet, m) {
         .def("name", &Session::name)
         .def("uuid", &Session::uuid, "This device's address on the network.")
         .def("describe", &Session::describe, "One plain sentence about the connection.")
+        .def("last_error", &Session::last_error,
+             "Why the last operation failed. Empty when healthy.")
+        .def("node", &Session::node, py::return_value_policy::reference_internal,
+             "The underlying Node. Raises once the session is closed.")
+        .def("transport", &Session::transport, py::return_value_policy::reference_internal,
+             "The underlying transport. Raises once the session is closed.")
         .def("__repr__", [](const Session& s) { return "<uninet.Session " + s.describe() + ">"; });
 
     // ── Blob: large payloads (files, volumes, meshes) ──
@@ -565,7 +616,12 @@ PYBIND11_MODULE(_uninet, m) {
         .def_readwrite("chunk_bytes", &BlobConfig::chunk_bytes)
         .def_readwrite("max_blob_bytes", &BlobConfig::max_blob_bytes)
         .def_readwrite("max_total_bytes", &BlobConfig::max_total_bytes)
-        .def_readwrite("max_concurrent", &BlobConfig::max_concurrent);
+        .def_readwrite("max_concurrent", &BlobConfig::max_concurrent)
+        .def_property("stall_timeout_s",
+            [](const BlobConfig& c) { return double(c.stall_timeout.count()); },
+            [](BlobConfig& c, double v) {
+                c.stall_timeout = std::chrono::seconds(static_cast<long long>(v));
+            }, "Seconds without a chunk before a transfer is abandoned.");
 
     py::class_<Blob>(m, "Blob",
         "Streams payloads too large for one message: files, volumes, meshes.")
@@ -659,5 +715,7 @@ PYBIND11_MODULE(_uninet, m) {
     m.attr("HAS_LZ4") = false;
 #endif
     m.def("zyre_version", &zyre_version_string);
+    m.def("local_hostname", &local_hostname,
+          "This machine's hostname, as advertised to peers.");
     m.def("set_compression_level", &set_compression_level, py::arg("level"));
 }

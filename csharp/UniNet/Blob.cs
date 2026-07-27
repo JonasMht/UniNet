@@ -80,13 +80,27 @@ namespace UniNet
                 // A managed exception must never cross back over a reverse P/Invoke.
                 try
                 {
-                    int n = checked((int)len.ToUInt64());
+                    ulong total = len.ToUInt64();
+                    // A .NET array cannot exceed int.MaxValue. Left to throw
+                    // inside the catch below, a transfer over 2 GiB vanished
+                    // with no Received, no Failed and no log.
+                    if (total > int.MaxValue)
+                    {
+                        var big = new BlobInfo(id, name, src, meta, (long)total);
+                        session.Dispatch(() => Failed?.Invoke(big,
+                            $"the transfer is {total} bytes, larger than a .NET array can hold"));
+                        return;
+                    }
+                    int n = (int)total;
                     var bytes = new byte[n];
                     if (n > 0) Marshal.Copy(data, bytes, 0, n);
                     var info = new BlobInfo(id, name, src, meta, n);
                     session.Dispatch(() => Received?.Invoke(info, bytes));
                 }
-                catch { }
+                catch (Exception e)
+                {
+                    Console.Error.WriteLine("UniNet blob receive failed: " + e);
+                }
             };
             Native.BlobProgressCallback progress = (id, name, done, total, _) =>
             {
@@ -117,6 +131,12 @@ namespace UniNet
             Check(Native.uninet_blob_on_received(_handle, received, IntPtr.Zero), "on_received");
             Check(Native.uninet_blob_on_progress(_handle, progress, IntPtr.Zero), "on_progress");
             Check(Native.uninet_blob_on_failed(_handle, failed, IntPtr.Zero), "on_failed");
+
+            // The native blob holds a raw C++ reference to the session. Telling
+            // the session about it lets Dispose() neutralise this object first;
+            // otherwise a session disposed before its blob left that reference
+            // dangling and the next Send() segfaulted with no exception.
+            session.Register(this);
         }
 
         private static void Check(int rc, string what)

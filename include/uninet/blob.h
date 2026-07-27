@@ -71,8 +71,10 @@ struct BlobConfig {
 
 class Blob {
 public:
-    // `subject` is the base subject; the transfer uses "<subject>.blob" beneath
-    // it, so it never collides with your own messages on the same prefix.
+    // `subject` names the channel. Transfers travel on "uninet.blob.<subject>",
+    // which is deliberately NOT beneath your own prefix: "<subject>.blob" was
+    // matched by an application's own "<subject>.>" subscription, so raw chunk
+    // frames were delivered to code that never asked for them.
     Blob(Session& session, std::string subject, BlobConfig cfg = {});
     ~Blob();
 

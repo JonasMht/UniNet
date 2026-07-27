@@ -28,6 +28,14 @@ std::string basename_of(const std::string& path) {
 
 // Unique enough without pulling in a UUID library: the sender's own uuid already
 // scopes it, so a per-process counter finishes the job.
+// The transfer's own subject. Prefixed rather than suffixed: "files.blob" is
+// matched by an application's "files.>" subscription, so the raw chunk frames
+// used to be delivered to application code that never asked for them. Nothing
+// matches "uninet.blob.files" unless it deliberately subscribes to it.
+std::string blob_topic(const std::string& subject) {
+    return "uninet.blob." + subject;
+}
+
 std::string next_id(const std::string& src) {
     static std::atomic<uint64_t> n{0};
     return src + "/" + std::to_string(n.fetch_add(1));
@@ -231,7 +239,7 @@ Blob::Blob(Session& session, std::string subject, BlobConfig cfg)
     // a message arriving afterwards would otherwise read freed memory on the
     // network thread.
     std::weak_ptr<Impl> weak = impl_;
-    session.subscribe(impl_->subject + ".blob", [weak](const Envelope& env) {
+    session.subscribe(blob_topic(impl_->subject), [weak](const Envelope& env) {
         if (auto self = weak.lock()) {
             self->handle(env);
             self->sweep_locked_free();
@@ -248,7 +256,7 @@ std::string Blob::send(const std::string& name, const uint8_t* data, size_t len,
     // transfer at `begin`, but the sender used to push every chunk anyway, so
     // the whole payload crossed the network to be discarded.
     if (len > impl_->cfg.max_blob_bytes) return "";
-    const std::string topic = impl_->subject + ".blob";
+    const std::string topic = blob_topic(impl_->subject);
     const std::string id = next_id(impl_->session.uuid());
 
     Cbor begin = Cbor::map();
@@ -263,6 +271,18 @@ std::string Blob::send(const std::string& name, const uint8_t* data, size_t len,
 
     const size_t chunk = impl_->cfg.chunk_bytes ? impl_->cfg.chunk_bytes : 256 * 1024;
     uint64_t seq = 0;
+    // The header documents progress "as chunks arrive (receiver) or are sent
+    // (sender)", but the sender never reported any.
+    BlobProgress prog;
+    BlobInfo sent_info;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        prog = impl_->on_progress;
+    }
+    sent_info.id   = id;
+    sent_info.name = name;
+    sent_info.src  = impl_->session.uuid();
+    sent_info.size = len;
     for (size_t off = 0; off < len; off += chunk) {
         const size_t n = (len - off < chunk) ? (len - off) : chunk;
         Cbor c = Cbor::map();
@@ -274,6 +294,7 @@ std::string Blob::send(const std::string& name, const uint8_t* data, size_t len,
         // leave the receiver holding a buffer it can never complete, which its
         // stall timeout would eventually reap, but slowly, and confusingly.
         if (!impl_->session.publish(topic, std::move(c), dst)) return "";
+        if (prog) { try { prog(sent_info, off + n); } catch (...) {} }
     }
 
     Cbor end = Cbor::map();

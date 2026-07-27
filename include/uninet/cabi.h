@@ -115,6 +115,30 @@ int uninet_session_subscribe_cbor(uninet_session_t* session, const char* subject
 int uninet_session_on_peer_found(uninet_session_t* session, uninet_peer_cb cb, void* user);
 int uninet_session_on_peer_lost(uninet_session_t* session, uninet_peer_cb cb, void* user);
 
+// ── extra configuration ───────────────────────────────────────────────────
+// Advertise a key/value to every peer, readable through uninet_peers_header.
+// Must be called BEFORE the session joins, so it is set on a config handle
+// rather than a session. Create one, set what you need, pass it to
+// uninet_session_join_cfg, then free it.
+typedef struct uninet_config uninet_config_t;
+
+uninet_config_t* uninet_config_new(void);
+void             uninet_config_free(uninet_config_t* cfg);
+int uninet_config_set_header(uninet_config_t* cfg, const char* key, const char* value);
+// 0=None, 1=Zlib, 2=Lz4. Anything else is rejected.
+int uninet_config_set_compression(uninet_config_t* cfg, int compression);
+int uninet_config_set_realm(uninet_config_t* cfg, const char* realm);
+int uninet_config_set_role(uninet_config_t* cfg, const char* role);
+int uninet_config_set_app(uninet_config_t* cfg, const char* app);
+int uninet_config_set_interface(uninet_config_t* cfg, const char* iface);
+int uninet_config_set_port(uninet_config_t* cfg, int port);
+int uninet_config_set_gossip(uninet_config_t* cfg, const char* bind, const char* connect,
+                             const char* endpoint, const char* advertised);
+
+// Join with everything the C++ SessionConfig can express. `cfg` may be NULL,
+// which is then identical to uninet_session_join(name, ...).
+uninet_session_t* uninet_session_join_cfg(const char* name, uninet_config_t* cfg);
+
 // ── session lifetime ──────────────────────────────────────────────────────
 // Leave the network without destroying the handle. Idempotent. Useful when the
 // shutdown order matters: a garbage-collected host may finalize objects after
@@ -174,6 +198,9 @@ const char*     uninet_peers_address(uninet_peers_t* peers, int index);
 const char*     uninet_peers_role(uninet_peers_t* peers, int index);
 const char*     uninet_peers_app(uninet_peers_t* peers, int index);
 const char*     uninet_peers_header(uninet_peers_t* peers, int index, const char* key);
+// 1 when the peer advertised `key` at all. Without this an absent header and an
+// empty one both read as "".
+int             uninet_peers_has_header(uninet_peers_t* peers, int index, const char* key);
 void            uninet_peers_free(uninet_peers_t* peers);
 
 // ── data conversion ───────────────────────────────────────────────────────

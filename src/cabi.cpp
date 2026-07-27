@@ -11,6 +11,7 @@
 #include "uninet/session.h"
 
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <new>
@@ -263,6 +264,88 @@ extern "C" int uninet_session_on_peer_lost(uninet_session_t* session,
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
 }
 
+// ── extra configuration ───────────────────────────────────────────────────
+
+struct uninet_config {
+    SessionConfig cfg;
+};
+
+extern "C" uninet_config_t* uninet_config_new(void) {
+    try { return new uninet_config(); }
+    catch (...) { set_error("out of memory"); return nullptr; }
+}
+
+extern "C" void uninet_config_free(uninet_config_t* cfg) {
+    try { delete cfg; } catch (...) {}
+}
+
+namespace {
+// Every setter shares the same null check and failure code.
+int with_cfg(uninet_config_t* cfg, const std::function<void(SessionConfig&)>& fn) {
+    try {
+        if (!cfg) { set_error("null config"); return UNINET_ERR_ARG; }
+        fn(cfg->cfg);
+        return UNINET_OK;
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+}  // namespace
+
+extern "C" int uninet_config_set_header(uninet_config_t* cfg, const char* key,
+                                        const char* value) {
+    if (!key || !*key) { set_error("header key is required"); return UNINET_ERR_ARG; }
+    return with_cfg(cfg, [&](SessionConfig& c) { c.headers[key] = safe(value); });
+}
+
+extern "C" int uninet_config_set_compression(uninet_config_t* cfg, int compression) {
+    // Validated rather than cast: an out-of-range value produced an enum with no
+    // enumerator, and the codec then silently emitted an empty payload.
+    if (compression < 0 || compression > 2) {
+        set_error("compression must be 0 (none), 1 (zlib) or 2 (lz4)");
+        return UNINET_ERR_ARG;
+    }
+    return with_cfg(cfg, [&](SessionConfig& c) {
+        c.compression = static_cast<Compression>(compression);
+    });
+}
+
+extern "C" int uninet_config_set_realm(uninet_config_t* cfg, const char* realm) {
+    return with_cfg(cfg, [&](SessionConfig& c) { if (realm && *realm) c.realm = realm; });
+}
+extern "C" int uninet_config_set_role(uninet_config_t* cfg, const char* role) {
+    return with_cfg(cfg, [&](SessionConfig& c) { c.role = safe(role); });
+}
+extern "C" int uninet_config_set_app(uninet_config_t* cfg, const char* app) {
+    return with_cfg(cfg, [&](SessionConfig& c) { c.app = safe(app); });
+}
+extern "C" int uninet_config_set_interface(uninet_config_t* cfg, const char* iface) {
+    return with_cfg(cfg, [&](SessionConfig& c) { c.iface = safe(iface); });
+}
+extern "C" int uninet_config_set_port(uninet_config_t* cfg, int port) {
+    if (port < 0 || port > 65535) { set_error("port out of range"); return UNINET_ERR_ARG; }
+    return with_cfg(cfg, [&](SessionConfig& c) { if (port > 0) c.port = port; });
+}
+extern "C" int uninet_config_set_gossip(uninet_config_t* cfg, const char* bind,
+                                        const char* connect, const char* endpoint,
+                                        const char* advertised) {
+    return with_cfg(cfg, [&](SessionConfig& c) {
+        c.gossip_bind         = safe(bind);
+        c.gossip_connect      = safe(connect);
+        c.endpoint            = safe(endpoint);
+        c.advertised_endpoint = safe(advertised);
+    });
+}
+
+extern "C" uninet_session_t* uninet_session_join_cfg(const char* name,
+                                                     uninet_config_t* cfg) {
+    try {
+        if (!name || !*name) { set_error("name is required"); return nullptr; }
+        auto handle = std::unique_ptr<uninet_session>(new uninet_session());
+        handle->session = Session::join(name, cfg ? cfg->cfg : SessionConfig{});
+        return handle.release();
+    } catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+      catch (...) { set_error("unknown error while joining the network"); return nullptr; }
+}
+
 // ── session lifetime ──────────────────────────────────────────────────────
 
 extern "C" void uninet_session_close(uninet_session_t* session) {
@@ -446,6 +529,11 @@ extern "C" const char* uninet_peers_app(uninet_peers_t* peers, int index) {
 }
 extern "C" const char* uninet_peers_header(uninet_peers_t* peers, int index, const char* key) {
     return header_of(peers, index, key);
+}
+
+extern "C" int uninet_peers_has_header(uninet_peers_t* peers, int index, const char* key) {
+    if (!valid(peers, index) || !key) return 0;
+    return peers->items[size_t(index)].headers.count(key) ? 1 : 0;
 }
 
 extern "C" void uninet_peers_free(uninet_peers_t* peers) {

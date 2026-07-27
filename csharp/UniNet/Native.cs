@@ -129,6 +129,45 @@ namespace UniNet
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uninet_session_on_peer_lost(IntPtr session, PeerCallback cb, IntPtr user);
 
+        // ── configuration ──
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr uninet_config_new();
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void uninet_config_free(IntPtr cfg);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_header(IntPtr cfg,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string key,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_compression(IntPtr cfg, int compression);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_realm(IntPtr cfg,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string realm);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_role(IntPtr cfg,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string role);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_app(IntPtr cfg,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string app);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_interface(IntPtr cfg,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string iface);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_port(IntPtr cfg, int port);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_gossip(IntPtr cfg,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string bind,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string connect,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string endpoint,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string advertised);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr uninet_session_join_cfg(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string name, IntPtr cfg);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_peers_has_header(IntPtr peers, int index,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string key);
+
         // ── session lifetime ──
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void uninet_session_close(IntPtr session);
