@@ -21,6 +21,18 @@ else()
     target_compile_options(uninet_warnings INTERFACE -Wall -Wextra)
 endif()
 
+# CI used to pass `-- CXXFLAGS=-Werror` to the build tool. CMake's makefiles read
+# CXX_FLAGS (underscore), so that set a variable no recipe ever looked at and
+# warnings never once failed the pipeline. This is the real switch.
+option(UNINET_WERROR "Treat warnings as errors" OFF)
+if(UNINET_WERROR)
+    if(MSVC)
+        target_compile_options(uninet_warnings INTERFACE /WX)
+    else()
+        target_compile_options(uninet_warnings INTERFACE -Werror)
+    endif()
+endif()
+
 # ── Compression tiers. zlib is the always-available baseline; liblz4 is the
 # faster tier and is auto-detected. Neither is required to use the network.
 find_package(ZLIB REQUIRED)
@@ -292,7 +304,14 @@ endif()
 # ── Install rules, so consumers can find_package(UniNet) instead of vendoring
 # a file copy (which is how ThermoNavServer ended up with a diverging fork).
 include(GNUInstallDirs)
-install(TARGETS uninet EXPORT UniNetTargets
+# No install(EXPORT)/find_package support on purpose. `uninet` links PUBLIC to
+# either PkgConfig::ZYRE or a fetched zyre-static, and neither is exportable:
+# the imported pkg-config target does not survive an export set, and a
+# FetchContent static target cannot be installed at all. Shipping a
+# UniNetConfig.cmake that works only in the system-zyre case would be worse than
+# not shipping one. add_subdirectory() is the supported integration; the README
+# says so.
+install(TARGETS uninet
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include/uninet DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS uninet_discover RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

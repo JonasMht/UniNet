@@ -52,6 +52,6 @@ cmake --build build --config Release -j
 
 # ── 4. test ──────────────────────────────────────────────────────────────────
 Say "Running tests"
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -L uninet --no-tests=error --output-on-failure
 
-Ok "Done. C++ lib + C ABI are in build/Release/. Try: .\build\Release\benchmark.exe 4096 300"
+Ok "Done. C++ lib + C ABI are in build/Release/. Try: .\build\Release\uninet-benchmark.exe 300"

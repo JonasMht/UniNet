@@ -57,7 +57,14 @@ fi
 rm -f "$BUILD_LOG"
 
 stage "C++ and C ABI (ctest)"
-if ctest --test-dir "$BUILD" -L uninet --output-on-failure 2>&1 | tail -6; then
+# --no-tests=error: `ctest -L uninet` exits 0 when the label matches NOTHING,
+# so a renamed label or a forgotten LABELS property would report a green
+# "PASS ctest" having run zero tests. The count is asserted too, because
+# --no-tests=error only catches the zero case, not "one of three vanished".
+CTEST_N="$(ctest --test-dir "$BUILD" -L uninet -N 2>/dev/null | sed -n 's/^Total Tests: //p')"
+if [ "${CTEST_N:-0}" -lt 3 ]; then
+    fail "ctest (only ${CTEST_N:-0} tests matched -L uninet; expected at least 3)"
+elif ctest --test-dir "$BUILD" -L uninet --no-tests=error --output-on-failure 2>&1 | tail -6; then
     pass "ctest"
 else
     fail "ctest"
@@ -77,7 +84,16 @@ fi
 stage "cross-language interop"
 if OUT="$(./scripts/test-interop.sh 25 2>&1)"; then
     echo "$OUT" | tail -8
-    pass "interop ($(echo "$OUT" | grep 'languages covered' | cut -d: -f2-))"
+    COVERED_LANGS="$(grep '^INTEROP_COVERED=' <<<"$OUT" | cut -d= -f2-)"
+    pass "interop (${COVERED_LANGS:-unknown})"
+    # A partial run is not a full pass. Record the gap so the summary's skip
+    # count is truthful rather than implying all three languages were checked.
+    for lang in "C++" "Python" "C#"; do
+        case " $COVERED_LANGS " in
+            *" $lang "*) ;;
+            *) skip "interop $lang" "that runtime was not available" ;;
+        esac
+    done
 else
     echo "$OUT" | tail -14
     fail "interop"

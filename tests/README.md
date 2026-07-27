@@ -14,9 +14,9 @@ working thing.
 
 | path | what it is | how to run |
 |---|---|---|
-| `test_roundtrip.cpp` | codec: CBOR round-trips, compression, framing, hostile frames | `ctest -L uninet -R roundtrip` |
-| `test_network.cpp` | the network: discovery, presence, broadcast, unicast, realms, gossip, threading, large payloads, close | `ctest -L uninet -R network` |
-| `test_cabi.c` | the C ABI, compiled **as C**, the path P/Invoke takes | `ctest -L uninet -R cabi` |
+| `test_roundtrip.cpp` | codec: CBOR round-trips, compression, framing, hostile frames | `ctest --test-dir build -L uninet -R roundtrip` |
+| `test_network.cpp` | the network: discovery, presence, broadcast, unicast, realms, gossip, threading, large payloads, close | `ctest --test-dir build -L uninet -R network` |
+| `test_cabi.c` | the C ABI, compiled **as C**, the path P/Invoke takes | `ctest --test-dir build -L uninet -R cabi` |
 | `interop/` | one C++, one Python and one C# node in a realm, each checking the others' payloads | `./scripts/test-interop.sh` |
 | `docker/` | cross-platform images (see below) | `./scripts/test-all.sh --docker` |
 | `benchmark_codec.cpp` | codec throughput in isolation | `build/uninet-benchmark-codec` |

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <new>
 #include <string>
@@ -59,6 +60,9 @@ struct uninet_session {
 
 struct uninet_peers {
     std::vector<Peer> items;
+    // header_of() fills this lazily, so two threads reading the same snapshot
+    // would race on the map. Nothing in the header promised single-threaded use.
+    std::mutex fields_mu;
     // role/app/header return computed strings, so they need storage that
     // outlives the call. One shared scratch buffer would alias, a caller
     // holding the result of role() and then calling app() would find its first
@@ -303,13 +307,27 @@ extern "C" int uninet_config_set_compression(uninet_config_t* cfg, int compressi
         set_error("compression must be 0 (none), 1 (zlib) or 2 (lz4)");
         return UNINET_ERR_ARG;
     }
+    // Range alone was not enough. Asking for LZ4 on a build without liblz4 let
+    // compress_into fall through to an empty buffer, so every publish shipped a
+    // valid header with a zero-length payload, reported success, and was dropped
+    // by the receiver. Every message vanished.
+#ifndef UNINET_HAS_LZ4
+    if (compression == 2) {
+        set_error("this build has no liblz4; use 0 (none) or 1 (zlib)");
+        return UNINET_ERR_ARG;
+    }
+#endif
     return with_cfg(cfg, [&](SessionConfig& c) {
         c.compression = static_cast<Compression>(compression);
     });
 }
 
 extern "C" int uninet_config_set_realm(uninet_config_t* cfg, const char* realm) {
-    return with_cfg(cfg, [&](SessionConfig& c) { if (realm && *realm) c.realm = realm; });
+    // An empty realm used to be accepted and silently leave the default in
+    // place. The realm is what keeps a development machine out of a live
+    // session, so failing quietly there is an isolation failure.
+    if (!realm || !*realm) { set_error("realm must not be empty"); return UNINET_ERR_ARG; }
+    return with_cfg(cfg, [&](SessionConfig& c) { c.realm = realm; });
 }
 extern "C" int uninet_config_set_role(uninet_config_t* cfg, const char* role) {
     return with_cfg(cfg, [&](SessionConfig& c) { c.role = safe(role); });
@@ -368,6 +386,10 @@ extern "C" uninet_blob_t* uninet_blob_new(uninet_session_t* session, const char*
     try {
         if (!session || !session->session || !subject || !*subject) {
             set_error("null session or subject");
+            return nullptr;
+        }
+        if (!session->session->open()) {
+            set_error("the session is closed");
             return nullptr;
         }
         auto handle = std::unique_ptr<uninet_blob>(new uninet_blob());
@@ -501,6 +523,7 @@ bool valid(uninet_peers_t* peers, int index) {
 
 const char* header_of(uninet_peers_t* peers, int index, const char* key) {
     if (!valid(peers, index) || !key) return "";
+    std::lock_guard<std::mutex> lk(peers->fields_mu);
     // Keyed per (index, key) so two live pointers into the same snapshot never
     // refer to the same storage.
     const std::string slot = std::to_string(index) + "\x1f" + key;

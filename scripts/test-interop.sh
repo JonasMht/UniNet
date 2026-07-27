@@ -28,11 +28,15 @@ have_python=0
 have_csharp=0
 PYTHON="${PYTHON:-python3}"
 PY_ENV=()
-if "$PYTHON" -c 'import uninet' >/dev/null 2>&1; then
-    have_python=1
-elif PYTHONPATH="$HERE/python:${PYTHONPATH:-}" "$PYTHON" -c 'import uninet' >/dev/null 2>&1; then
+# The in-tree build FIRST. Preferring whatever is on the path let a stale
+# `pip install .` in site-packages shadow the build tree, so this test could
+# validate an old binding against a freshly built core and still report PASS,
+# which is the exact drift it exists to catch.
+if PYTHONPATH="$HERE/python:${PYTHONPATH:-}" "$PYTHON" -c 'import uninet' >/dev/null 2>&1; then
     have_python=1
     PY_ENV=(env "PYTHONPATH=$HERE/python:${PYTHONPATH:-}")
+elif "$PYTHON" -c 'import uninet' >/dev/null 2>&1; then
+    have_python=1
 fi
 if command -v dotnet >/dev/null 2>&1 && \
    { [ -f "$BUILD/libuninet_c.so" ] || [ -f "$BUILD/uninet_c.dll" ] || [ -f "$BUILD/libuninet_c.dylib" ]; }; then
@@ -50,6 +54,9 @@ peers_excluding() {   # peers_excluding <self> -> csv of the other participants
 cleanup() {
     for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
+    # Also on an early exit: the "interop_cpp not found" path and Ctrl-C both
+    # used to leave the log directory behind.
+    rm -rf "$LOGDIR"
 }
 trap cleanup EXIT INT TERM
 
@@ -110,6 +117,8 @@ done
 rm -rf "$LOGDIR"
 
 echo "languages covered: ${COVERED[*]}"
+# Machine readable, so a caller can tell a full run from a partial one.
+echo "INTEROP_COVERED=${COVERED[*]}"
 for s in "${SKIPPED[@]:-}"; do [ -n "$s" ] && echo "SKIPPED: $s"; done
 
 # Two participants can trivially "pass" by both being wrong in the same way, so
