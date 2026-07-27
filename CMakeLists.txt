@@ -231,6 +231,7 @@ add_library(uninet STATIC
     src/loopback.cpp
     src/node.cpp
     src/profiler.cpp
+    src/diagnostics.cpp
     src/session.cpp
     src/zyre_transport.cpp)
 set_target_properties(uninet PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -284,6 +285,14 @@ add_test(NAME network COMMAND test_network)
 # Two nodes must find each other over a real UDP beacon; give it room on a
 # loaded CI box before calling it a failure.
 set_tests_properties(network PROPERTIES TIMEOUT 90 LABELS uninet)
+
+# Diagnostics and crash reporting. The crash test really does crash a child
+# process, because a crash handler tested any other way is a crash handler
+# nobody has run.
+add_executable(test_diagnostics tests/test_diagnostics.cpp)
+target_link_libraries(test_diagnostics PRIVATE uninet uninet_warnings)
+add_test(NAME diagnostics COMMAND test_diagnostics)
+set_tests_properties(diagnostics PROPERTIES TIMEOUT 90 LABELS uninet)
 
 # Surviving a network change: Wi-Fi dropping, a phone tethered, a cable pulled.
 # Driven through a wrapper because it creates and destroys interfaces, which it

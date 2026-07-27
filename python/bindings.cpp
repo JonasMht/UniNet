@@ -34,6 +34,7 @@
 #include "uninet/node.h"
 #include "uninet/peer.h"
 #include "uninet/profiler.h"
+#include "uninet/diagnostics.h"
 #include "uninet/session.h"
 #include "uninet/zyre_transport.h"
 
@@ -775,5 +776,18 @@ PYBIND11_MODULE(_uninet, m) {
           "connection, a VPN and container bridges, the default may not be the "
           "one the other device is on, and nothing reports that. Use this to "
           "show the user a choice, and pass the name as join(iface=...).");
+    m.def("diagnostics", &diagnostics,
+          "What UniNet is doing right now, as text: version, compression tiers, "
+          "every network on this machine and which one discovery chose, and every "
+          "live session with its identity, peers and reconnect count.\n\n"
+          "This is the thing to paste into a bug report. Nearly every \"it cannot "
+          "see the other device\" question is answered by the networks section.");
+    m.def("enable_crash_log", &enable_crash_log, py::arg("path"),
+          "Write a crash report to `path` if the process dies on a fatal signal.\n\n"
+          "Off unless called. Useful inside a host that has no terminal - a Slicer "
+          "module or a Unity player - where the state at the moment of the crash is "
+          "otherwise lost. Any handler already installed is chained to, so a host's "
+          "own crash reporting keeps working.");
+    m.def("disable_crash_log", &disable_crash_log);
     m.def("set_compression_level", &set_compression_level, py::arg("level"));
 }

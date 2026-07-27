@@ -280,6 +280,16 @@ namespace UniNet
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr uninet_version();
 
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_diagnostics(byte[] buf, UIntPtr buflen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_enable_crash_log(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void uninet_disable_crash_log();
+
         // ── helpers ──
         /// <summary>A NUL-terminated UTF-8 pointer from native code, as a string.</summary>
         /// <remarks>
@@ -326,7 +336,7 @@ namespace UniNet
         /// The previous version retried once with a fixed 4096-byte buffer. When
         /// the caller's first guess was already larger than that, the retry
         /// SHRANK the buffer and failed again, and every failure was mapped to
-        /// "" — so any JSON over about 4 KB came back as an empty string with no
+        /// "", so any JSON over about 4 KB came back as an empty string with no
         /// error. Doubling until it fits removes both halves of that bug.
         /// </remarks>
         internal static string ReadBuffer(Func<byte[], UIntPtr, int> call, int initial = 256)

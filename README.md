@@ -1076,6 +1076,41 @@ cmake --build build-tsan -j && ./build-tsan/test_network
 
 ## Troubleshooting
 
+**Start here: ask the library what it is doing.**
+
+```bash
+uninet-discover --interfaces      # from a terminal
+```
+
+```cpp
+printf("%s", uninet::diagnostics().c_str());   // C++
+```
+```python
+print(uninet.diagnostics())                    # Python
+```
+```csharp
+Debug.Log(Session.Diagnostics());              // C#
+```
+
+It prints the library versions, which compression tiers this build has, every
+network on the machine with the one discovery chose, and every live session with
+its identity, peer count and reconnect count. Most of the questions below are
+answered by that output directly, and it is the right thing to attach to a bug
+report.
+
+**When it crashes somewhere with no terminal** - a Quest player, a Slicer
+module - ask for a crash report:
+
+```cpp
+uninet::enable_crash_log("/sdcard/Android/data/com.you.app/files/uninet-crash.log");
+```
+
+On a fatal signal it appends the same state plus the signal, the faulting
+address and a backtrace. It is off unless you call it: a library has no business
+taking over an application's fatal signal handling uninvited, and any handler
+already installed is chained to, so a host's own crash reporting keeps working.
+
+
 **Two devices cannot see each other.**
 
 1. Are they on the same Wi-Fi network or switch? Discovery is link-local by

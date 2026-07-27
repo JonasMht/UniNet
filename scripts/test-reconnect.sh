@@ -32,4 +32,11 @@ fi
 # ZeroMQ writes to /tmp and reads the hostname; both work in the namespace. The
 # only thing it needs that is missing by default is a loopback that is UP, which
 # the test brings up itself.
+# setarch -R (ASLR off) when available. ThreadSanitizer aborts with
+# "FATAL: unexpected memory mapping" under ASLR often enough that without this
+# the sanitizer run fails for a reason that has nothing to do with the code.
+# Harmless for an ordinary run.
+if command -v setarch >/dev/null 2>&1; then
+    exec unshare -rn setarch -R "$BIN"
+fi
 exec unshare -rn "$BIN"

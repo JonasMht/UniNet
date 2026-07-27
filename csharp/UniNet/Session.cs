@@ -642,6 +642,34 @@ namespace UniNet
                 Math.Max(512, cbor.Length * 4));
         }
 
+        /// <summary>
+        /// What UniNet is doing right now, as text: version, compression tiers,
+        /// every network on this machine and which one discovery chose, and every
+        /// live session with its identity, peers and reconnect count.
+        /// </summary>
+        /// <remarks>
+        /// Put this behind a diagnostics button. Nearly every "the headset cannot
+        /// see the server" report is answered by the networks section, and none of
+        /// it was reachable from inside an application before.
+        /// </remarks>
+        public static string Diagnostics() =>
+            Native.ReadBuffer((b, n) => Native.uninet_diagnostics(b, n), 4096);
+
+        /// <summary>
+        /// Write a crash report to <paramref name="path"/> if the process dies on
+        /// a fatal signal. Off unless called.
+        /// </summary>
+        /// <remarks>
+        /// Worth enabling in a Unity player on a headset, where there is no
+        /// terminal and the state at the moment of the crash is otherwise lost.
+        /// Any handler already installed is chained to, so Unity's own crash
+        /// reporting keeps working.
+        /// </remarks>
+        public static bool EnableCrashLog(string path) =>
+            Native.uninet_enable_crash_log(path) == Status.Ok;
+
+        public static void DisableCrashLog() => Native.uninet_disable_crash_log();
+
         // ── build info ──
         public static ushort ProtocolVersion => Native.uninet_protocol_version();
         public static bool   HasLz4 => Native.uninet_has_lz4() == 1;
