@@ -6,6 +6,7 @@
 // std::bad_alloc on a large payload killed the process.
 #include "uninet/cabi.h"
 
+#include "uninet/blob.h"
 #include "uninet/json.h"
 #include "uninet/session.h"
 
@@ -230,6 +231,125 @@ extern "C" int uninet_session_on_peer_lost(uninet_session_t* session,
         session->session->on_peer_lost(wrap_peer_cb(cb, user));
         return UNINET_OK;
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+// ── session lifetime ──────────────────────────────────────────────────────
+
+extern "C" void uninet_session_close(uninet_session_t* session) {
+    try { if (session && session->session) session->session->close(); } catch (...) {}
+}
+
+extern "C" int uninet_session_open(uninet_session_t* session) {
+    try {
+        return (session && session->session && session->session->open()) ? 1 : 0;
+    } catch (...) { return 0; }
+}
+
+// ── large payloads ────────────────────────────────────────────────────────
+
+struct uninet_blob {
+    std::unique_ptr<Blob> blob;
+};
+
+extern "C" uninet_blob_t* uninet_blob_new(uninet_session_t* session, const char* subject) {
+    try {
+        if (!session || !session->session || !subject || !*subject) {
+            set_error("null session or subject");
+            return nullptr;
+        }
+        auto handle = std::unique_ptr<uninet_blob>(new uninet_blob());
+        handle->blob = std::unique_ptr<Blob>(new Blob(*session->session, subject));
+        return handle.release();
+    } catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+      catch (...) { set_error("could not create the transfer channel"); return nullptr; }
+}
+
+extern "C" void uninet_blob_free(uninet_blob_t* blob) {
+    try { delete blob; } catch (...) {}
+}
+
+namespace {
+
+// Shared by send and send_file: parse the optional metadata, then report the id.
+bool parse_meta(const char* meta_json, Cbor& out) {
+    if (!meta_json || !*meta_json) { out = Cbor::null(); return true; }
+    bool ok = false;
+    out = from_json(meta_json, &ok);
+    if (!ok) set_error("meta_json is not valid JSON");
+    return ok;
+}
+
+}  // namespace
+
+extern "C" int uninet_blob_send(uninet_blob_t* blob, const char* name,
+                                const uint8_t* data, size_t len, const char* meta_json,
+                                const char* dst, char* id_buf, size_t id_buflen) {
+    try {
+        if (!blob || !blob->blob || !name || (!data && len)) {
+            set_error("null blob, name or payload");
+            return UNINET_ERR_ARG;
+        }
+        Cbor meta;
+        if (!parse_meta(meta_json, meta)) return UNINET_ERR_PARSE;
+        const std::string id = blob->blob->send(name, data, len, std::move(meta), safe(dst));
+        return copy_out(id, id_buf, id_buflen);
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+extern "C" int uninet_blob_send_file(uninet_blob_t* blob, const char* path,
+                                     const char* meta_json, const char* dst,
+                                     char* id_buf, size_t id_buflen) {
+    try {
+        if (!blob || !blob->blob || !path) { set_error("null blob or path"); return UNINET_ERR_ARG; }
+        Cbor meta;
+        if (!parse_meta(meta_json, meta)) return UNINET_ERR_PARSE;
+        const std::string id = blob->blob->send_file(path, std::move(meta), safe(dst));
+        if (id.empty()) set_error("could not read the file, or the send failed");
+        return copy_out(id, id_buf, id_buflen);
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+extern "C" int uninet_blob_on_received(uninet_blob_t* blob, uninet_blob_cb cb, void* user) {
+    try {
+        if (!blob || !blob->blob || !cb) { set_error("null argument"); return UNINET_ERR_ARG; }
+        blob->blob->on_received([cb, user](const BlobInfo& info, const Bytes& data) {
+            try {
+                const std::string meta = to_json(info.meta);
+                cb(info.id.c_str(), info.name.c_str(), info.src.c_str(), meta.c_str(),
+                   data.data(), data.size(), user);
+            } catch (...) {}
+        });
+        return UNINET_OK;
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+extern "C" int uninet_blob_on_progress(uninet_blob_t* blob, uninet_blob_progress_cb cb,
+                                       void* user) {
+    try {
+        if (!blob || !blob->blob || !cb) { set_error("null argument"); return UNINET_ERR_ARG; }
+        blob->blob->on_progress([cb, user](const BlobInfo& info, size_t done) {
+            try { cb(info.id.c_str(), info.name.c_str(), done, info.size, user); }
+            catch (...) {}
+        });
+        return UNINET_OK;
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+extern "C" int uninet_blob_on_failed(uninet_blob_t* blob, uninet_blob_failed_cb cb,
+                                     void* user) {
+    try {
+        if (!blob || !blob->blob || !cb) { set_error("null argument"); return UNINET_ERR_ARG; }
+        blob->blob->on_failed([cb, user](const BlobInfo& info, const std::string& why) {
+            try { cb(info.id.c_str(), info.name.c_str(), why.c_str(), user); }
+            catch (...) {}
+        });
+        return UNINET_OK;
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+extern "C" int uninet_blob_incoming_count(uninet_blob_t* blob) {
+    try { return (blob && blob->blob) ? int(blob->blob->incoming_count()) : 0; }
+    catch (...) { return 0; }
 }
 
 // ── peer snapshot ─────────────────────────────────────────────────────────

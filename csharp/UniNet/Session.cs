@@ -88,6 +88,9 @@ namespace UniNet
         // Events queued off the network thread, drained by Update().
         private readonly ConcurrentQueue<Action> _pending = new ConcurrentQueue<Action>();
 
+        /// <summary>The native handle, for companion types such as Blob.</summary>
+        internal IntPtr Handle => _handle;
+
         /// <summary>A device appeared. Also fires for devices already present.</summary>
         public event Action<Peer>? PeerFound;
         /// <summary>A device left the network.</summary>
@@ -170,11 +173,15 @@ namespace UniNet
             };
             _rooted.Add(found);
             _rooted.Add(lost);
-            Native.uninet_session_on_peer_found(_handle, found, IntPtr.Zero);
-            Native.uninet_session_on_peer_lost(_handle, lost, IntPtr.Zero);
+            // Checked, not discarded: a failed registration would otherwise mean
+            // presence events silently never arrive, with nothing to point at.
+            if (Native.uninet_session_on_peer_found(_handle, found, IntPtr.Zero) != Status.Ok ||
+                Native.uninet_session_on_peer_lost(_handle, lost, IntPtr.Zero) != Status.Ok)
+                throw new InvalidOperationException(
+                    "UniNet: could not register presence callbacks: " + Native.LastError());
         }
 
-        private void Dispatch(Action action)
+        internal void Dispatch(Action action)
         {
             if (_marshalToCaller) _pending.Enqueue(action);
             else action();
@@ -275,6 +282,19 @@ namespace UniNet
             _handle == IntPtr.Zero
                 ? string.Empty
                 : Native.ReadBuffer((b, n) => Native.uninet_session_uuid(_handle, b, n));
+
+        /// <summary>
+        /// Leave the network without releasing the handle. Idempotent.
+        /// Dispose() calls it; call it yourself when the shutdown order matters.
+        /// </summary>
+        public void Close()
+        {
+            if (_handle != IntPtr.Zero) Native.uninet_session_close(_handle);
+        }
+
+        /// <summary>False once Close() or Dispose() has run.</summary>
+        public bool IsOpen =>
+            _handle != IntPtr.Zero && Native.uninet_session_open(_handle) == 1;
 
         /// <summary>One plain sentence about the connection, for a status bar.</summary>
         public string Describe() =>
