@@ -1096,6 +1096,25 @@ one with the problem.
 and check the subject: `domain.D1` does not match a subscription to `domain.D1.>`
 - use `domain.>` to catch everything below `domain`.
 
+If messages flow one way only, the two builds disagree about compression. The
+tier is chosen by the sender and travels on the wire, so a build without liblz4
+cannot read anything from a build that has it, while its own messages, sent with
+zlib, arrive perfectly. The result looks like a half-broken network: discovery
+works, presence works, one direction works.
+
+The receiving side prints
+
+```
+uninet: dropping messages from <uuid>: they are compressed with lz4 and this
+build cannot decode that tier.
+```
+
+CMake now builds liblz4 from source when the system has none, so both sides
+match by default and this should not arise. It can still be forced with
+`-DUNINET_LZ4=OFF`, which is worth avoiding for anything that talks to a peer
+built normally. `uninet.HAS_LZ4` (Python), `Session.HasLz4` (C#) and
+`uninet_has_lz4()` (C) each report what a given build supports.
+
 **`libuninet_c.so: cannot open shared object file`.** Add its directory to
 `LD_LIBRARY_PATH`, or on Windows place `uninet_c.dll` next to the executable. In
 Unity it belongs in `Assets/Plugins/<platform>/`.

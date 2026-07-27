@@ -142,6 +142,28 @@ void Node::on_raw_(const std::string& subject, const Bytes& payload) {
     if (route->src == uuid_) return;                          // own echo
     if (!route->dst.empty() && route->dst != uuid_) return;   // not addressed to me
 
+    // A tier this build cannot decode is a configuration problem, not a bad
+    // frame, and it is invisible from either end: the sender's publish succeeds,
+    // discovery and presence keep working, and only the payloads disappear. Say
+    // so once per peer rather than dropping in silence.
+    //
+    // Found on a Quest-class Android build, where the NDK provides no liblz4:
+    // the tablet could send to the workstation and received nothing back, while
+    // both sides reported a healthy connection.
+    if (!compression_supported(route->compression)) {
+        static thread_local std::string warned_for;
+        if (warned_for != route->src) {
+            warned_for = route->src;
+            std::fprintf(stderr,
+                         "uninet: dropping messages from %s: they are compressed "
+                         "with %s and this build cannot decode that tier. Rebuild "
+                         "UniNet with liblz4 available; it is fetched and built "
+                         "automatically when the system does not provide it.\n",
+                         route->src.c_str(), compression_name(route->compression));
+        }
+        return;
+    }
+
     // Same reuse on the receive side: unframe_into decodes an uncompressed
     // payload straight out of `payload` (no copy) and decompresses into a
     // buffer that survives across messages.

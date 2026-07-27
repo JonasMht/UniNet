@@ -54,10 +54,35 @@ if(UNINET_LZ4)
     else()
         set(UNINET_LZ4_TARGET PkgConfig::LZ4)
     endif()
+    if(NOT LZ4_FOUND)
+        # Built from source rather than "falling back to zlib", because the tier
+        # is not a local choice: it is on the wire. A sender uses the best tier
+        # IT has, and a receiver without that tier cannot decode the frame at
+        # all. So a build without liblz4 does not merely run slower, it silently
+        # drops every message from a peer that has it.
+        #
+        # That is exactly what happened on Android: the NDK ships no liblz4, so
+        # the device build fell back to zlib, and every message from a desktop
+        # peer vanished. Discovery worked, presence worked, the device could
+        # send, and nothing arrived in the other direction, with no error on
+        # either side. Fetching liblz4 keeps every UniNet build able to decode
+        # every other one.
+        message(STATUS "UniNet: liblz4 not installed, building it from source.")
+        include(FetchContent)
+        set(LZ4_BUILD_CLI OFF CACHE BOOL "" FORCE)
+        set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "" FORCE)
+        set(BUILD_SHARED_LIBS OFF)
+        FetchContent_Declare(lz4
+            GIT_REPOSITORY https://github.com/lz4/lz4.git
+            GIT_TAG v1.9.4
+            GIT_SHALLOW TRUE
+            SOURCE_SUBDIR build/cmake)
+        FetchContent_MakeAvailable(lz4)
+        set(LZ4_FOUND TRUE)
+        set(UNINET_LZ4_TARGET lz4_static)
+    endif()
     if(LZ4_FOUND)
-        message(STATUS "UniNet: liblz4 found: LZ4 compression tier enabled.")
-    else()
-        message(STATUS "UniNet: liblz4 NOT found: falling back to zlib.")
+        message(STATUS "UniNet: LZ4 compression tier enabled.")
     endif()
 endif()
 

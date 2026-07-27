@@ -26,6 +26,28 @@ enum class Compression : uint8_t {
     Lz4  = 2,   // LZ4 frame: optional (liblz4; auto-detected at build)
 };
 
+// True when THIS build can decode a frame compressed with `m`. The tier is a
+// property of the wire, not a local preference: a sender uses the best tier it
+// has, so a receiver missing that tier cannot read those messages at all.
+inline bool compression_supported(Compression m) {
+    switch (m) {
+        case Compression::None: return true;
+        case Compression::Zlib:
+#ifdef UNINET_HAS_ZLIB
+            return true;
+#else
+            return false;
+#endif
+        case Compression::Lz4:
+#ifdef UNINET_HAS_LZ4
+            return true;
+#else
+            return false;
+#endif
+    }
+    return false;
+}
+
 inline const char* compression_name(Compression m) {
     switch (m) {
         case Compression::None: return "none";
