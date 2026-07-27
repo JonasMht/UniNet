@@ -119,6 +119,7 @@ public:
     bool publish(const std::string& subject, const uint8_t* data, size_t len) override;
     bool publish_to(const std::string& peer_uuid, const std::string& subject,
                     const uint8_t* data, size_t len) override;
+    bool can_address() const override { return true; }
     void subscribe(const std::string& subject, MessageHandler handler) override;
     void unsubscribe(const std::string& subject) override;
     std::string name() const override { return "zyre"; }

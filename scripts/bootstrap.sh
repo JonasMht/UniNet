@@ -27,10 +27,10 @@ if [[ "${UNINET_SKIP_DEPS:-0}" != "1" ]]; then
   if command -v apt-get >/dev/null; then
     sudo apt-get update -y >/dev/null
     sudo apt-get install -y --no-install-recommends \
-      build-essential cmake pkg-config zlib1g-dev liblz4-dev libzyre-dev >/dev/null
+      build-essential cmake pkg-config git zlib1g-dev liblz4-dev >/dev/null
     ok "apt: build tools + zlib + lz4 installed"
   elif command -v dnf >/dev/null; then
-    sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config zlib-devel lz4-devel zyre-devel >/dev/null
+    sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config git zlib-devel lz4-devel >/dev/null
     ok "dnf: build tools + zlib + lz4 installed"
   elif command -v pacman >/dev/null; then
     sudo pacman -S --noconfirm --needed base-devel cmake pkgconf zlib lz4 zyre >/dev/null

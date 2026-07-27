@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 namespace uninet {
@@ -85,6 +86,10 @@ struct ZyreTransport::Impl {
     std::vector<std::pair<std::string, MessageHandler>> subs;
     PeerCallback on_found, on_lost;
     std::atomic<bool> running{false};
+    // The actor thread's id, so disconnect() can tell whether it is being
+    // called from inside a callback. Joining from there deadlocks: every
+    // callback runs ON this thread.
+    std::atomic<std::thread::id> actor_thread{};
 
     // Guards sends into the actor pipe: zactor_t is a zsock, so it is not safe
     // to write from two threads at once.
@@ -219,6 +224,7 @@ struct ZyreTransport::Impl {
     // The actor thread. Owns the Zyre socket exclusively for its whole life.
     static void actor_fn(zsock_t* pipe, void* arg) {
         auto* self = static_cast<Impl*>(arg);
+        self->actor_thread.store(std::this_thread::get_id());
         zsock_signal(pipe, 0);                      // tell the constructor we are up
 
         zpoller_t* poller = zpoller_new(pipe, zyre_socket(self->node), nullptr);
@@ -312,6 +318,10 @@ void ZyreTransport::set_header(const std::string& key, const std::string& value)
 bool ZyreTransport::connect() {
     if (impl_->running.load()) return true;
     if (!impl_->node) return false;
+    {   // A previous failure must not be reported as this attempt's reason.
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->error.clear();
+    }
 
     // Gossip mode replaces the UDP beacon entirely, so the beacon settings below
     // do not apply to it. Setting the endpoint is what switches ZRE over.
@@ -378,6 +388,14 @@ bool ZyreTransport::connect() {
 }
 
 void ZyreTransport::disconnect() {
+    // Calling this from a callback would join the thread we are running on.
+    // Refusing loudly beats hanging: the caller gets an explanation from
+    // last_error() instead of a process that never returns.
+    if (impl_->actor_thread.load() == std::this_thread::get_id()) {
+        impl_->set_error("disconnect() was called from a UniNet callback, which "
+                         "would deadlock; close the session from another thread");
+        return;
+    }
     if (!impl_->running.exchange(false)) return;
     // Destroying the actor sends $TERM and joins the thread, so the event loop
     // is quiet before we touch the Zyre node again.
@@ -386,8 +404,19 @@ void ZyreTransport::disconnect() {
         if (impl_->actor) zactor_destroy(&impl_->actor);
     }
     if (impl_->node) zyre_stop(impl_->node);   // sends EXIT: peers drop us at once
-    std::lock_guard<std::mutex> lk(impl_->mu);
-    impl_->peers.clear();
+
+    // Report the departures instead of silently emptying the table: an app that
+    // tracks devices purely through found/lost would keep a stale list forever.
+    std::vector<Peer> gone;
+    PeerCallback cb;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        for (auto& kv : impl_->peers) gone.push_back(kv.second);
+        impl_->peers.clear();
+        impl_->seen.clear();     // no EXIT will arrive while disconnected
+        cb = impl_->on_lost;
+    }
+    if (cb) for (const auto& p : gone) { try { cb(p); } catch (...) {} }
 }
 
 bool ZyreTransport::connected() const { return impl_->running.load(); }
@@ -404,6 +433,14 @@ bool ZyreTransport::publish(const std::string& subject, const uint8_t* data, siz
 bool ZyreTransport::publish_to(const std::string& peer_uuid, const std::string& subject,
                                const uint8_t* data, size_t len) {
     if (!impl_->running.load() || peer_uuid.empty()) return false;
+    // Zyre drops a whisper to a peer it does not know, and the actor thread has
+    // no way to report that back. Returning false here lets Node fall back to a
+    // broadcast the intended peer can still filter, instead of the message
+    // disappearing while publish() reports success.
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (!impl_->peers.count(peer_uuid)) return false;
+    }
     zmsg_t* m = zmsg_new();
     zmsg_addstr(m, "WHISPER");
     zmsg_addstr(m, peer_uuid.c_str());

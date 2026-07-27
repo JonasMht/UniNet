@@ -114,15 +114,29 @@ struct Blob::Impl {
             {
                 std::lock_guard<std::mutex> lk(mu);
                 if (size > cfg.max_blob_bytes)                why = "transfer too large";
+                // A repeated begin for a live id would otherwise overwrite the
+                // entry without releasing its bytes, so `buffered` drifted up
+                // for good and every later transfer was eventually refused.
+                else if (incoming.count(id))                  why = "duplicate transfer id";
                 else if (incoming.size() >= cfg.max_concurrent) why = "too many concurrent transfers";
                 else if (buffered + size > cfg.max_total_bytes) why = "too much data in flight";
                 if (why.empty()) {
                     Incoming in;
                     in.info = info;
-                    in.data.resize(size);
-                    in.last_chunk = std::chrono::steady_clock::now();
-                    buffered += size;
-                    incoming[id] = std::move(in);
+                    // A declared size up to max_blob_bytes can still fail to
+                    // allocate. Left to throw, it unwound into the network loop
+                    // and was swallowed there, so the transfer vanished with no
+                    // callback of any kind.
+                    try {
+                        in.data.resize(size);
+                    } catch (const std::bad_alloc&) {
+                        why = "out of memory for a transfer of this size";
+                    }
+                    if (why.empty()) {
+                        in.last_chunk = std::chrono::steady_clock::now();
+                        buffered += size;
+                        incoming[id] = std::move(in);
+                    }
                 }
             }
             if (!why.empty()) fail(info, why);
@@ -145,6 +159,11 @@ struct Blob::Impl {
                 auto it = incoming.find(id);
                 if (it == incoming.end()) return;      // unknown or already dropped
                 Incoming& in = it->second;
+                // A transfer id is only unique per sender. Without this check a
+                // second peer could interleave chunks into someone else's
+                // transfer, and the result arrived stamped with the FIRST
+                // sender's uuid: corrupt data wearing a trusted identity.
+                if (env.src_uuid != in.info.src) return;
 
                 // Chunks must arrive in order. ZRE delivers in order per peer, so
                 // a gap means loss or interleaving from a second sender reusing an
@@ -184,6 +203,7 @@ struct Blob::Impl {
                 auto it = incoming.find(id);
                 if (it == incoming.end()) return;
                 Incoming& in = it->second;
+                if (env.src_uuid != in.info.src) return;   // not this sender's transfer
                 info = in.info;
                 buffered -= in.data.size();
                 if (in.received == in.data.size()) {
@@ -202,12 +222,20 @@ struct Blob::Impl {
 };
 
 Blob::Blob(Session& session, std::string subject, BlobConfig cfg)
-    : impl_(new Impl(session, std::move(subject), std::move(cfg))) {
+    : impl_(std::make_shared<Impl>(session, std::move(subject), std::move(cfg))) {
     // One subscription for the whole transfer protocol. It sits under the
     // caller's subject so it cannot collide with their own traffic.
-    session.subscribe(impl_->subject + ".blob", [this](const Envelope& env) {
-        impl_->handle(env);
-        impl_->sweep_locked_free();
+    //
+    // The handler captures a weak_ptr rather than `this`: the subscription
+    // cannot be removed (Node has no unsubscribe), so it outlives the Blob, and
+    // a message arriving afterwards would otherwise read freed memory on the
+    // network thread.
+    std::weak_ptr<Impl> weak = impl_;
+    session.subscribe(impl_->subject + ".blob", [weak](const Envelope& env) {
+        if (auto self = weak.lock()) {
+            self->handle(env);
+            self->sweep_locked_free();
+        }
     });
 }
 
@@ -216,6 +244,10 @@ Blob::~Blob() = default;
 std::string Blob::send(const std::string& name, const uint8_t* data, size_t len,
                        Cbor meta, const std::string& dst) {
     if (!data && len) return "";
+    // Check our own cap before streaming: the receiver refuses an oversized
+    // transfer at `begin`, but the sender used to push every chunk anyway, so
+    // the whole payload crossed the network to be discarded.
+    if (len > impl_->cfg.max_blob_bytes) return "";
     const std::string topic = impl_->subject + ".blob";
     const std::string id = next_id(impl_->session.uuid());
 
