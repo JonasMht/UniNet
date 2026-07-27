@@ -5,6 +5,7 @@
 #include "uninet/profiler.h"
 
 #include <cstring>
+#include <unordered_set>
 
 namespace uninet {
 
@@ -22,6 +23,8 @@ const Cbor& Cbor::operator[](const std::string& k) const {
     return null_value;
 }
 
+// Builder API: setting an existing key overwrites it. The scan that costs is on
+// the decode path, which uses append_unchecked() plus one duplicate check instead.
 Cbor& Cbor::set(const std::string& key, Cbor val) {
     if (kind_ != Kind::Map) kind_ = Kind::Map;
     for (auto& kv : map_) {
@@ -162,7 +165,14 @@ namespace {
 // about 60 bytes) exhausted the stack.
 constexpr int kMaxDepth = 128;
 
-struct Cursor { const uint8_t* p; size_t len; size_t i; bool ok; int depth; };
+// Element counts are attacker-controlled too, and a container's count costs us a
+// Cbor node (~200 bytes) per element while costing the sender one wire byte. The
+// fits() checks below bound a container by the bytes actually present; this bounds
+// the whole decode, because those bytes can themselves arrive compressed: 1042
+// zlib bytes expand to `9A 00100000` + 1M zeros = 1M nodes = ~390 MB of nodes.
+constexpr uint64_t kMaxNodes = 1u << 18;
+
+struct Cursor { const uint8_t* p; size_t len; size_t i; bool ok; int depth; uint64_t nodes; };
 
 // true when `count` items of `stride` bytes fit in the cursor from position i,
 // computed without overflowing.
@@ -192,11 +202,56 @@ inline uint64_t read_arg(Cursor& c, uint8_t ai) {
     }
 }
 
+// Duplicate map keys are what set() used to absorb (last one won). Detecting them
+// costs a scan, and doing that scan per key is the O(k^2) the decoder was paying,
+// so: linear while the map is small (the 3-key envelope core never allocates a
+// hash set), hashed once it isn't.
+struct KeyGuard {
+    static constexpr size_t kScanLimit = 16;
+    std::unordered_set<std::string> seen;
+
+    bool is_new(const std::vector<std::pair<std::string, Cbor>>& kv, const std::string& k) {
+        if (kv.size() < kScanLimit) {
+            for (const auto& e : kv) if (e.first == k) return false;
+            return true;
+        }
+        if (seen.empty()) for (const auto& e : kv) seen.insert(e.first);
+        return seen.insert(k).second;
+    }
+};
+
+// IEEE 754 half -> float. Half-precision is not something UniNet emits, but the
+// C# peer's PeterO.Cbor picks it for any float it can represent exactly (1.0f,
+// 0.5f, 2.0f...), so rejecting it dropped whole envelopes from that peer.
+inline float half_to_float(uint16_t h) {
+    const uint32_t sign = uint32_t(h & 0x8000u) << 16;
+    const uint32_t exp  = (h >> 10) & 0x1Fu;
+    const uint32_t mant = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;                                   // +/-0
+        } else {                                           // subnormal: renormalize
+            uint32_t m = mant, shift = 0;
+            while (!(m & 0x400u)) { m <<= 1; ++shift; }
+            bits = sign | ((113u - shift) << 23) | ((m & 0x3FFu) << 13);
+        }
+    } else if (exp == 31) {
+        bits = sign | 0x7F800000u | (mant << 13);          // inf / NaN
+    } else {
+        bits = sign | ((exp + 112u) << 23) | (mant << 13); // bias 127 - 15
+    }
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
+
 Cbor decode_one(Cursor& c);
 
 Cbor decode_one(Cursor& c) {
     if (c.i >= c.len) { c.ok = false; return Cbor::null(); }
     if (c.depth >= kMaxDepth) { c.ok = false; return Cbor::null(); }
+    if (++c.nodes > kMaxNodes) { c.ok = false; return Cbor::null(); }
     struct DepthGuard { int& d; ~DepthGuard() { --d; } } _g{++c.depth};
     uint8_t ib = c.p[c.i++];
     uint8_t major = uint8_t(ib >> 5);
@@ -206,6 +261,11 @@ Cbor decode_one(Cursor& c) {
         case 0: return Cbor::uint(read_arg(c, ai));
         case 1: {
             uint64_t v = read_arg(c, ai);
+            if (!c.ok) return Cbor::null();
+            // CBOR reaches -2^64, int64_t stops at -2^63. The subtraction below
+            // wrapped for larger arguments and integer() then filed the result as
+            // a Uint: -2^64 decoded as +0 with ok=1. Refuse what we cannot hold.
+            if (v > uint64_t(INT64_MAX)) { c.ok = false; return Cbor::null(); }
             return Cbor::integer(int64_t(-1) - int64_t(v));
         }
         case 2: {  // byte string
@@ -257,6 +317,12 @@ Cbor decode_one(Cursor& c) {
                 return arr;
             }
             uint64_t n = read_arg(c, ai);
+            if (!c.ok) return Cbor::null();
+            // Every element costs the sender at least one wire byte, so the count
+            // must fit the bytes we were actually handed. Without this the count
+            // alone drove the allocation: `9A 00100000` + 1M zero bytes is 1042
+            // bytes of zlib and ~390 MB of Cbor nodes.
+            if (!fits(c, n, 1)) { c.ok = false; return Cbor::null(); }
             // Fast path: homogeneous float32 array (each element = 0xFA + 4 BE bytes).
             if (n > 0 && fits(c, n, 5)) {
                 bool all_f32 = true;
@@ -301,21 +367,31 @@ Cbor decode_one(Cursor& c) {
         }
         case 5: {  // map
             Cbor m = Cbor::map();
+            // Duplicate keys are not well-formed (RFC 8949 §5.6) and set() used to
+            // hide them behind last-one-wins, which is a decoder disagreeing with
+            // its peers about what a message says. Reject them.
+            KeyGuard keys;
             if (ai == 31) {
                 for (;;) {
                     if (c.i >= c.len) { c.ok = false; return Cbor::null(); }
                     if (c.p[c.i] == 0xFF) { c.i++; break; }
                     Cbor k = decode_one(c); if (!c.ok || !k.is_text()) { c.ok = false; return Cbor::null(); }
                     Cbor v = decode_one(c); if (!c.ok) return Cbor::null();
-                    m.set(k.as_text(), std::move(v));
+                    if (!keys.is_new(m.map_items(), k.as_text())) { c.ok = false; return Cbor::null(); }
+                    m.append_unchecked(k.as_text(), std::move(v));
                 }
                 return m;
             }
             uint64_t n = read_arg(c, ai);
+            if (!c.ok) return Cbor::null();
+            // Two bytes minimum per entry (a key and a value), same reasoning as
+            // the array above.
+            if (!fits(c, n, 2)) { c.ok = false; return Cbor::null(); }
             for (uint64_t j = 0; j < n; ++j) {
                 Cbor k = decode_one(c); if (!c.ok || !k.is_text()) { c.ok = false; return Cbor::null(); }
                 Cbor v = decode_one(c); if (!c.ok) return Cbor::null();
-                m.set(k.as_text(), std::move(v));
+                if (!keys.is_new(m.map_items(), k.as_text())) { c.ok = false; return Cbor::null(); }
+                m.append_unchecked(k.as_text(), std::move(v));
             }
             return m;
         }
@@ -326,9 +402,26 @@ Cbor decode_one(Cursor& c) {
         }
         case 7: {  // simple / float / break
             if (ai == 31) { c.ok = false; return Cbor::null(); }  // stray break
+            // 28-30 are reserved and carry no argument. They used to fall through
+            // to the simple-value return below and decode as uint(28..30) with
+            // ok=1, so a byte the spec has no meaning for became a plausible value.
+            if (ai >= 28) { c.ok = false; return Cbor::null(); }
             if (ai == 20) return Cbor::boolean(false);
             if (ai == 21) return Cbor::boolean(true);
             if (ai == 22 || ai == 23) return Cbor::null();  // undefined/unused -> null
+            if (ai == 24) {
+                // Simple value in a following byte. It was never consumed, so the
+                // byte was re-read as the next data item's head.
+                uint64_t v = read_be(c, 1);
+                if (!c.ok) return Cbor::null();
+                if (v < 32) { c.ok = false; return Cbor::null(); }  // must have used ai<24
+                return Cbor::uint(v);
+            }
+            if (ai == 25) {  // IEEE half — what the C# peer emits for exact floats
+                if (c.i + 2 > c.len) { c.ok = false; return Cbor::null(); }
+                uint16_t h = uint16_t(read_be(c, 2));
+                return Cbor::f32(half_to_float(h));
+            }
             if (ai == 26) {
                 if (c.i + 4 > c.len) { c.ok = false; return Cbor::null(); }
                 uint32_t bits = uint32_t(read_be(c, 4));
@@ -352,7 +445,7 @@ Cbor decode_one(Cursor& c) {
 Cbor decode(const uint8_t* data, size_t len, bool* ok) {
     profiler::ScopedOp _("cbor.decode", len, len);
     if (!data || len == 0) { if (ok) *ok = false; return Cbor::null(); }
-    Cursor c{data, len, 0, true, 0};
+    Cursor c{data, len, 0, true, 0, 0};
     Cbor v = decode_one(c);
     if (c.i != len) c.ok = false;  // trailing garbage
     if (ok) *ok = c.ok;

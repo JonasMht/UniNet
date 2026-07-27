@@ -1,304 +1,823 @@
 # UniNet
 
-**Unified Networking transport** — one versioned pub/sub wire protocol for
-distributed medical-navigation peers, with a compiled C++ core (CBOR codec,
-negotiated compression, pluggable transport, high-level Node) and C# / Python
-bindings. One codec, one framing, one bus — owned by this project; consumers
-depend on UniNet rather than each re-implementing the bus.
+**Devices on a network find each other and talk. Nobody configures anything.**
 
-It exists because an audit of ThermoNavMR (C#), ThermoNavServer (C++) and
-ThermoNavSlicer (Python) found the **same** NATS+CBOR protocol re-implemented
-**three times**, with hand-mirrored schemas and LZ4 code that nobody could enable
-(no peer knew how a frame was encoded). UniNet is that bus, written once.
-
-## What it is
-
-A peer (`Node`) publishes/subscribes `Envelope`s over a pluggable `Transport`. The
-envelope carries who-sent / who-for / subject / payload; the payload is an
-arbitrary `Cbor` value. The codec, compression and protocol filters (echo
-suppression, dst targeting, reconnect) live here, once — what each ThermoNav peer
-hand-rolls today (`Networking.cs`, `networking.cpp`, `networking.py`).
-
-- **v0.1 (current):** dependency-free CBOR codec + negotiated compression
-  (none/zlib/lz4) + `LoopbackTransport` + `Node` + C ABI + Python + C# bindings.
-- Layered so a new transport (NATS, mesh, BLE) is an addition, not a rewrite.
-
-See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the canonical wire standard.
-
-## Installation
-
-**One command does everything** — installs prerequisites, builds the C++ core, the
-C ABI (for C#), optionally the Python extension, and runs the tests:
-
-```bash
-./scripts/bootstrap.sh --python     # Linux / macOS (use scripts/bootstrap.ps1 on Windows)
+```cpp
+auto net = uninet::Session::join("OR Headset");
+net->subscribe("domain.>", [](auto& msg) { /* ... */ });
+net->publish("domain.D1", data);
 ```
 
-Prefer the manual route? It's plain CMake. Prerequisites: a **C++17** compiler,
-**CMake ≥ 3.18**, and **zlib** + **liblz4** (lz4 is optional — auto-detected).
+That is the complete setup. No IP address, no port, no broker to install, no
+server to run, no configuration file. Start the same program on another machine
+on the same network and the two find each other in about a second.
+
+The same three lines, in every language UniNet supports:
+
+<table>
+<tr><th>C++</th><th>Python</th><th>C#</th></tr>
+<tr valign="top"><td>
+
+```cpp
+auto net = Session::join("Server");
+
+net->subscribe("domain.>",
+  [](const Envelope& m) {
+    print(to_json(m.data));
+  });
+
+net->publish("domain.D1", data);
+```
+</td><td>
+
+```python
+net = uninet.join("Slicer")
+
+net.subscribe("domain.>",
+    lambda m: print(m.data))
+
+
+net.publish("domain.D1",
+            {"code": "update"})
+```
+</td><td>
+
+```csharp
+var net = Session.Join("MR");
+
+net.Subscribe("domain.>",
+  m => Debug.Log(m.Json));
+
+
+net.Publish("domain.D1",
+            "{\"code\":\"update\"}");
+```
+</td></tr>
+</table>
+
+A dict published from Python arrives as a `Cbor` map in C++ and as JSON in C#.
+One codec, one wire format, three languages — see [Data](#data-json-in-cbor-on-the-wire-json-out).
+
+---
+
+## Contents
+
+- [Why it exists](#why-it-exists)
+- [Install](#install)
+- [Quick start: C++](#quick-start-c) · [Python](#quick-start-python) · [C#](#quick-start-c-1)
+- [Data: JSON in, CBOR on the wire, JSON out](#data-json-in-cbor-on-the-wire-json-out)
+- [Large payloads: files, volumes, meshes](#large-payloads-files-volumes-meshes)
+- [Finding devices](#finding-devices)
+- [Realms: keeping setups apart](#realms-keeping-setups-apart)
+- [Unity / Meta Quest](#unity--meta-quest)
+- [3D Slicer](#3d-slicer)
+- [Command-line tools](#command-line-tools)
+- [Performance](#performance)
+- [How it works](#how-it-works)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Why it exists
+
+Three applications — a C++ server, a Python module inside 3D Slicer, and a
+C#/Unity app on a Meta Quest — needed to talk to each other. Each had
+re-implemented the same messaging code, and all three had the broker's IP
+address `10.0.0.10:4222` compiled into their source. Changing it meant editing
+three codebases in three languages and rebuilding an APK for the headset.
+
+UniNet removes the address and the broker at the same time. Devices announce
+themselves on the local network and connect directly to each other. There is
+nothing to install on a server, because there is no server.
+
+**What UniNet gives you**
+
+| | |
+|---|---|
+| **Zero configuration** | Devices discover each other. No addresses, anywhere. |
+| **No broker** | Peer-to-peer. Nothing to install, start, or keep running. |
+| **Three languages** | C++, Python, C# — one data model, identical bytes on the wire. |
+| **Presence** | Know who is on the network, and when someone joins or leaves. |
+| **JSON or CBOR** | Write JSON, send compact binary, read JSON. Your choice per call. |
+| **Fast** | 18k messages/s at 60 KB each; 2.3 GB/s at 240 KB. |
+
+---
+
+## Install
+
+### Prerequisites
+
+UniNet needs **ZeroMQ/Zyre** (the peer-to-peer layer), **zlib**, and optionally
+**liblz4**. If Zyre is not installed, the build fetches and compiles it
+automatically — so on most machines you can skip straight to the build.
 
 | OS | install prerequisites |
 |---|---|
-| **Ubuntu/Debian** | `sudo apt install build-essential cmake pkg-config zlib1g-dev liblz4-dev` |
-| **Fedora** | `sudo dnf install gcc-c++ cmake pkgconf-pkg-config zlib-devel lz4-devel` |
-| **Arch** | `sudo pacman -S base-devel cmake pkgconf zlib lz4` |
-| **macOS** | `brew install cmake pkg-config zlib lz4` |
-| **Windows** | `scripts/bootstrap.ps1` (auto-clones vcpkg for zlib + lz4); needs Git, CMake, and VS 2022's "Desktop development with C++" workload |
+| **Ubuntu/Debian** | `sudo apt install build-essential cmake pkg-config zlib1g-dev liblz4-dev libzyre-dev` |
+| **Fedora** | `sudo dnf install gcc-c++ cmake pkgconf-pkg-config zlib-devel lz4-devel zyre-devel` |
+| **Arch** | `sudo pacman -S base-devel cmake pkgconf zlib lz4 zyre` |
+| **macOS** | `brew install cmake pkg-config zlib lz4 zyre` |
+| **Windows** | `scripts/bootstrap.ps1` (clones vcpkg for the dependencies); needs Git, CMake, and VS 2022's "Desktop development with C++" workload |
 
-Then build:
+> If `libzyre-dev` is unavailable, install nothing extra — CMake will build
+> libzmq + czmq + zyre from source on first configure. It adds a few minutes to
+> the first build and nothing after that.
+
+### Build
 
 ```bash
+git clone <this repo> && cd UniNet
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUNINET_BUILD_CABI=ON
 cmake --build build -j
-ctest --test-dir build                                   # codec / compression / pub-sub tests
+ctest --test-dir build --output-on-failure
 ```
 
-On **Windows**, point CMake at the vcpkg toolchain:
-```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-      -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-      -DUNINET_BUILD_CABI=ON
-cmake --build build --config Release
-ctest --test-dir build -C Release
-```
+That produces:
 
-CMake options (all optional, auto where possible):
-- `UNINET_LZ4=ON` — LZ4 tier (auto-detected via pkg-config/vcpkg). Falls back to zlib + none.
-- `UNINET_NATS=ON` — builds `NatsTransport` (fetches cnats; the production brokered backend). Off by default.
-- `UNINET_BUILD_CABI=ON` — `libuninet_c.so/.dll/.dylib` (the C ABI for C# / P-Invoke).
-- `UNINET_BUILD_PYTHON=ON` — the pybind11 extension (set automatically by `pip install`).
+| artifact | what it is |
+|---|---|
+| `build/libuninet.a` | the C++ library |
+| `build/libuninet_c.so` | the C ABI, for C# / Unity / any FFI |
+| `build/uninet-discover` | CLI: what is on my network? |
+| `build/uninet-demo` | the demo (see [Command-line tools](#command-line-tools)) |
+| `build/uninet-benchmark` | end-to-end network benchmark |
 
-### Python
+**Python:**
 
 ```bash
-pip install .                      # builds the C++ extension via scikit-build-core
-# editable:
-pip install -e .
+pip install .
 ```
+
+**CMake options** (all optional):
+
+| option | default | meaning |
+|---|---|---|
+| `UNINET_BUILD_CABI` | OFF | build `libuninet_c` for C#/FFI |
+| `UNINET_BUILD_PYTHON` | OFF | build the Python extension (`pip install` sets it) |
+| `UNINET_LZ4` | ON | LZ4 compression tier, auto-detected |
+| `UNINET_SYSTEM_ZYRE` | ON | use an installed zyre; OFF forces a source build |
+
+---
+
+## Quick start: C++
+
+```cpp
+#include "uninet/session.h"
+#include "uninet/json.h"
+
+int main() {
+    // The whole setup. The name is what other devices will show for this one.
+    auto net = uninet::Session::join("Navigation Server");
+
+    // Who else is here — now, and as devices come and go.
+    net->on_peer_found([](const uninet::Peer& p) {
+        printf("found %s\n", p.describe().c_str());
+    });
+    net->on_peer_lost([](const uninet::Peer& p) {
+        printf("lost %s\n", p.name.c_str());
+    });
+
+    // Receive. A subject ending in ">" matches everything below it.
+    net->subscribe("domain.>", [](const uninet::Envelope& msg) {
+        printf("%s: %s\n", msg.subject.c_str(), uninet::to_json(msg.data).c_str());
+    });
+
+    // Send — to everyone…
+    uninet::Cbor data = uninet::Cbor::map();
+    data.set("code", uninet::Cbor::text("update"));
+    net->publish("domain.D1", data);
+
+    // …or from JSON, whichever is more convenient at the call site.
+    net->publish_json("domain.D1", R"({"code":"update","n":42})");
+
+    // …or privately, to one device.
+    for (const auto& p : net->peers())
+        if (p.role() == "headset")
+            net->publish("domain.D1", data, p.uuid);
+}
+```
+
+Link with CMake:
+
+```cmake
+add_subdirectory(UniNet)
+target_link_libraries(your_app PRIVATE uninet)
+```
+
+Or, after `cmake --install`:
+
+```cmake
+find_package(UniNet REQUIRED)
+target_link_libraries(your_app PRIVATE uninet)
+```
+
+**Configuration**, when you need it — the defaults are right for a single
+network:
+
+```cpp
+uninet::SessionConfig cfg;
+cfg.role  = "server";          // free-form label shown to other devices
+cfg.app   = "ThermoNavServer"; // owning application
+cfg.realm = "or-3";            // see Realms below
+cfg.iface = "eth0";            // only on a machine with several networks
+auto net = uninet::Session::join("Navigation Server", cfg);
+```
+
+---
+
+## Quick start: Python
 
 ```python
 import uninet
-bus = uninet.LoopbackTransport(); bus.connect()
-a = uninet.Node("alice", bus); b = uninet.Node("bob", bus)
-a.connect(); b.connect()
-b.subscribe("domain.D1", lambda env: print("got", env.data["text"].as_text()))
-a.publish("domain.D1", uninet.Cbor.map().set("text", uninet.Cbor.text("hi")))
-# -> got hi
+
+net = uninet.join("Slicer Viewer", role="viewer")
+
+net.on_peer_found(lambda p: print("found", p.name, p.address, p.role))
+net.on_peer_lost(lambda p: print("lost", p.name))
+
+# The payload is a plain dict, in and out.
+net.subscribe("domain.>", lambda msg: print(msg.subject, msg.data))
+
+net.publish("domain.D1", {
+    "code": "update",
+    "points": [1.0, 2.0, 3.0],       # numeric lists take the fast binary path
+    "nested": {"case": "liver-04"},
+})
+
+for peer in net.peers():
+    print(peer.name, peer.host, peer.role)
 ```
 
-### C# / Unity (HoloLens)
+Send privately to one device:
 
-1. Build the C ABI with `-DUNINET_BUILD_CABI=ON` → produces `libuninet_c.so` /
-   `uninet_c.dll` / `libuninet_c.dylib`.
-2. Reference `csharp/UniNet/UniNet.csproj` (P/Invoke) from your app, or run the demo:
-   ```bash
-   cd csharp/UniNetDemo && dotnet run        # after `dotnet build` (place the native lib next to the exe)
-   ```
-3. For Unity/HoloLens: drop the native lib (an **ARM64** build for the headset) into
-   your `Assets/Plugins/` folder. This is the binding the MR headset needs and that
-   UniVox never had.
+```python
+for p in net.peers():
+    if p.role == "headset":
+        net.publish("domain.D1", {"code": "update"}, dst=p.uuid)
+```
+
+`Session` is also a context manager, which announces the departure promptly:
+
+```python
+with uninet.join("Tool") as net:
+    net.publish("t.x", {"hello": True})
+```
+
+Profiling a hot loop:
+
+```python
+with uninet.profiling():
+    for _ in range(1000):
+        net.publish("t.x", payload)
+# prints a per-operation breakdown sorted by total time
+```
+
+---
+
+## Quick start: C#
 
 ```csharp
-using var bus = new LoopbackTransport();
-using var a = new Node("alice", bus);
-using var b = new Node("bob", bus);
-b.Subscribe("domain.D1", (subj, text) => Console.WriteLine($"{subj}: {text}"));
-a.Publish("domain.D1", "hello from C# over UniNet");
+using UniNet;
+
+using var net = Session.Join("MR Viewer", role: "headset");
+
+net.PeerFound += p => Console.WriteLine($"found {p.Name} at {p.Host} ({p.Role})");
+net.PeerLost  += p => Console.WriteLine($"lost {p.Name}");
+
+net.Subscribe("domain.>", msg => Console.WriteLine($"{msg.Subject}: {msg.Json}"));
+
+net.Publish("domain.D1", "{\"code\":\"update\",\"n\":42}");
+
+foreach (var p in net.Peers())
+    Console.WriteLine($"{p.Name}  {p.Host}  {p.Role}");
 ```
 
-### Troubleshooting
-- **`'pybind11/pybind11.h' not found`** — `pip install pybind11`, then pass
-  `-Dpybind11_DIR=$(python3 -m pybind11 --cmakedir)` (the bootstrap script does this for you).
-- **LZ4 not detected** — install `liblz4-dev` / `lz4-devel` / `brew install lz4`; otherwise
-  UniNet builds with zlib + none (the `Lz4` rows are simply omitted from the benchmark).
-- **`libuninet_c.so: cannot open shared object file`** (C#/Python) — add its directory to
-  `LD_LIBRARY_PATH`, or on Windows place `uninet_c.dll` next to your executable.
+**In Unity, one extra line is required.** Messages arrive on a background
+network thread, and touching the Unity API from there crashes the player. By
+default UniNet queues events for you; drain the queue from `Update()`:
 
-## Layout
-
-```
-include/uninet/   types.h · cbor.h (codec) · codec.h (envelope+compression)
-                  · transport.h · loopback.h · node.h · nats_transport.h
-                  · cabi.h (C ABI) · profiler.h
-src/              cbor · codec · loopback · node · profiler · nats_transport · cabi
-python/           bindings.cpp (pybind11) · uninet/ (package)
-csharp/           UniNet/ (P/Invoke wrapper) · UniNetDemo/ (demo)
-scripts/          bootstrap.sh (Linux/macOS) · bootstrap.ps1 (Windows)
-tests/            round-trip + pub/sub correctness (C++) · benchmark.cpp
-docs/             PROTOCOL.md (canonical wire spec) · benchmark_*.png
-tools/            plot_benchmark.py
+```csharp
+void Update() => net.Update();     // delivers callbacks on the main thread
 ```
 
-## Performance & diagnostics
+Outside Unity (a console app or service) pass `marshalToCaller: false` to get
+events immediately on the network thread instead.
 
-UniNet ships the same opt-in profiler UniVox uses (`uninet.profiler`): a zero-cost
-`ScopedOp` RAII timer placed at the **operation** level of every hot path
-(`cbor.encode`, `cbor.decode`, `compress.*`, `decompress.*`, `frame`, `unframe`,
-`node.publish`, `loopback.deliver`). Enable it, run a workload, read the per-op
-breakdown sorted by total time — the dominant cost is always at the top.
+Place the native library where .NET can find it: next to the executable, or in
+`Assets/Plugins/<platform>/` for Unity.
 
-The benchmark is a **collect-then-plot pipeline**: it runs the full pipeline matrix
-(encode → compress → frame → deliver → unframe → decode) at three mesh sizes,
-**appends every run to `uninet_bench_log.csv`** (so runs accumulate for before/after
-comparison), and dumps the profiler report to `uninet_profile.txt` with a
-`DOMINANT op` callout pointing at the next lever to pull.
+---
+
+## Data: JSON in, CBOR on the wire, JSON out
+
+UniNet sends **CBOR** — a compact binary format that carries typed values and
+stores float arrays as contiguous blocks, so a 4096-vertex mesh costs no
+per-number overhead.
+
+You never have to write CBOR. Use whatever your language makes natural:
+
+| language | what you write | what goes on the wire |
+|---|---|---|
+| Python | `{"code": "update", "pts": [1.0, 2.0]}` | CBOR |
+| C# | `"{\"code\":\"update\",\"pts\":[1.0,2.0]}"` | CBOR |
+| C++ | `Cbor::map().set(...)` or `publish_json(...)` | CBOR |
+
+All three produce **the same bytes**, and each peer reads them in its own idiom.
+That is what makes cross-language work stop being a schema-mirroring exercise.
+
+Converting explicitly, in any language:
+
+```cpp
+uninet::Cbor v = uninet::from_json(R"({"a":1})");
+std::string  s = uninet::to_json(v);
+```
+```python
+v = uninet.from_json('{"a":1}');  s = uninet.to_json(v)
+```
+```csharp
+byte[] cbor = Session.JsonToCbor("{\"a\":1}");
+string json = Session.CborToJson(cbor);
+```
+
+**Where JSON is a smaller type system than CBOR**, and what UniNet does:
+
+| CBOR | rendered as JSON |
+|---|---|
+| byte string | base64 text |
+| float array | ordinary JSON array (on one line, even when pretty-printing — a 12288-element array on 12288 lines helps nobody) |
+| integer > 2⁵³ | survives CBOR exactly; loses precision in JSON consumers |
+| NaN / Infinity | `null` (JSON has no representation for them) |
+
+---
+
+## Large payloads: files, volumes, meshes
+
+`publish()` sends a message: it arrives as one unit, and both ends hold it whole
+in memory. That is the right tool up to a few megabytes.
+
+A 200 MB CT volume or a case file is not a message. `Blob` chunks it, streams
+it, reassembles it on the far side, and reports progress at both ends:
+
+```python
+blob = uninet.Blob(net, "volumes")
+
+# receiving
+blob.on_progress(lambda info, done: print(f"{100*done/info.size:.0f}%"))
+blob.on_received(lambda info, data: save(info.name, data))
+
+# sending — metadata travels with the payload
+blob.send("patient-volume", volume, meta={
+    "dtype": str(volume.dtype),
+    "shape": list(volume.shape),
+    "spacing": [0.5, 0.5, 1.0],
+})
+blob.send_file("/path/to/case.zip")
+```
+
+```cpp
+uninet::Blob blob(*net, "volumes");
+blob.on_received([](const uninet::BlobInfo& info, const uninet::Bytes& data) {
+    save(info.name, data);
+});
+blob.send_file("/path/to/case.zip");
+```
+
+**Rule of thumb:** `publish()` for anything up to a few MB you want as one
+message; `Blob` for anything larger, or anything you want a progress bar on.
+
+Because the metadata rides with the payload, a typed transfer needs no side
+channel and no schema agreed in advance:
+
+```python
+volume = np.frombuffer(data, dtype=np.dtype(info.meta["dtype"]))
+volume = volume.reshape(info.meta["shape"])
+```
+
+Reassembly is bounded on purpose. A peer on the LAN is unauthenticated, so a
+transfer that stalls is dropped, and there are hard caps on size, on concurrent
+transfers, and on total bytes in flight (`BlobConfig`). Raise them deliberately.
+
+> Call `np.ascontiguousarray(a)` before sending a numpy array — a sliced or
+> transposed array is not contiguous, and the buffer protocol needs it to be.
+
+See [`examples/`](examples/) for complete, runnable versions of all of this.
+
+---
+
+## Finding devices
+
+Every device advertises a name, and optionally a role, an app, and any headers
+you choose. All of it arrives with the discovery beacon, so a peer list is
+complete the moment a device appears — no follow-up query.
+
+```cpp
+for (const uninet::Peer& p : net->peers()) {
+    p.uuid;       // address for a private message
+    p.name;       // "OR Headset"
+    p.address;    // "tcp://192.168.1.31:35001" — observed, not self-reported
+    p.role();     // "headset"
+    p.app();      // "ThermoNavMR"
+    p.header("anything-you-set");
+}
+```
+
+`on_peer_found` also replays the devices already present, so registration order
+never changes what you see.
+
+> **`address` is the address the connection actually came from**, not one the
+> peer claims. A device's own idea of its address is wrong behind NAT and
+> forgeable everywhere.
+
+---
+
+## Realms: keeping setups apart
+
+Devices only see devices in the **same realm**. It is the one setting that ever
+needs changing, and it exists for two situations:
+
+- Two independent setups sharing one hospital network.
+- A developer's laptop that must not join a live clinical session.
+
+```cpp
+cfg.realm = "or-3";                          // C++
+```
+```python
+uninet.join("Tool", realm="or-3")            # Python
+```
+```csharp
+Session.Join("Tool", realm: "or-3");         // C#
+```
+
+Realms isolate both messaging and the peer list — a device in another realm is
+invisible, not merely unreachable.
+
+---
+
+## Unity / Meta Quest
+
+**1. Build the native library for Android ARM64** and place it at
+`Assets/Plugins/Android/libs/arm64-v8a/libuninet_c.so`.
+
+**2. Add the C# sources.** Copy `csharp/UniNet/*.cs` into `Assets/Plugins/UniNet/`,
+or reference the built assembly.
+
+**3. Add the Wi-Fi multicast permission — this is not optional.**
+
+Android's Wi-Fi stack **silently drops multicast and subnet-broadcast frames**
+unless the app holds a `WifiManager.MulticastLock`. Without it the headset
+receives no discovery traffic at all: it will be invisible to every other device
+and blind to all of them, with no error message anywhere.
+
+In `Assets/Plugins/Android/AndroidManifest.xml`:
+
+```xml
+<uses-permission android:name="android.permission.INTERNET"/>
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+<uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+```
+
+It is a normal install-time permission — no runtime request needed.
+
+**4. Acquire the lock before joining, release it on teardown.** A ready-made
+helper lives at `docs/unity/UniNetMulticastLock.cs`; copy it into your project.
+
+**5. Wire it into a MonoBehaviour:**
+
+```csharp
+using UnityEngine;
+using UniNet;
+
+public class UniNetBehaviour : MonoBehaviour
+{
+    private Session _net;
+
+    void Start()
+    {
+        UniNetMulticastLock.Acquire();          // must come before Join
+        _net = Session.Join("MR Viewer", role: "headset", app: "ThermoNavMR");
+
+        _net.PeerFound += p => Debug.Log($"UniNet: found {p.Name} at {p.Host}");
+        _net.Subscribe("domain.>", OnMessage);
+    }
+
+    // Called on the MAIN thread, because Update() drains the queue.
+    void OnMessage(Message msg) => Debug.Log($"{msg.Subject}: {msg.Json}");
+
+    void Update() => _net?.Update();            // required
+
+    void OnDestroy()
+    {
+        _net?.Dispose();
+        UniNetMulticastLock.Release();
+    }
+}
+```
+
+**Verify the permission shipped**, after your next build:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j --target benchmark
-./build/benchmark 200 2000          # CSV to stdout + uninet_bench_log.csv + uninet_profile.txt
-python3 tools/plot_benchmark.py     # reads the CSV -> regenerates docs/benchmark_*.png
+aapt dump permissions your.apk | grep MULTICAST
 ```
 
-![Codec + transport throughput](docs/benchmark_throughput.png)
+> **Ethernet or USB tethering on the headset:** the multicast lock applies to
+> Wi-Fi only. On a non-Wi-Fi interface the lock is harmless but does nothing —
+> discovery works because those interfaces do not filter multicast.
 
-![Compression tiers](docs/benchmark_compression.png)
+---
 
-4096-vert mesh (~108 KiB uncompressed CBOR, mean of 200 reps, 32-core box):
+## 3D Slicer
 
-| op | throughput | notes |
-|---|---|---|
-| **encode** | **8.1 GB/s** | bulk-write fast path (was 1.3 GB/s — see below) |
-| **decode** | **7.9 GB/s** | memory-bandwidth-bound (bulk float-array fast path) |
-| **frame** | 5.0 GB/s | encode + compress |
-| **unframe** | 4.2 GB/s | decompress + decode |
-| **LZ4 compress** | 14.8 GB/s (ratio 1.42×) | see the caveat below — this figure is an artifact |
-| **LZ4 decompress** | 12.3 GB/s | |
-| zlib compress | 36 MB/s (ratio 2.29×) | 108 KiB → 47 KiB — best ratio, too slow for live |
-| zlib decompress | 504 MB/s | |
-| **loopback pub/sub** | **23.1k msgs/s · 2.44 GB/s** | full encode→unframe→dispatch round-trip |
+Slicer ships its own Python. The extension module must be built against **that**
+interpreter, not the system one.
 
-> **Two corrections to earlier numbers in this table.**
->
-> **1. The 27.8k msgs/s previously published here was not reproducible.** It came
-> from a single lucky run: glibc raises its mmap threshold after it sees large
-> blocks freed, so that one run happened to serve the framing buffers from the
-> heap instead of via `mmap`. Every subsequent run in `uninet_bench_log.csv`
-> measured **5.5–5.9k msgs/s** — a 4.7× gap nobody noticed because the README was
-> frozen at the best result. The cause was per-message allocator churn (§ below);
-> it is now fixed, and 23.1k is what the benchmark reproduces run over run.
->
-> **2. The LZ4 compression figures are measured on a linear ramp**
-> (`pts[i] = i * 0.123f`), which is far more compressible than real mesh
-> coordinates. 14.8 GB/s is above what single-core LZ4 can do on genuine data
-> (~1 byte/cycle ⇒ 3–5 GB/s), and the 1.42× ratio will be closer to 1.0–1.05×
-> on real float32 point clouds. Treat "LZ4 is free, leave it on" as unproven
-> until the benchmark carries a realistic payload.
+```bash
+# Point CMake at Slicer's Python (adjust the path to your install)
+SLICER_PY=/opt/Slicer/bin/PythonSlicer
 
-**Two profiler-driven wins so far (loopback 8.5k → 27.8k msgs/s = 3.3×):**
-
-1. **`cbor.encode` 6× win.** The first profile flagged encoding as the dominant cost —
-   1.3 GB/s vs decode's 7.8 (6× slower), 86% of framing time. Cause: the float-array
-   path did one `push_back` per byte (61k calls + reallocs) while decode read bulk.
-   Switching encode to pre-size and write directly lifted it to **8.1 GB/s** and
-   doubled loopback (every publish pays the encode cost).
-
-2. **Echo suppression without decompress.** The next profile showed
-   `unframe`/`decode`/`decompress` running **4000× for 2000 publishes** — each
-   publisher was decoding its *own echo* then discarding it, and with compression on
-   it had to decompress first just to read `src`. Fix: put `src`/`dst`/compression in
-   a **clear binary header** before the compressed core (`peek_routing`), so
-   `Node::on_raw_` drops echoes *before* touching the payload. `unframe` calls halved
-   (4k → 2k) and loopback rose another **+45%** (17.7k → 27.8k).
-
-**3. Allocator churn — the win the profiler could not see (3.9×).**
-
-After the first two wins the per-op table looked *balanced*, which was read as
-"the easy wins are exhausted." It wasn't: the dominant cost was **inside malloc**,
-where no `ScopedOp` reaches. Every `publish` allocated and freed three buffers
-(encoded core → compressed payload → wire) and every receive allocated another.
-glibc's mmap threshold starts at 128 KiB, so for the mesh payloads UniNet actually
-carries (~100–450 KiB) each of those was an `mmap`/`munmap` syscall pair plus page
-faults on first touch — and `munmap` cannot recycle the block, so the next message
-paid it all again.
-
-The fix is Cornflakes-style arena reuse: `frame_into`/`unframe_into` take a
-caller-owned `Scratch`, `Node` keeps one per thread, and `LoopbackTransport` keeps
-one delivery buffer per re-entrancy depth. Steady-state publishing now allocates
-**nothing** after the first message.
-
-| payload | before | after | |
-|---|---|---|---|
-| 512 verts (13.8 KiB) | 43.3k msgs/s | **72.7k** | 1.68× |
-| **4096 verts (108 KiB)** — the live MR mesh size | 5.9k msgs/s | **23.1k** | **3.9×** |
-| 16384 verts (432 KiB) | 3.4k msgs/s | 3.7k | 1.06× |
-
-The 432 KiB row barely moves because at that size the codec itself is
-memory-bandwidth-bound — the allocator was never the dominant term there. The win
-is concentrated exactly where ThermoNav operates.
-
-*Lesson for the profiler:* an op-level breakdown attributes allocator time to
-whichever op happened to call `malloc`, so a cost that is spread evenly across
-every op reads as "balanced" rather than "dominant." Balance is not proof that the
-wins are exhausted.
-
-**What the tier numbers say:**
-- **LZ4 is essentially free and should stay on for every frame** — 14.6 GB/s with a
-  real 1.4× cut. This is the lever the three ThermoNav peers *already coded* but
-  force-disabled to `NONE` everywhere (no peer could tell how a frame was encoded);
-  UniNet's 1-byte compression header fixes that.
-- **zlib's better ratio (2.3×) isn't worth it live** — 36 MB/s compress is ~400×
-  slower than LZ4. Reserve zlib for archival/batch, LZ4 for the OR.
-- The protocol layer is not the bottleneck at any realistic rate (the MR peer
-  throttles to ~20 Hz today; UniNet sustains ~17k pub/sub round-trips/s).
-
-Compression level is tunable at runtime (`uninet.set_compression_level(1..9)` for
-zlib; default 6).
-
-## Hostile-input hardening
-
-Frames arrive from the network, so every length prefix in them is attacker
-controlled. Three defects made a peer killable by a tiny frame; all three are
-fixed and covered by `test_hostile_frames`:
-
-| Defect | Trigger | Was |
-|---|---|---|
-| Length-prefix overflow | 9-byte frame declaring a 2⁶⁴−1 byte string — `c.i + n` wraps, so the bounds check passed | `std::length_error` → **process abort** |
-| Stride overflow in the float fast path | array count `n` where `n*5` wraps to a small value | heap out-of-bounds read |
-| Unbounded decode recursion | ~8.5k nested indefinite-length arrays, which LZ4-compress to **~60 bytes** | stack exhaustion → **segfault** |
-
-Lengths are now range-checked without overflowing (`fits()`) and decode depth is
-capped at 128. There is still **no authentication or integrity check on the wire**
-— `src_uuid` is self-asserted plaintext, so echo suppression and `dst` targeting
-are spoofable by any peer on the bus. That is the outstanding design gap.
-
-**Also fixed — silent data loss on high-ratio payloads.** `decompress` used to
-guess the output size from the input size and grow, giving up after 8 (zlib) or
-32 (LZ4) attempts; past that ceiling it returned empty, `unframe` returned
-`nullopt`, and `Node` dropped the message **with no error anywhere**. Anything
-compressing better than ~190× was lost — including sparse `safety_map` payloads,
-a documented ThermoNav message type:
-
-```
-             before          after
-128x128      OK              OK
-256x256      *** DROPPED *** OK      (ratio 224x)
-512x512      *** DROPPED *** OK      (ratio 234x)
+cmake -S . -B build-slicer -DCMAKE_BUILD_TYPE=Release \
+      -DUNINET_BUILD_PYTHON=ON \
+      -DPython3_EXECUTABLE=$($SLICER_PY -c "import sys; print(sys.executable)") \
+      -Dpybind11_DIR=$($SLICER_PY -m pybind11 --cmakedir)
+cmake --build build-slicer -j
 ```
 
-LZ4 now reads the true content size from the frame header instead of guessing.
+Copy the resulting extension and package next to Slicer's `site-packages`:
 
-## Status (v0.1)
+```bash
+SITE=$($SLICER_PY -c "import site; print(site.getsitepackages()[0])")
+cp -r python/uninet "$SITE/"
+```
 
-**Verified:** CBOR round-trips (all kinds, incl. fast float arrays), zlib + LZ4
-compression round-trips, envelope frame/unframe, loopback pub/sub (echo suppression,
-dst targeting, wildcard), reconnect-with-backoff, synchronous request-reply
-(`Node::request` over a request-capable transport), profiler, Python bindings
-(`pip install`), C ABI + C# wrapper, builds CPU-only with no broker required.
+Then, in your Slicer module:
 
-**Deployed:** all three ThermoNav peers now consume UniNet instead of their
-hand-rolled buses — ThermoNavServer (vendored C++ core + `networking.cpp`),
-ThermoNavSlicer (Python extension + `networking.py`), ThermoNavMR (C ABI /
-P-Invoke + `Networking.cs`). Each kept a `.legacy` copy of the code it replaced.
-The application message taxonomy is **not** owned here — it lives in one IDL
-(`ThermoNavServer/prototypes/comm_standard/schema.toml`), which generates the
-bindings for every peer; UniNet stays schema-agnostic.
+```python
+import uninet
 
-**Staged (documented, not yet in-tree):** the `NatsTransport` wired into a live
-benchmark against a broker; mesh discovery + BLE backends behind the `Transport`
-interface; request-reply exposed through the C ABI / C# wrapper (today it is C++
-and Python only); a managed CBOR surface for C#; and cross-platform wheels via CI
-(`cibuildwheel`) plus a NuGet package.
+class MyModuleLogic:
+    def __init__(self):
+        self.net = uninet.join("Slicer Viewer", role="viewer", app="ThermoNavSlicer")
+        self.net.subscribe("thermonav.v1.>", self.on_message)
+        self.net.on_peer_found(self.on_peer)
 
-## License
+    def on_message(self, msg):
+        # Called on UniNet's network thread. Slicer's VTK/Qt objects are NOT
+        # thread-safe — hop to the main thread before touching the scene.
+        import qt
+        qt.QTimer.singleShot(0, lambda: self.apply(msg.data))
 
-MIT.
+    def apply(self, data):
+        if data.get("code") == "update":
+            ...   # safe here: this runs on Slicer's main thread
+
+    def on_peer(self, peer):
+        print(f"UniNet: {peer.name} ({peer.role}) at {peer.host}")
+```
+
+> **The threading rule is the same as Unity's**: callbacks arrive on a
+> background thread. Marshal to the main thread before touching VTK, Qt, or the
+> MRML scene. `qt.QTimer.singleShot(0, fn)` is the idiomatic way in Slicer.
+
+A device list widget, since Slicer modules usually want one:
+
+```python
+def refresh_device_list(self):
+    self.deviceCombo.clear()
+    for p in self.net.peers():
+        self.deviceCombo.addItem(f"{p.name} — {p.role} ({p.host})", p.uuid)
+```
+
+---
+
+## Command-line tools
+
+### `uninet-discover` — what is on my network?
+
+The tool to run when someone says "the headset can't see the server".
+
+```bash
+uninet-discover              # live view: devices arriving and leaving
+uninet-discover --once       # one snapshot, then exit
+```
+
+```
+DEVICE                     ADDRESS          ROLE         APP
+Navigation Server          192.168.1.10     server       ThermoNavServer
+OR Headset                 192.168.1.31     headset      ThermoNavMR
+Planning Laptop            192.168.1.24     viewer       ThermoNavSlicer
+
+3 devices.
+```
+
+When it finds nothing, it says what to check — in order, in plain language.
+
+| flag | meaning |
+|---|---|
+| `--once` | one snapshot instead of a live view |
+| `--timeout <s>` | how long `--once` listens (default 3) |
+| `--realm <name>` | only show devices in this realm |
+| `--interface <n>` | which network to look on (`eth0`, or an IP) |
+| `--version` | the ZeroMQ/Zyre versions in use |
+
+### `uninet-demo` — two devices talking, with nothing configured
+
+```bash
+uninet-demo "Planning Laptop"
+uninet-demo "OR Headset" --role headset      # another terminal, or another machine
+```
+
+Each prints the other arriving, then they exchange messages. Nobody types an
+address. `scripts/demo.sh` runs three at once.
+
+### `uninet-file-transfer` — send a file, no address needed
+
+```bash
+uninet-file-transfer receive ./incoming     # one machine
+uninet-file-transfer send report.pdf        # another
+```
+
+### `uninet-benchmark`
+
+```bash
+uninet-benchmark 300      # 300 messages per payload size
+```
+
+Measures cold-start discovery and end-to-end throughput, appending each run to
+`uninet_network_bench.csv` so runs accumulate.
+
+---
+
+## Performance
+
+Measured with `uninet-benchmark` on a 32-core Linux box, two sessions exchanging
+mesh payloads over the full stack — encode → compress → frame → TCP → unframe →
+decompress → decode → dispatch:
+
+| payload | size on the wire | messages/s | throughput | delivered |
+|---|---|---|---|---|
+| 512 verts | 7.7 KB | **38,115** | 280 MB/s | 300/300 |
+| **4096 verts** (the live MR mesh) | 61 KB | **18,503** | 1,085 MB/s | 300/300 |
+| 16384 verts | 246 KB | **9,777** | 2,292 MB/s | 300/300 |
+
+**Cold-start discovery: 2 ms** for two processes on one machine.
+
+> **On a real network, expect discovery to take about a second**, not two
+> milliseconds. ZRE's beacon interval and the Wi-Fi association dominate, and the
+> 2 ms figure only reflects a same-host loopback. Treat ~1 s as the number to
+> design around, and the 2 ms as a floor.
+
+Codec-level numbers (encode/compress/frame in isolation) come from the separate
+`benchmark` target and are logged to `uninet_bench_log.csv`.
+
+**What this means in practice:** the MR peer streams at ~20 Hz. UniNet sustains
+roughly 900× that rate at the same payload size, so the protocol layer is not
+the bottleneck at any realistic rate.
+
+---
+
+## How it works
+
+```
+your code
+    │
+    ├── Session ................ join, publish, subscribe, peers
+    │       │
+    │       ├── Node ........... envelope, dst filter, subject matching
+    │       │      └── codec ... CBOR + compression (none / zlib / LZ4)
+    │       │
+    │       └── ZyreTransport .. discovery + peer-to-peer delivery
+    │                  │
+    │                  └── ZeroMQ / Zyre (ZRE, RFC 36/43)
+    │                          UDP beacon on :5670 → direct TCP between peers
+    │
+    ├── Blob ................... chunked transfer for files / volumes / meshes
+    └── JSON bridge ............ from_json / to_json
+```
+
+**Source layout**
+
+```
+include/uninet/   session.h  ← start here
+                  peer.h · zyre_transport.h · blob.h · json.h
+                  node.h · transport.h · loopback.h
+                  cbor.h · codec.h · types.h · profiler.h · cabi.h
+src/              one .cpp per header
+python/           bindings.cpp (pybind11) · uninet/ (package) · tests/
+csharp/           UniNet/ (Session.cs, Native.cs) · UniNetDemo/
+examples/         demo.cpp · file_transfer.cpp · python/ — see examples/README.md
+tests/            test_roundtrip (codec) · test_network · test_cabi (C)
+                  benchmark (codec) · benchmark_network (end-to-end)
+                  interop/ — the three-language interop participants
+                  docker/  — Linux and Windows-cross test images
+tools/            uninet_discover.cpp
+scripts/          test-all.sh · test-interop.sh · demo.sh · bootstrap.{sh,ps1}
+docs/             PROTOCOL.md · unity/UniNetMulticastLock.cs
+```
+
+**Discovery** is ZRE's UDP beacon: each node broadcasts its presence on the
+local link, peers hear it and open a direct TCP connection. Beacons carry a hop
+limit of 1, so they never cross a router — discovery cannot leak into the rest of
+a hospital network.
+
+**Delivery** is peer-to-peer TCP. A broadcast is a `SHOUT` to the realm group; an
+addressed message is a `WHISPER` to one peer, which is a genuine unicast rather
+than a broadcast everyone else filters. Echo suppression is free — ZRE never
+delivers a node its own broadcast.
+
+**The payload** is UniNet's own CBOR envelope, carrying the subject, the sender's
+uuid, and your data, with routing in a clear header before the compressed body
+so a receiver can filter without decompressing. See
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+**Licence note:** Zyre and czmq are MPL-2.0, libzmq is MPL-2.0. These are
+file-level copyleft: you can link them into a proprietary application and ship
+it; only modifications to *their* source files must be published. UniNet itself
+is MIT.
+
+---
+
+## Testing
+
+```bash
+./scripts/test-all.sh              # everything runnable natively
+./scripts/test-all.sh --docker     # plus cross-platform and cross-language
+```
+
+Or run a suite directly:
+
+```bash
+ctest --test-dir build --output-on-failure     # C++ core, network, C ABI
+PYTHONPATH=python pytest python/tests -v       # Python
+./scripts/test-interop.sh                      # C++ <-> Python <-> C#
+```
+
+| suite | what it covers |
+|---|---|
+| `test_roundtrip` | CBOR round-trips, compression, framing, hostile frames |
+| `test_network` | real discovery, departure, broadcast, unicast, realm isolation, concurrent publish/subscribe, large-payload transfer |
+| `test_cabi` | the C ABI compiled **as C** — the exact path C#/Unity takes, including UTF-8, null-safety and pointer lifetimes |
+| `python/tests` | dict round-trips, numpy volumes, discovery, wildcards, threading, error handling |
+| `scripts/test-interop.sh` | a C++, a Python and a C# node in one realm, each verifying the others' payloads field by field |
+
+Every network test runs in a realm unique to its process, so a demo on the same
+machine — or a second CI job on the same box — cannot perturb it.
+
+**Cross-platform.** `tests/docker/` holds two images: a Debian one that builds
+Zyre from source (the path a machine without a system Zyre takes) and runs all
+three languages, and a MinGW one that compiles every translation unit for
+Windows. The second exists because Windows-only defects are otherwise invisible
+until someone tries — it is what caught `interface` being a macro in
+`<objbase.h>`, which broke the build on Windows and nowhere else.
+
+`.gitlab-ci.yml` runs the Linux suite, the sanitizers, the Windows portability
+check and the interop test on every push, plus MSVC and macOS jobs that activate
+once runners with those tags exist.
+
+**Sanitizers**, when changing the transport:
+
+```bash
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_CXX_FLAGS="-fsanitize=thread -g"
+cmake --build build-tsan -j && ./build-tsan/test_network
+```
+
+---
+
+## Troubleshooting
+
+**Two devices cannot see each other.**
+
+1. Are they on the same Wi-Fi network or switch? Discovery is link-local by
+   design and does not cross routers.
+2. **Guest Wi-Fi and "client isolation" block devices from seeing each other.**
+   This is the single most common cause. A normal network, or a cable, works.
+3. Is UDP port 5670 open? A host firewall will block the beacon.
+4. On a machine with several networks, name the one you mean:
+   `cfg.iface = "eth0"` (C++), `iface="eth0"` (Python/C#) — otherwise discovery
+   may pick the wrong one.
+5. On a Meta Quest / Android device, see [Unity / Meta Quest](#unity--meta-quest):
+   without the multicast permission the headset receives nothing.
+
+Run `uninet-discover` on both machines; whichever one shows an empty list is the
+one with the problem.
+
+**Devices see each other but messages do not arrive.** Check the realms match,
+and check the subject: `domain.D1` does not match a subscription to `domain.D1.>`
+— use `domain.>` to catch everything below `domain`.
+
+**`libuninet_c.so: cannot open shared object file`.** Add its directory to
+`LD_LIBRARY_PATH`, or on Windows place `uninet_c.dll` next to the executable. In
+Unity it belongs in `Assets/Plugins/<platform>/`.
+
+**The Python extension imports but `join()` fails.** Check
+`uninet.zyre_version()` — if that works the library is loaded correctly and the
+problem is the network, not the build.
+
+---
+
+## Licence
+
+MIT. See [`LICENSE`](LICENSE).
+
+Depends on ZeroMQ/czmq/Zyre (MPL-2.0), zlib, and optionally liblz4.

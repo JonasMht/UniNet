@@ -33,9 +33,6 @@ static std::string caps() {
 #else
     s += "(no-lz4)";
 #endif
-#ifdef UNINET_HAS_NATS
-    s += "+nats";
-#endif
     return s;
 }
 

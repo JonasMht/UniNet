@@ -48,17 +48,31 @@ std::optional<Routing> peek_routing(const Bytes& wire);
 // Deflate level for the zlib codec (1..9). Lower = faster + worse ratio. Default 6.
 void set_compression_level(int level);
 
+// Ceiling on what one frame may decompress to. A compressed frame declares (LZ4)
+// or implies (zlib) its decompressed size, and both numbers come from whoever
+// sent the frame: a 34-byte LZ4 header claiming 2^64-1 bytes of content used to
+// reach std::vector::resize and abort the process on length_error. Any frame that
+// wants more than this is refused rather than sized up. 256 MiB is ~500x the
+// largest payload UniNet actually carries (a 450 KiB mesh).
+constexpr size_t MAX_DECOMPRESSED_BYTES = size_t(256) * 1024 * 1024;
+
 // Compress / decompress a raw byte buffer. None is identity. Zlib is always
 // available; Lz4 when compiled with liblz4 (UNINET_HAS_LZ4). A decompress of
 // bytes that weren't compressed with `method` returns an empty buffer.
 Bytes compress(const Bytes& raw, Compression method);
 Bytes decompress(const Bytes& comp, Compression method);
 
-// Same, into a caller-owned buffer (cleared, capacity retained).
+// Same, into a caller-owned buffer (cleared, capacity retained). decompress_into()
+// returns false (and clears `out`) on malformed, truncated, or over-large input —
+// it never throws: it runs on the receive path, where every byte is hostile until
+// proven otherwise, and its callers treat it as noexcept.
 void compress_into(const uint8_t* raw, size_t n, Compression method, Bytes& out);
 bool decompress_into(const uint8_t* comp, size_t n, Compression method, Bytes& out);
 
-// Full wire frame of an envelope (header + compressed core).
+// Full wire frame of an envelope (header + compressed core). A uuid longer than
+// the header's 16-bit length field cannot be framed: the result is an EMPTY wire
+// (callers must treat empty as "not sent"). Truncating the length instead turned
+// a targeted frame into a malformed broadcast.
 Bytes frame(const Envelope& e);
 std::optional<Envelope> unframe(const Bytes& wire);
 

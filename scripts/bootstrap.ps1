@@ -27,7 +27,7 @@ if (-not (Test-Path "$env:VCPKG_ROOT/vcpkg.exe")) {
     git clone -q https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
     & "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics | Out-Null
 }
-& "$env:VCPKG_ROOT/vcpkg.exe" install zlib:x64-windows lz4:x64-windows | Out-Null
+& "$env:VCPKG_ROOT/vcpkg.exe" install zlib:x64-windows lz4:x64-windows zeromq:x64-windows czmq:x64-windows zyre:x64-windows | Out-Null
 $Toolchain = "$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 Ok "vcpkg ready"
 

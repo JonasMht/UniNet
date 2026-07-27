@@ -14,7 +14,28 @@ namespace uninet {
 
 namespace {
 int g_zlib_level = 6;  // zlib default compression level (1..9).
+
+// How far a frame may expand relative to its own size before we call it a bomb
+// rather than a payload. The LZ4 frame format tops out near 255x and deflate near
+// 1032x, so this accepts anything a real compressor can emit while stopping a
+// tiny hostile frame from sizing a huge buffer.
+constexpr size_t kMaxExpansion = 2048;
+
+// Growing a decompression buffer is the one place where a remote peer picks our
+// allocation size, so every resize on that path goes through here: it reports
+// failure instead of letting length_error/bad_alloc escape (decompress_into and
+// unframe_into are treated as noexcept by their callers).
+bool try_resize(Bytes& b, size_t n) {
+    if (n > MAX_DECOMPRESSED_BYTES) return false;
+    try {
+        b.resize(n);
+    } catch (...) {
+        b.clear();
+        return false;
+    }
+    return true;
 }
+}  // namespace
 
 void set_compression_level(int level) {
     if (level < 1) level = 1;
@@ -115,53 +136,84 @@ bool decompress_into(const uint8_t* comp, size_t n, Compression method, Bytes& o
         profiler::ScopedOp _("decompress.zlib", n, 0);
         // Output size isn't on the wire, so grow until it fits. `out` is reused
         // across calls, so a steady stream of similar frames converges to zero
-        // reallocations after the first message.
-        if (out.size() < n * 4 + 64) out.resize(n * 4 + 64);
-        for (int attempt = 0; attempt < 8; ++attempt) {
+        // reallocations after the first message. The growth is bounded by the
+        // policy ceiling rather than by a retry count: the old 8-doublings budget
+        // both let a frame ask for 512x its own size (a bomb) and silently dropped
+        // legitimate payloads that compressed better than that (deflate reaches
+        // 1032x, and the sparse safety maps get close).
+        const size_t first = (n < MAX_DECOMPRESSED_BYTES / 4) ? n * 4 + 64 : MAX_DECOMPRESSED_BYTES;
+        if (out.size() < first && !try_resize(out, first)) { out.clear(); return false; }
+        for (;;) {
             uLongf out_len = uLongf(out.size());
             int rc = uncompress(out.data(), &out_len, comp, uLong(n));
             if (rc == Z_OK) { out.resize(out_len); return true; }
             if (rc != Z_BUF_ERROR) { out.clear(); return false; }
-            out.resize(out.size() * 2);
+            if (out.size() >= MAX_DECOMPRESSED_BYTES) { out.clear(); return false; }
+            const size_t grown = out.size() < MAX_DECOMPRESSED_BYTES / 2 ? out.size() * 2
+                                                                         : MAX_DECOMPRESSED_BYTES;
+            if (!try_resize(out, grown)) { out.clear(); return false; }
         }
-        out.clear();
-        return false;
     }
 #ifdef UNINET_HAS_LZ4
     if (method == Compression::Lz4) {
         profiler::ScopedOp _("decompress.lz4", n, 0);
-        // The frame header carries the content size when the compressor knew it
-        // (LZ4F_compressFrame does), so one sized decompress replaces the old
-        // grow-and-retry streaming loop and its per-call scratch allocation.
-        static thread_local LZ4F_decompressionContext_t ctx = nullptr;
-        if (!ctx && LZ4F_isError(LZ4F_createDecompressionContext(&ctx, LZ4F_VERSION))) {
-            ctx = nullptr;
-            out.clear();
-            return false;
-        }
-        LZ4F_resetDecompressionContext(ctx);
+        // The frame header carries the content size when the compressor knew it,
+        // so one sized decompress replaces the old grow-and-retry streaming loop
+        // and its per-call scratch allocation.
+        //
+        // One context per thread, reused across frames — and OWNED, so it is freed
+        // when the thread exits. The bare thread_local pointer this replaces was
+        // never freed: ~131 KB leaked per thread that ever received an LZ4 frame
+        // (LeakSanitizer).
+        struct Ctx {
+            LZ4F_decompressionContext_t c = nullptr;
+            Ctx()  { if (LZ4F_isError(LZ4F_createDecompressionContext(&c, LZ4F_VERSION))) c = nullptr; }
+            ~Ctx() { if (c) LZ4F_freeDecompressionContext(c); }
+            Ctx(const Ctx&) = delete;
+            Ctx& operator=(const Ctx&) = delete;
+        };
+        static thread_local Ctx ctx;
+        if (!ctx.c) { out.clear(); return false; }
+        LZ4F_resetDecompressionContext(ctx.c);
 
         size_t hdr = n;
         LZ4F_frameInfo_t info{};
-        size_t rc = LZ4F_getFrameInfo(ctx, &info, comp, &hdr);
+        size_t rc = LZ4F_getFrameInfo(ctx.c, &info, comp, &hdr);
         if (LZ4F_isError(rc)) { out.clear(); return false; }
 
-        size_t cap = info.contentSize ? size_t(info.contentSize) : (n * 6 + 1024);
-        if (out.size() < cap) out.resize(cap);
+        // info.contentSize is the SENDER's claim, not a measurement: a 34-byte
+        // frame declaring 2^64-1 bytes of content sized the buffer straight into
+        // std::length_error, i.e. an abort on the receive path. Believe it only up
+        // to the policy ceiling and to a sane expansion of the bytes actually in
+        // hand; anything real that needs more grows into it in the loop below.
+        const size_t limit = (n < MAX_DECOMPRESSED_BYTES / kMaxExpansion)
+                                 ? n * kMaxExpansion + 1024 : MAX_DECOMPRESSED_BYTES;
+        const uint64_t want = info.contentSize ? info.contentSize : (uint64_t(n) * 6 + 1024);
+        const size_t cap = want > uint64_t(limit) ? limit : size_t(want);
+        if (out.size() < cap && !try_resize(out, cap)) { out.clear(); return false; }
 
         size_t in_pos = hdr, produced = 0;
-        for (int attempt = 0; attempt < 32; ++attempt) {
+        bool complete = false;
+        for (int attempt = 0; attempt < 64; ++attempt) {
             size_t out_avail = out.size() - produced;
             size_t in_avail = n - in_pos;
-            rc = LZ4F_decompress(ctx, out.data() + produced, &out_avail,
+            rc = LZ4F_decompress(ctx.c, out.data() + produced, &out_avail,
                                  comp + in_pos, &in_avail, nullptr);
             if (LZ4F_isError(rc)) { out.clear(); return false; }
             in_pos += in_avail;
             produced += out_avail;
-            if (rc == 0) break;                       // frame complete
+            if (rc == 0) { complete = true; break; }  // frame ended cleanly
             if (in_pos >= n && out_avail == 0) break; // no progress possible
-            if (produced == out.size()) out.resize(out.size() * 2);
+            if (produced == out.size()) {
+                const size_t grown = out.size() < limit / 2 ? out.size() * 2 : limit;
+                if (grown <= out.size() || !try_resize(out, grown)) { out.clear(); return false; }
+            }
         }
+        // A nonzero rc means LZ4 is still waiting for bytes we do not have, and
+        // running out of attempts means the same. Both used to fall through to
+        // `return true`, so a truncated frame decoded into a plausible-looking
+        // envelope instead of being dropped.
+        if (!complete) { out.clear(); return false; }
         out.resize(produced);
         return true;
     }
@@ -191,6 +243,11 @@ inline void wr_be16(Bytes& b, uint16_t v) { b.push_back(uint8_t(v >> 8)); b.push
 
 void frame_into(const Envelope& e, Bytes& wire, Scratch& scratch) {
     profiler::ScopedOp _("frame");
+    // The header's length fields are 16 bits. A longer uuid used to be truncated
+    // by the uint16_t cast, which does not produce a frame addressed to the wrong
+    // peer — it produces a frame whose header no longer parses, so a unicast
+    // silently became malformed garbage. Refuse to build it instead.
+    if (e.src_uuid.size() > 0xFFFF || e.dst_uuid.size() > 0xFFFF) { wire.clear(); return; }
     encode_into(to_cbor(e), scratch.core);
 
     const uint8_t* payload = scratch.core.data();

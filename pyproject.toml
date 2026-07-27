@@ -4,23 +4,30 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "uninet"
-version = "0.1.0"
-description = "UniNet — Unified Networking transport. Compiled C++ core (CBOR codec, compression, pluggable transport, pub/sub Node) with Python bindings."
+version = "0.2.0"
+description = "UniNet — brokerless peer-to-peer messaging with LAN discovery built in. No broker, no addresses to configure."
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+requires-python = ">=3.9"
+# No runtime dependencies. numpy arrays are accepted (via .tolist()) but numpy is
+# never imported, so it is not a dependency — the previous release declared one
+# for code that did not exist, forcing it on every consumer.
+dependencies = []
 license = { text = "MIT" }
 authors = [{ name = "JonasMht" }]
-keywords = ["networking", "pubsub", "cbor", "nats", "transport", "medical"]
+keywords = ["networking", "pubsub", "cbor", "json", "zeromq", "zyre", "discovery", "medical"]
 
 [project.optional-dependencies]
-test = ["pytest", "numpy>=1.24"]
+test = ["pytest"]
 
 [tool.scikit-build]
-# Loopback + zlib + lz4 wheel by default (portable). NATS variant is a build profile.
-cmake.args = ["-DUNINET_BUILD_PYTHON=ON", "-DUNINET_NATS=OFF"]
+cmake.args = ["-DUNINET_BUILD_PYTHON=ON"]
 wheel.packages = ["python/uninet"]
 build-dir = "build/py"
 
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+
 [tool.cibuildwheel]
-test-command = "python -c \"import uninet; print('uninet', uninet.__version__, 'protocol', uninet.PROTOCOL_VERSION, 'lz4', uninet.HAS_LZ4)\""
+# Assert the tiers actually made it into the wheel rather than only printing
+# them: a wheel silently built without LZ4 sends uncompressed frames.
+test-command = "python -c \"import uninet; assert uninet.PROTOCOL_VERSION == 1; print('uninet', uninet.__version__, uninet.zyre_version(), 'lz4', uninet.HAS_LZ4)\""

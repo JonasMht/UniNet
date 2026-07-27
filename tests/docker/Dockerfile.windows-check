@@ -1,0 +1,31 @@
+# UniNet Windows portability check, via MinGW-w64.
+#
+# This compiles UniNet's OWN translation units for x86_64-w64-mingw32. It is a
+# compile check, not a link: the point is to catch the portability defects that
+# live in our source — POSIX-only calls (gmtime_r), missing Winsock includes,
+# gcc/clang-only pragmas, wrong socket types — without needing a Windows machine.
+#
+# It deliberately does not cross-build libzmq/czmq/zyre: their MinGW build has
+# its own quirks that say nothing about UniNet. Only their headers are needed to
+# compile against, and those are copied in from the build host.
+#
+# A real MSVC build with vcpkg runs in CI — see .gitlab-ci.yml.
+#
+#   docker build -f tests/docker/Dockerfile.windows-check -t uninet-wincheck .
+#   docker run --rm -v "$PWD":/src:ro uninet-wincheck
+FROM debian:bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        mingw-w64 mingw-w64-tools make git ca-certificates libz-mingw-w64-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Headers only — no cross-build of the dependencies. UniNet compiles against
+# these exactly as it would on a real Windows toolchain.
+WORKDIR /hdr
+RUN git clone --depth 1 -b v4.3.5 https://github.com/zeromq/libzmq.git \
+ && git clone --depth 1 -b v4.2.1 https://github.com/zeromq/czmq.git \
+ && git clone --depth 1 -b v2.0.1 https://github.com/zeromq/zyre.git
+COPY tests/docker/run-wincheck.sh /usr/local/bin/run-wincheck
+RUN chmod +x /usr/local/bin/run-wincheck
+ENTRYPOINT ["/usr/local/bin/run-wincheck"]

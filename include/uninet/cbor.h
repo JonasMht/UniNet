@@ -88,8 +88,21 @@ public:
              : ((kind_ == Kind::F64Array) ? f64_.size() : 0)));
     }
 
-    // Array index (no bounds check beyond debug).
-    const Cbor& operator[](size_t i) const { return arr_[i]; }
+    // Array index. size() counts the floats of an F32Array/F64Array, and the
+    // decoder turns any all-float array on the wire into one, so the obvious
+    // consumer loop `for (i < v.size()) v[i]` was indexing the empty arr_ — an
+    // out-of-bounds read driven by remote input. Those kinds are boxed on demand
+    // here; bulk consumers still take f32_items()/f64_items() and pay nothing.
+    // Out of range (or a non-array) yields a null value, never UB.
+    //
+    // The boxed element lives in a per-thread slot, so the reference is valid
+    // only until the next index of a float array on this thread.
+    const Cbor& operator[](size_t i) const {
+        if (kind_ == Kind::Array)    return i < arr_.size() ? arr_[i] : null_value();
+        if (kind_ == Kind::F32Array) return i < f32_.size() ? box(f32(f32_[i])) : null_value();
+        if (kind_ == Kind::F64Array) return i < f64_.size() ? box(f64(f64_[i])) : null_value();
+        return null_value();
+    }
     const std::vector<Cbor>& array_items() const { return arr_; }
     const std::vector<float>&  f32_items() const { return f32_; }
     const std::vector<double>& f64_items() const { return f64_; }
@@ -105,12 +118,29 @@ public:
     Cbor& set(const std::string& key, Cbor val);
     Cbor& push_back(Cbor v) { arr_.push_back(std::move(v)); return *this; }
 
+    // Append a map entry WITHOUT set()'s "is this key already here" scan. Only for
+    // callers that already know the key is new: the decoder, which does its own
+    // duplicate detection once per map instead of once per key (set()'s scan made
+    // decoding a k-key map O(k^2) — 4.14 s for one 68 KB frame).
+    Cbor& append_unchecked(std::string key, Cbor val) {
+        kind_ = Kind::Map;
+        map_.emplace_back(std::move(key), std::move(val));
+        return *this;
+    }
+
     // Round-trip.
     friend Bytes encode(const Cbor& c);
     friend Cbor  decode(const uint8_t* data, size_t len, bool* ok);
     static Cbor  decode(const Bytes& b, bool* ok = nullptr);
 
 private:
+    static const Cbor& null_value() { static const Cbor n; return n; }
+    static const Cbor& box(Cbor v) {
+        static thread_local Cbor slot;
+        slot = std::move(v);
+        return slot;
+    }
+
     Kind kind_ = Kind::Null;
     uint64_t u_ = 0;
     int64_t  i_ = 0;

@@ -7,10 +7,10 @@
     <AssemblyName>UniNet</AssemblyName>
     <RootNamespace>UniNet</RootNamespace>
     <PackageId>UniNet</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>JonasMht</Authors>
-    <Description>UniNet — Unified Networking transport. C# bindings (P/Invoke) to the compiled C++ core.</Description>
-    <PackageTags>networking;pubsub;cbor;nats;transport;unity</PackageTags>
+    <Description>UniNet — brokerless peer-to-peer messaging with LAN discovery built in. C# bindings to the compiled C++ core.</Description>
+    <PackageTags>networking;pubsub;cbor;json;zeromq;zyre;discovery;unity</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>

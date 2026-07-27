@@ -13,11 +13,23 @@
 
 namespace uninet {
 
+// gmtime is not thread-safe, and the reentrant spelling differs per platform:
+// POSIX has gmtime_r, MSVC has gmtime_s with the arguments the other way round.
+// This was the single POSIX-only call in the tree, on the constructor path of
+// every Node — it alone made an MSVC build impossible.
+static bool gmtime_utc(std::time_t t, std::tm& out) {
+#ifdef _WIN32
+    return gmtime_s(&out, &t) == 0;
+#else
+    return gmtime_r(&t, &out) != nullptr;
+#endif
+}
+
 std::string make_uuid(const std::string& name) {
     using clock = std::chrono::system_clock;
     std::time_t now = clock::to_time_t(clock::now());
     std::tm tm{};
-    gmtime_r(&now, &tm);
+    if (!gmtime_utc(now, tm)) tm = std::tm{};   // a bad clock must not lose the uuid
     char ts[24];
     std::strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tm);
     static std::atomic<unsigned> seq{0};
@@ -31,6 +43,14 @@ std::string make_uuid(const std::string& name) {
 Node::Node(std::string name, Transport* transport, Compression compress)
     : name_(std::move(name)), uuid_(make_uuid(name_)), transport_(transport), compress_(compress) {
     ensure_watching_();   // covers the common pattern where the transport was connected first
+}
+
+Node::Node(std::string name, std::string uuid, Transport* transport, Compression compress)
+    : name_(std::move(name)),
+      uuid_(uuid.empty() ? make_uuid(name_) : std::move(uuid)),
+      transport_(transport),
+      compress_(compress) {
+    ensure_watching_();
 }
 
 void Node::ensure_watching_() {
@@ -70,8 +90,8 @@ bool Node::retry_connect(int attempts, double base_sleep_s) {
     return false;
 }
 
-void Node::publish(const std::string& subject, Cbor data, const std::string& dst_uuid) {
-    if (!transport_ || !transport_->connected()) return;
+bool Node::publish(const std::string& subject, Cbor data, const std::string& dst_uuid) {
+    if (!transport_ || !transport_->connected()) return false;
     Envelope env;
     env.compression = compress_;
     env.src_uuid = uuid_;
@@ -88,31 +108,20 @@ void Node::publish(const std::string& subject, Cbor data, const std::string& dst
     frame_into(env, wire, scratch);
     _.set_bytes_in(wire.size());
     _.set_bytes_out(wire.size());
-    transport_->publish(subject, wire.data(), wire.size());
+    // Addressed messages go to that peer alone where the transport can do it.
+    // Falling back to a broadcast keeps the loopback path (and any future
+    // broadcast-only transport) working: the dst in the clear header still makes
+    // every other receiver drop the frame before decoding it.
+    if (!dst_uuid.empty() &&
+        transport_->publish_to(dst_uuid, subject, wire.data(), wire.size()))
+        return true;
+    return transport_->publish(subject, wire.data(), wire.size());
 }
 
 void Node::subscribe(const std::string& subject, DataHandler handler) {
     ensure_watching_();   // app subscribe implies "I want to receive" — make sure we're watching
     std::lock_guard<std::mutex> lk(handlers_mu_);
     handlers_.emplace_back(subject, std::move(handler));
-}
-
-std::optional<Cbor> Node::request(const std::string& subject, Cbor data,
-                                  const std::string& dst_uuid, int timeout_ms) {
-    if (!transport_ || !transport_->connected()) return std::nullopt;
-    Envelope env;
-    env.compression = compress_;
-    env.src_uuid = uuid_;
-    env.dst_uuid = dst_uuid;
-    env.subject = subject;
-    env.data = std::move(data);
-    Bytes wire = frame(env);
-    Bytes reply;
-    if (!transport_->request(subject, wire.data(), wire.size(), timeout_ms, reply))
-        return std::nullopt;
-    auto r = unframe(reply);
-    if (!r) return std::nullopt;
-    return std::move(r->data);
 }
 
 void Node::on_raw_(const std::string& subject, const Bytes& payload) {

@@ -1,0 +1,137 @@
+# UniNet CI.
+#
+# The point of this file is that "works on my machine" is not a claim anyone has
+# to take on trust. Every push builds and tests on Linux, Windows and macOS, and
+# runs the three languages against each other.
+#
+# Jobs that need a runner tag the project may not have (windows, macos) are
+# marked `allow_failure` so a missing runner reports as a warning rather than
+# blocking the pipeline — but when the runner exists, a genuine failure is still
+# visible. Remove `allow_failure` once the runners are provisioned.
+
+stages: [build, test, interop]
+
+variables:
+  GIT_DEPTH: "50"
+
+# ── Linux ─────────────────────────────────────────────────────────────────
+# The container image carries the toolchain, Zyre built from source, Python and
+# the .NET SDK — see tests/docker/Dockerfile.linux.
+.linux-base:
+  image: debian:bookworm
+  before_script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends
+        build-essential cmake pkg-config git ca-certificates
+        zlib1g-dev liblz4-dev libsodium-dev
+        python3 python3-dev python3-pip pybind11-dev
+    # Debian does not package Zyre; build the same versions CMake would fetch.
+    - git clone --depth 1 -b v4.3.5 https://github.com/zeromq/libzmq.git /tmp/libzmq
+    - cmake -S /tmp/libzmq -B /tmp/libzmq/b -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
+        -DWITH_PERF_TOOL=OFF -DWITH_DOC=OFF && cmake --build /tmp/libzmq/b -j"$(nproc)"
+        && cmake --install /tmp/libzmq/b
+    - git clone --depth 1 -b v4.2.1 https://github.com/zeromq/czmq.git /tmp/czmq
+    - cmake -S /tmp/czmq -B /tmp/czmq/b -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+        && cmake --build /tmp/czmq/b -j"$(nproc)" && cmake --install /tmp/czmq/b
+    - git clone --depth 1 -b v2.0.1 https://github.com/zeromq/zyre.git /tmp/zyre
+    - cmake -S /tmp/zyre -B /tmp/zyre/b -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+        && cmake --build /tmp/zyre/b -j"$(nproc)" && cmake --install /tmp/zyre/b
+    - ldconfig
+
+linux:build-and-test:
+  extends: .linux-base
+  stage: test
+  script:
+    - cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        -DUNINET_BUILD_CABI=ON -DUNINET_BUILD_PYTHON=ON
+    # -Werror in CI only: a warning that reaches main is a warning nobody fixes.
+    - cmake --build build -j"$(nproc)" -- CXXFLAGS=-Werror
+    - ctest --test-dir build --output-on-failure
+    - PYTHONPATH=$PWD/python python3 -m pytest python/tests -q
+  artifacts:
+    when: on_failure
+    paths: [build/Testing/]
+    expire_in: 1 week
+
+linux:sanitizers:
+  extends: .linux-base
+  stage: test
+  script:
+    # The network path is threaded; TSan is the only thing that reliably catches
+    # a regression there. ASan/UBSan cover the codec's hostile-input handling.
+    - cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug
+        -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
+    - cmake --build build-tsan -j"$(nproc)"
+    - ./build-tsan/test_network
+    - cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug
+        -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -g -O1"
+    - cmake --build build-asan -j"$(nproc)"
+    - ./build-asan/test_roundtrip
+  allow_failure: false
+
+# ── Windows portability, without a Windows runner ─────────────────────────
+# Compiles every translation unit for x86_64-w64-mingw32. This is what catches
+# POSIX-only calls and Windows header collisions (`interface` is a macro there)
+# even when no Windows runner is available.
+windows:portability-check:
+  stage: build
+  image: debian:bookworm
+  before_script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends
+        mingw-w64 mingw-w64-tools git ca-certificates libz-mingw-w64-dev
+    - git clone --depth 1 -b v4.3.5 https://github.com/zeromq/libzmq.git /hdr/libzmq
+    - git clone --depth 1 -b v4.2.1 https://github.com/zeromq/czmq.git /hdr/czmq
+    - git clone --depth 1 -b v2.0.1 https://github.com/zeromq/zyre.git /hdr/zyre
+  script:
+    - INC="-Iinclude -I/hdr/zyre/include -I/hdr/czmq/include -I/hdr/libzmq/include"
+    - for f in src/*.cpp; do
+        echo "== $f";
+        x86_64-w64-mingw32-g++-posix -std=c++17 -Wall -Wextra -Werror -c -O1
+          -D_WIN32_WINNT=0x0601 -DUNINET_HAS_ZLIB=1 $INC "$f" -o /tmp/o.obj || exit 1;
+      done
+    - x86_64-w64-mingw32-gcc-posix -std=c99 -Wall -Wextra -Werror -c -O1
+        -D_WIN32_WINNT=0x0601 $INC tests/test_cabi.c -o /tmp/c.obj
+
+# ── Real Windows, with MSVC ───────────────────────────────────────────────
+# Needs a runner tagged `windows`. vcpkg supplies zlib/lz4/zeromq/czmq/zyre.
+windows:msvc:
+  stage: test
+  tags: [windows]
+  allow_failure: true          # remove once a Windows runner exists
+  script:
+    - git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg
+    - C:\vcpkg\bootstrap-vcpkg.bat
+    - C:\vcpkg\vcpkg.exe install zlib:x64-windows lz4:x64-windows zeromq:x64-windows czmq:x64-windows zyre:x64-windows
+    - cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+        -DUNINET_BUILD_CABI=ON
+    - cmake --build build --config Release
+    - ctest --test-dir build -C Release --output-on-failure
+
+# ── macOS ─────────────────────────────────────────────────────────────────
+# Needs a runner tagged `macos`.
+macos:
+  stage: test
+  tags: [macos]
+  allow_failure: true          # remove once a macOS runner exists
+  script:
+    - brew install cmake pkg-config zlib lz4 zyre || true
+    - cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUNINET_BUILD_CABI=ON
+    - cmake --build build -j"$(sysctl -n hw.ncpu)"
+    - ctest --test-dir build --output-on-failure
+
+# ── Cross-language interop ────────────────────────────────────────────────
+# C++, Python and C# nodes in one realm, each verifying the others' payloads.
+# This is the job that would catch a binding drifting from the wire format.
+interop:three-languages:
+  extends: .linux-base
+  stage: interop
+  image: mcr.microsoft.com/dotnet/sdk:8.0
+  script:
+    - cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        -DUNINET_BUILD_CABI=ON -DUNINET_BUILD_PYTHON=ON
+    - cmake --build build -j"$(nproc)"
+    - ./scripts/test-interop.sh 30
