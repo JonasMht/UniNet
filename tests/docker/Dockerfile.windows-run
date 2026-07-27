@@ -1,0 +1,103 @@
+# UniNet Windows RUNTIME test — cross-compile with MinGW-w64, then execute the
+# resulting .exe files under Wine.
+#
+# WHAT THIS PROVES
+#   - The whole stack (zlib, libzmq, czmq, zyre, UniNet) cross-compiles AND
+#     links for x86_64-w64-mingw32.
+#   - UniNet's Windows binaries actually run: the codec, the JSON bridge, the
+#     hostile-input hardening and the C ABI's null-safety and error paths all
+#     execute correctly as Windows code, not just as Linux code.
+#
+# WHAT THIS DOES NOT PROVE
+#   - Discovery and messaging. czmq enumerates network interfaces with
+#     GetAdaptersAddresses and asserts on ERROR_BUFFER_OVERFLOW (ziflist.c:288);
+#     Wine does not implement that buffer-sizing protocol, so every network test
+#     stops there. This is a Wine limitation, not a UniNet or czmq defect — the
+#     same binaries are expected to work on real Windows.
+#   - Anything MSVC-specific. MSVC does not run on Linux at all; the
+#     `windows:msvc` job in .gitlab-ci.yml covers that on a Windows runner.
+#
+# So: Windows is verified here up to the network boundary, and only a real
+# Windows machine can close the rest.
+#
+#   docker build --network host -f tests/docker/Dockerfile.windows-run -t uninet-winrun .
+#   docker run --rm --network host -v "$PWD":/src:ro uninet-winrun
+FROM debian:bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        build-essential cmake git ca-certificates pkg-config \
+        mingw-w64 mingw-w64-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV MINGW=/usr/x86_64-w64-mingw32
+ENV TC=/toolchain.cmake
+# ZMQ_STATIC/CZMQ_STATIC/ZYRE_STATIC: without them the headers declare every
+# symbol __declspec(dllimport) and a static link dies on __imp_ symbols.
+RUN printf '%s\n' \
+    'set(CMAKE_SYSTEM_NAME Windows)' \
+    'set(CMAKE_SYSTEM_PROCESSOR x86_64)' \
+    'set(CMAKE_C_COMPILER   x86_64-w64-mingw32-gcc-posix)' \
+    'set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++-posix)' \
+    'set(CMAKE_RC_COMPILER  x86_64-w64-mingw32-windres)' \
+    'set(CMAKE_FIND_ROOT_PATH /usr/x86_64-w64-mingw32)' \
+    'set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)' \
+    'set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)' \
+    'set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)' \
+    'set(CMAKE_C_FLAGS_INIT   "-D_WIN32_WINNT=0x0601 -DZMQ_STATIC -DCZMQ_STATIC -DZYRE_STATIC")' \
+    'set(CMAKE_CXX_FLAGS_INIT "-D_WIN32_WINNT=0x0601 -DZMQ_STATIC -DCZMQ_STATIC -DZYRE_STATIC")' \
+    > $TC
+
+WORKDIR /deps
+RUN git clone --depth 1 -b v1.3.1 https://github.com/madler/zlib.git \
+ && cmake -S zlib -B zlib/b -DCMAKE_TOOLCHAIN_FILE=$TC -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$MINGW >/dev/null \
+ && cmake --build zlib/b -j"$(nproc)" >/dev/null && cmake --install zlib/b >/dev/null
+
+# ZMQ_HAVE_IPC pre-seeded OFF: MinGW ships afunix.h, so libzmq's probe enables
+# IPC and then compiles a POSIX-only path. Zyre needs only TCP and UDP.
+RUN git clone --depth 1 -b v4.3.5 https://github.com/zeromq/libzmq.git \
+ && cmake -S libzmq -B libzmq/b -DCMAKE_TOOLCHAIN_FILE=$TC -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$MINGW -DBUILD_TESTS=OFF -DBUILD_SHARED=OFF -DBUILD_STATIC=ON \
+      -DWITH_PERF_TOOL=OFF -DWITH_DOC=OFF -DENABLE_CURVE=OFF -DZMQ_HAVE_IPC=OFF >/dev/null \
+ && cmake --build libzmq/b -j"$(nproc)" >/dev/null && cmake --install libzmq/b >/dev/null
+
+# Only the library targets: czmq's and zyre's auxiliary tools do not cross-link,
+# and nothing here needs them.
+RUN git clone --depth 1 -b v4.2.1 https://github.com/zeromq/czmq.git \
+ && cmake -S czmq -B czmq/b -DCMAKE_TOOLCHAIN_FILE=$TC -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$MINGW -DCZMQ_BUILD_SHARED=OFF -DCZMQ_BUILD_STATIC=ON \
+      -DBUILD_TESTING=OFF >/dev/null \
+ && cmake --build czmq/b -j"$(nproc)" --target czmq-static >/dev/null \
+ && cp czmq/b/libczmq.a $MINGW/lib/ && cp czmq/include/*.h $MINGW/include/
+
+RUN git clone --depth 1 -b v2.0.1 https://github.com/zeromq/zyre.git \
+ && cmake -S zyre -B zyre/b -DCMAKE_TOOLCHAIN_FILE=$TC -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$MINGW -DZYRE_BUILD_SHARED=OFF -DZYRE_BUILD_STATIC=ON \
+      -DBUILD_TESTING=OFF >/dev/null \
+ && cmake --build zyre/b -j"$(nproc)" --target zyre-static >/dev/null \
+ && cp zyre/b/libzyre.a $MINGW/lib/ && cp zyre/include/*.h $MINGW/include/
+
+# czmq and zyre only emit their .pc during `install`, which was skipped above.
+RUN mkdir -p $MINGW/lib/pkgconfig && \
+    printf '%s\n' 'prefix=/usr/x86_64-w64-mingw32' 'libdir=${prefix}/lib' \
+      'includedir=${prefix}/include' '' 'Name: libczmq' 'Description: CZMQ' \
+      'Version: 4.2.1' 'Libs: -L${libdir} -lczmq' 'Requires.private: libzmq' \
+      'Cflags: -I${includedir} -DCZMQ_STATIC' > $MINGW/lib/pkgconfig/libczmq.pc && \
+    printf '%s\n' 'prefix=/usr/x86_64-w64-mingw32' 'libdir=${prefix}/lib' \
+      'includedir=${prefix}/include' '' 'Name: libzyre' 'Description: Zyre' \
+      'Version: 2.0.1' \
+      'Libs: -L${libdir} -lzyre -lczmq -lzmq -lws2_32 -liphlpapi -lrpcrt4' \
+      'Cflags: -I${includedir} -DZYRE_STATIC -DCZMQ_STATIC -DZMQ_STATIC' \
+      > $MINGW/lib/pkgconfig/libzyre.pc
+
+RUN dpkg --add-architecture i386 && apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends wine wine64 \
+ && rm -rf /var/lib/apt/lists/*
+ENV WINEDEBUG=-all
+ENV WINEPREFIX=/wine
+RUN wineboot --init 2>/dev/null || true
+
+COPY tests/docker/run-winrun.sh /usr/local/bin/run-winrun
+RUN chmod +x /usr/local/bin/run-winrun
+ENTRYPOINT ["/usr/local/bin/run-winrun"]

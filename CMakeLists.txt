@@ -125,6 +125,16 @@ endif()
 target_compile_definitions(uninet PUBLIC UNINET_HAS_ZLIB=1)
 if(WIN32)
     target_link_libraries(uninet PUBLIC ws2_32 iphlpapi rpcrt4)
+
+    # Linking the ZeroMQ stack statically on Windows requires these, and the
+    # failure without them is obscure: every symbol is declared
+    # __declspec(dllimport), so the link dies with "undefined reference to
+    # __imp_zyre_new" and friends. vcpkg's default x64-windows triplet is DLL,
+    # so this stays off unless you asked for static.
+    option(UNINET_ZMQ_STATIC "Link ZeroMQ/czmq/zyre statically (Windows)" OFF)
+    if(UNINET_ZMQ_STATIC)
+        target_compile_definitions(uninet PUBLIC ZMQ_STATIC CZMQ_STATIC ZYRE_STATIC)
+    endif()
 endif()
 
 # ── Tests ──

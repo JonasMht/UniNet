@@ -7,8 +7,10 @@
 #
 # Native covers: C++ core, network, the C ABI compiled as C, and Python.
 # --docker adds: a Debian build with Zyre compiled from source (the path a
-# machine without a system Zyre takes), the three-language interop test
-# including C#, and a Windows portability check via MinGW.
+# machine without a system Zyre takes) running all three languages; a MinGW
+# compile check for Windows; and a Wine run of the cross-compiled Windows
+# binaries. See tests/docker/Dockerfile.windows-run for exactly how far the
+# Windows coverage goes — the network layer needs a real Windows machine.
 #
 # Every stage reports PASS/SKIP/FAIL and the script exits non-zero if any FAILed.
 # A SKIP is never counted as a pass — an untested thing is not a working thing.
@@ -89,13 +91,25 @@ if [ "$USE_DOCKER" -eq 1 ]; then
             fail "linux container"
         fi
 
-        stage "Windows portability (MinGW cross-compile)"
+        stage "Windows compile check (MinGW)"
         if docker build --network host -f tests/docker/Dockerfile.windows-check \
                 -t uninet-wincheck . >/dev/null 2>&1 \
            && docker run --rm -v "$PWD":/src:ro uninet-wincheck 2>&1 | tail -16; then
-            pass "windows portability"
+            pass "windows compile"
         else
-            fail "windows portability"
+            fail "windows compile"
+        fi
+
+        stage "Windows runtime (MinGW + Wine)"
+        # Runs the real .exe files. Covers the codec, JSON and C ABI on Windows;
+        # discovery stops at a Wine limitation, which the runner treats as an
+        # expected stop rather than a pass. See the Dockerfile for why.
+        if docker build --network host -f tests/docker/Dockerfile.windows-run \
+                -t uninet-winrun . >/dev/null 2>&1 \
+           && docker run --rm --network host -v "$PWD":/src:ro uninet-winrun 2>&1 | tail -20; then
+            pass "windows runtime (network layer not covered — needs real Windows)"
+        else
+            fail "windows runtime"
         fi
     fi
 else

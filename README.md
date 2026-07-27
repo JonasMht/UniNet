@@ -763,16 +763,32 @@ PYTHONPATH=python pytest python/tests -v       # Python
 Every network test runs in a realm unique to its process, so a demo on the same
 machine — or a second CI job on the same box — cannot perturb it.
 
-**Cross-platform.** `tests/docker/` holds two images: a Debian one that builds
-Zyre from source (the path a machine without a system Zyre takes) and runs all
-three languages, and a MinGW one that compiles every translation unit for
-Windows. The second exists because Windows-only defects are otherwise invisible
-until someone tries — it is what caught `interface` being a macro in
-`<objbase.h>`, which broke the build on Windows and nowhere else.
+**Cross-platform.** `tests/docker/` holds three images:
 
-`.gitlab-ci.yml` runs the Linux suite, the sanitizers, the Windows portability
-check and the interop test on every push, plus MSVC and macOS jobs that activate
-once runners with those tags exist.
+| image | what it verifies |
+|---|---|
+| `Dockerfile.linux` | Debian with Zyre built from source — the path a machine without a system Zyre takes — running C++, Python and C# |
+| `Dockerfile.windows-check` | every translation unit compiles for `x86_64-w64-mingw32` at `-Werror` |
+| `Dockerfile.windows-run` | the cross-compiled `.exe` files actually **run**, under Wine |
+
+**How far the Windows coverage goes, precisely.** The MinGW images catch what is
+otherwise invisible until someone tries a Windows build — they are what caught
+`interface` being a macro in `<objbase.h>`, and `gmtime_r` not existing on MSVC.
+Under Wine, `test_roundtrip.exe` passes in full (codec, compression, framing,
+hostile input) and `test_cabi.exe` passes its JSON/CBOR and null-safety
+sections as genuine Windows code.
+
+What Wine **cannot** cover is discovery: czmq enumerates interfaces with
+`GetAdaptersAddresses` and asserts on `ERROR_BUFFER_OVERFLOW`, a buffer-sizing
+protocol Wine does not implement. The runner reports that as an *expected stop*,
+never as a pass. Closing it needs a real Windows machine — the `windows:msvc`
+job in `.gitlab-ci.yml` does exactly that once a Windows runner exists.
+
+MSVC itself cannot run on Linux at all, so that job is the only route to it.
+
+`.gitlab-ci.yml` runs the Linux suite, the sanitizers, both Windows jobs and the
+interop test on every push, plus MSVC and macOS jobs that activate once runners
+with those tags exist.
 
 **Sanitizers**, when changing the transport:
 
