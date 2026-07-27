@@ -124,7 +124,11 @@ echo "building UniNet..."
 cmake -S "$HERE" -B "$HERE/build-android" "${COMMON[@]}" \
       -DUNINET_BUILD_CABI=ON \
       -DZLIB_LIBRARY="$PREFIX/lib/libz.a" -DZLIB_INCLUDE_DIR="$PREFIX/include" >/dev/null
-cmake --build "$HERE/build-android" -j"$(nproc)" --target uninet_c
+# The test binaries too, not just the library: scripts/test-on-android.sh runs
+# them on the device, and without them it silently skips the half of its work
+# that needs them, which reads as a pass.
+cmake --build "$HERE/build-android" -j"$(nproc)" \
+      --target uninet_c test_roundtrip test_network test_cabi uninet_demo
 
 OUT="$HERE/build-android/libuninet_c.so"
 echo
