@@ -1092,6 +1092,56 @@ cmake --build build-tsan -j && ./build-tsan/test_network
 Run `uninet-discover` on both machines; whichever one shows an empty list is the
 one with the problem.
 
+**This machine has several networks and discovery is using the wrong one.**
+This is the most common cause of "it just does not find anything" on a laptop,
+and nothing on screen points at it. Discovery binds **one** interface. A machine
+with a wired connection, Wi-Fi, a VPN and a couple of container bridges has
+five or six, and the default is not necessarily the one you are thinking of.
+Ask:
+
+```bash
+uninet-discover --interfaces
+```
+
+```
+Networks on this machine:
+  enp0s31f6        130.79.73.178     broadcast 130.79.73.255
+  wlp0s20f3        10.163.242.240    broadcast 10.163.242.255
+  docker0          172.18.0.1        broadcast 172.18.255.255
+  ...
+```
+
+If the other device is on the Wi-Fi and discovery is on the wire, name the one
+you mean: `--interface wlp0s20f3` for the tool, `cfg.iface` (C++), `iface=`
+(Python/C#). Docker and VPN interfaces are worth ruling out first: a beacon sent
+on a bridge that routes nowhere reaches nobody, and every other symptom looks
+healthy.
+
+**Phone tethering and hotspots.** A phone sharing its connection presents
+*separate* networks, not one:
+
+| how the phone shares | typical range | who is on it |
+|---|---|---|
+| Wi-Fi hotspot | `192.168.43.x` | everything joined over Wi-Fi |
+| USB tethering | `192.168.42.x` | only the machine holding the cable |
+
+The phone routes between them so both reach the internet, but the discovery
+beacon is link-local and **does not cross between them**. A machine on the
+hotspot therefore cannot discover a machine on the USB tether of the same
+phone, and no amount of interface pinning changes that. Two ways round it:
+
+1. Put both on the same side, usually by joining both machines to the hotspot
+   over Wi-Fi. Discovery then works normally.
+2. Keep them where they are and skip the beacon: one side binds a rendezvous
+   endpoint on an address the other can route to, and the other dials it. That
+   is `gossip_bind` / `gossip_connect`, described under
+   [Links without multicast](#links-without-multicast-usb-tether-vpn-routed-networks).
+
+A USB Wi-Fi adapter acting as a hotspot is the ordinary case, not the awkward
+one: every device that joins it, including the machine hosting it, is on a
+single network and discovers everything else on it. Pin the interface to the
+adapter if that machine also has another connection.
+
 **Devices see each other but messages do not arrive.** Check the realms match,
 and check the subject: `domain.D1` does not match a subscription to `domain.D1.>`
 - use `domain.>` to catch everything below `domain`.

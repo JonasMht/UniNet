@@ -158,4 +158,21 @@ std::string zyre_version_string();
 // machine a peer is running on.
 std::string local_hostname();
 
+// One network this machine could discover on.
+struct Interface {
+    std::string name;        // "wlan0", "eth0", "Wi-Fi"
+    std::string address;     // IPv4 address on that interface
+    std::string broadcast;   // where the discovery beacon would be sent
+    std::string netmask;
+};
+
+// Every usable IPv4 interface, loopback excluded.
+//
+// Discovery binds ONE of these. Which one is not always the one you want: a
+// machine with a wired network, a VPN and a few docker bridges has several, and
+// a beacon sent on the wrong one reaches nobody while everything reports
+// healthy. That failure is invisible without a list like this, which is why
+// uninet-discover prints it when it finds nothing. Set `iface` to pick.
+std::vector<Interface> local_interfaces();
+
 }  // namespace uninet

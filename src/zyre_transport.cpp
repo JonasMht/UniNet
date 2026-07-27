@@ -53,6 +53,26 @@ std::string local_hostname() {
     return out;
 }
 
+std::vector<Interface> local_interfaces() {
+    std::vector<Interface> out;
+    // czmq's ziflist rather than getifaddrs/GetAdaptersAddresses by hand: it is
+    // already a dependency and it is the SAME enumeration Zyre itself uses to
+    // choose an interface, so this list cannot disagree with the choice it is
+    // meant to explain.
+    ziflist_t* list = ziflist_new();
+    if (!list) return out;
+    for (const char* name = ziflist_first(list); name; name = ziflist_next(list)) {
+        Interface iface;
+        iface.name = name;
+        if (const char* a = ziflist_address(list))   iface.address = a;
+        if (const char* b = ziflist_broadcast(list)) iface.broadcast = b;
+        if (const char* m = ziflist_netmask(list))   iface.netmask = m;
+        out.push_back(std::move(iface));
+    }
+    ziflist_destroy(&list);
+    return out;
+}
+
 std::string zyre_version_string() {
     char buf[96];
     std::snprintf(buf, sizeof buf, "zyre %d.%d.%d / czmq %d.%d.%d / zmq %d.%d.%d",

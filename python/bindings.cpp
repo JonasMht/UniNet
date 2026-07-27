@@ -756,5 +756,24 @@ PYBIND11_MODULE(_uninet, m) {
     m.def("zyre_version", &zyre_version_string);
     m.def("local_hostname", &local_hostname,
           "This machine's hostname, as advertised to peers.");
+    m.def("local_interfaces",
+          []() {
+              py::list out;
+              for (const auto& i : local_interfaces()) {
+                  py::dict d;
+                  d["name"]      = i.name;
+                  d["address"]   = i.address;
+                  d["broadcast"] = i.broadcast;
+                  d["netmask"]   = i.netmask;
+                  out.append(std::move(d));
+              }
+              return out;
+          },
+          "Every usable IPv4 network on this machine, as dicts with name, "
+          "address, broadcast and netmask.\n\n"
+          "Discovery binds ONE of these. On a machine with Wi-Fi, a wired "
+          "connection, a VPN and container bridges, the default may not be the "
+          "one the other device is on, and nothing reports that. Use this to "
+          "show the user a choice, and pass the name as join(iface=...).");
     m.def("set_compression_level", &set_compression_level, py::arg("level"));
 }

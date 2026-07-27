@@ -43,6 +43,34 @@ std::string host_of(const std::string& endpoint) {
     return a;
 }
 
+// Point 5 above, answered instead of asserted. Discovery binds exactly ONE
+// interface, and on a machine with a VPN, a wired network and a few container
+// bridges there is nothing on screen to say which. A beacon sent on a docker
+// bridge reaches nobody, and every other symptom looks healthy.
+void print_interfaces() {
+    const auto ifaces = uninet::local_interfaces();
+    if (ifaces.empty()) {
+        std::printf("\nThis machine has no usable network interface.\n");
+        return;
+    }
+    std::printf("\nNetworks on this machine:\n");
+    for (const auto& i : ifaces) {
+        std::printf("  %s %s  broadcast %s\n",
+                    pad(i.name, 16).c_str(), pad(i.address, 16).c_str(),
+                    i.broadcast.c_str());
+    }
+    if (ifaces.size() > 1) {
+        std::printf("\nThere are %zu, and discovery uses one. If the other device is on\n",
+                    ifaces.size());
+        std::printf("a different one, name it explicitly:\n");
+        std::printf("    uninet-discover --interface %s\n", ifaces.front().name.c_str());
+        std::printf("A Wi-Fi hotspot and a USB-tethered connection from the same phone\n");
+        std::printf("are SEPARATE networks: the beacon does not cross between them, so\n");
+        std::printf("devices on one cannot discover devices on the other. Connect both\n");
+        std::printf("to the same one, or use the rendezvous endpoint (see the README).\n");
+    }
+}
+
 void print_table(const std::vector<uninet::Peer>& peers) {
     if (peers.empty()) {
         std::printf("\nNo devices found.\n\n");
@@ -54,6 +82,7 @@ void print_table(const std::vector<uninet::Peer>& peers) {
         std::printf("  4. A firewall may be blocking UDP port 5670.\n");
         std::printf("  5. On a machine with several networks, the app may be looking at\n");
         std::printf("     the wrong one: set the network interface in its settings.\n");
+        print_interfaces();
         return;
     }
     std::printf("\n%s %s %s %s\n",
@@ -79,6 +108,7 @@ void usage() {
         "  --timeout <seconds>    how long --once listens (default 3)\n"
         "  --realm <name>         only show devices in this session group (default \"uninet\")\n"
         "  --interface <name>     network interface to look on, e.g. eth0 or 192.168.1.10\n"
+        "  --interfaces           list this machine's networks and exit\n"
         "  --version              print the ZeroMQ/Zyre versions in use\n"
         "  -h, --help             this message\n");
 }
@@ -103,6 +133,7 @@ int main(int argc, char** argv) {
         else if (a == "--timeout")    timeout_s = std::atof(next("--timeout"));
         else if (a == "--realm")      cfg.realm = next("--realm");
         else if (a == "--interface")  cfg.iface = next("--interface");
+        else if (a == "--interfaces") { print_interfaces(); return 0; }
         else if (a == "--version")    { std::printf("%s\n", uninet::zyre_version_string().c_str()); return 0; }
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else {
