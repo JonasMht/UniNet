@@ -129,9 +129,17 @@ if [ "$USE_SAN" -eq 1 ]; then
                 fail "tsan ($RACES races)"
             fi
         else
+            # A non-zero exit with no races is NOT a race report: it is the test
+            # failing, or TSan itself refusing to start. Saying "0 races" there
+            # sends the reader looking for a race that does not exist.
             RACES="$(grep -c 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log || true)"
             grep -A6 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log | head -20
-            fail "tsan ($RACES races)"
+            grep -E 'FATAL|^FAIL' /tmp/uninet-tsan.log | head -5
+            if [ "${RACES:-0}" -eq 0 ]; then
+                fail "tsan (no races, but a test exited non-zero: network=$NET_RC reconnect=$REC_RC)"
+            else
+                fail "tsan ($RACES races)"
+            fi
         fi
     else
         fail "tsan (build)"
@@ -139,17 +147,35 @@ if [ "$USE_SAN" -eq 1 ]; then
 
     stage "AddressSanitizer + UndefinedBehaviorSanitizer"
     SAN_ASAN="$HERE/build-asan"
+    # UNINET_SYSTEM_ZYRE passed explicitly. A cached value from an earlier
+    # configure of this directory silently persists, so leaving it out means the
+    # stage may or may not instrument the dependencies depending on what someone
+    # last did here, and the result changes with it.
     if cmake -S . -B "$SAN_ASAN" -DCMAKE_BUILD_TYPE=Debug -DUNINET_BUILD_CABI=ON \
+            -DUNINET_SYSTEM_ZYRE=ON \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" >/dev/null 2>&1 \
        && cmake --build "$SAN_ASAN" -j"$(nproc 2>/dev/null || echo 4)" >/dev/null 2>&1; then
         SAN_FAIL=0
         ASAN_OPTIONS=detect_leaks=1 "$SAN_ASAN/test_roundtrip" >/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
         ASAN_OPTIONS=detect_leaks=0 "$SAN_ASAN/test_network" >>/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
-        if grep -qE 'ERROR: (Address|Leak)Sanitizer|runtime error' /tmp/uninet-asan.log; then SAN_FAIL=1; fi
-        if [ "$SAN_FAIL" -eq 0 ]; then pass "asan/ubsan"; else
-            grep -E 'ERROR|runtime error' /tmp/uninet-asan.log | head -10
-            fail "asan/ubsan"
+        # Findings inside a DEPENDENCY are reported but do not fail the stage.
+        # czmq trips UBSan on misaligned loads in zhash and zmonitor and on a
+        # null memcpy in zrex; those are real, they are not ours, and there is
+        # nothing to do about them here. Failing on them would mean the stage
+        # could never pass, which ends with someone ignoring it entirely.
+        grep -E 'ERROR: (Address|Leak)Sanitizer|runtime error' /tmp/uninet-asan.log \
+            > /tmp/uninet-asan-findings.log 2>/dev/null || true
+        THEIRS="$(grep -c '_deps/' /tmp/uninet-asan-findings.log || true)"
+        OURS="$(grep -vc '_deps/' /tmp/uninet-asan-findings.log || true)"
+        if [ "${OURS:-0}" -gt 0 ]; then SAN_FAIL=1; fi
+        if [ "${THEIRS:-0}" -gt 0 ]; then
+            echo "note: ${THEIRS} finding(s) inside dependencies, not UniNet:"
+            grep '_deps/' /tmp/uninet-asan-findings.log | sed 's/^/      /' | head -5
+        fi
+        if [ "$SAN_FAIL" -eq 0 ]; then pass "asan/ubsan (${OURS:-0} in UniNet)"; else
+            grep -v '_deps/' /tmp/uninet-asan-findings.log | head -10
+            fail "asan/ubsan (${OURS:-0} in UniNet)"
         fi
     else
         fail "asan/ubsan (build)"

@@ -5,6 +5,7 @@
 // side: C#, Unity, plain C: cannot unwind it. v0.1 had no guards at all, so a
 // std::bad_alloc on a large payload killed the process.
 #include "uninet/cabi.h"
+#include "uninet/diagnostics.h"
 
 #include "uninet/blob.h"
 #include "uninet/json.h"
@@ -609,6 +610,27 @@ extern "C" int uninet_has_lz4(void) {
 #else
     return 0;
 #endif
+}
+
+extern "C" int uninet_diagnostics(char* buf, size_t buflen) {
+    try {
+        return copy_out(uninet::diagnostics(), buf, buflen);
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+extern "C" int uninet_enable_crash_log(const char* path) {
+    try {
+        if (!path || !*path) { set_error("a path is required"); return UNINET_ERR_ARG; }
+        if (!uninet::enable_crash_log(path)) {
+            set_error("could not install the crash handlers");
+            return UNINET_ERR_STATE;
+        }
+        return UNINET_OK;
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+extern "C" void uninet_disable_crash_log(void) {
+    try { uninet::disable_crash_log(); } catch (...) {}
 }
 
 extern "C" const char* uninet_version(void) {

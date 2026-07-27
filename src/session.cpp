@@ -3,6 +3,14 @@
 
 #include "uninet/json.h"
 
+// Declared here rather than in a public header: the registry is an
+// implementation detail between Session and diagnostics.cpp.
+namespace uninet {
+void diagnostics_register(const Session*);
+void diagnostics_unregister(const Session*);
+void diagnostics_refresh();
+}
+
 #include <memory>
 #include <shared_mutex>
 #include <stdexcept>
@@ -48,6 +56,7 @@ void Session::close() {
     // and still able to fire that callback. Disconnecting here joins the
     // watchdog and the actor, so nothing can call into the Node afterwards.
     if (transport) transport->disconnect();
+    diagnostics_unregister(this);
 }
 
 bool Session::open() const {
@@ -101,7 +110,14 @@ std::unique_ptr<Session> Session::join(const std::string& name, SessionConfig cf
     // fires on. See the note there; without it this is a use-after-free.
     Node* node = s->impl_->node.get();
     ZyreTransport* transport = s->impl_->transport.get();
-    transport->on_reconnected([node, transport] { node->set_uuid(transport->uuid()); });
+    Session* self = s.get();
+    transport->on_reconnected([node, transport, self] {
+        node->set_uuid(transport->uuid());
+        // Keep the crash snapshot current. A report showing the network the
+        // process was on three reconnects ago would point at the wrong thing.
+        diagnostics_refresh();
+    });
+    diagnostics_register(self);
     return s;
 }
 

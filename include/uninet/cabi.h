@@ -218,6 +218,24 @@ uint16_t    uninet_protocol_version(void);
 int         uninet_has_lz4(void);
 const char* uninet_version(void);   // "zyre x.y.z / czmq ... / zmq ..."; static storage
 
+// A snapshot of what UniNet is doing: version, compression tiers, every network
+// on this machine and which one discovery chose, and every live session with
+// its realm, identity, peer count and reconnect count. Writes UTF-8 into `buf`
+// and returns the length, or UNINET_ERR_BUFFER when it does not fit (call with
+// a NULL buffer to ask how much is needed).
+//
+// This is what to put behind a "copy diagnostics" button. Almost every "it
+// cannot see the other device" report is answered by the network line.
+int uninet_diagnostics(char* buf, size_t buflen);
+
+// Write a crash report to `path` if the process dies on a fatal signal.
+// Returns UNINET_OK, or UNINET_ERR_STATE if the handlers could not be
+// installed. Off unless called: a library has no business taking over an
+// application's fatal signal handling uninvited, and any existing handler is
+// chained to rather than replaced.
+int  uninet_enable_crash_log(const char* path);
+void uninet_disable_crash_log(void);
+
 #ifdef __cplusplus
 }
 #endif
