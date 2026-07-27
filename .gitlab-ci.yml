@@ -95,6 +95,19 @@ windows:portability-check:
     - x86_64-w64-mingw32-gcc-posix -std=c99 -Wall -Wextra -Werror -c -O1
         -D_WIN32_WINNT=0x0601 $INC tests/test_cabi.c -o /tmp/c.obj
 
+# Runs the cross-compiled .exe files under Wine. Covers the codec, the JSON
+# bridge and the C ABI as real Windows code. Discovery is NOT covered: Wine does
+# not implement GetAdaptersAddresses' buffer-sizing protocol, which czmq asserts
+# on — only the msvc job below can close that gap.
+windows:wine-runtime:
+  stage: test
+  image: docker:latest
+  services: [docker:dind]
+  script:
+    - docker build --network host -f tests/docker/Dockerfile.windows-run -t uninet-winrun .
+    - docker run --rm --network host -v "$PWD":/src:ro uninet-winrun
+  allow_failure: false
+
 # ── Real Windows, with MSVC ───────────────────────────────────────────────
 # Needs a runner tagged `windows`. vcpkg supplies zlib/lz4/zeromq/czmq/zyre.
 windows:msvc:
