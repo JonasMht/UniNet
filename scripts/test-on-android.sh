@@ -21,8 +21,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD="$HERE/build-android"
 REMOTE=/data/local/tmp/uninet-test
+# BUILD is chosen once the device's ABI is known, below.
 
 ADB="${ADB:-}"
 if [ -z "$ADB" ]; then
@@ -33,14 +33,17 @@ if [ -z "$ADB" ]; then
 fi
 [ -x "$ADB" ] || { echo "adb not found. Install android-sdk-platform-tools, or set ADB=." >&2; exit 2; }
 
-if [ ! -f "$BUILD/test_network" ]; then
-    echo "No Android build found. Run ./scripts/build-for-android.sh first." >&2
-    exit 2
-fi
-
 STATE="$("$ADB" get-state 2>&1)"
 if [ "$STATE" != "device" ]; then
     "$ADB" devices -l
+    # An emulator has no USB debugging to enable, so do not send the reader off
+    # to look for a setting that does not exist there.
+    if [ -n "${ANDROID_SERIAL:-}" ] && case "$ANDROID_SERIAL" in emulator-*) true;; *) false;; esac; then
+        echo "" >&2
+        echo "$ANDROID_SERIAL is not ready (state: $STATE)." >&2
+        echo "If it is still booting, wait; scripts/test-on-emulator.sh does that for you." >&2
+        exit 2
+    fi
     cat >&2 <<'EOF'
 
 No authorised device. On the phone or headset:
@@ -58,9 +61,20 @@ MODEL="$("$ADB" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
 REL="$("$ADB" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')"
 ABI="$("$ADB" shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')"
 echo "device : $MODEL, Android $REL, $ABI"
-if [ "$ABI" != "arm64-v8a" ]; then
-    echo "warning: the build is arm64-v8a but the device reports $ABI." >&2
+
+# Match the build to the device rather than assuming a phone. An x86_64
+# emulator will happily RUN arm64 binaries through its translation layer, which
+# makes this look like it works, but a dynamically linked one cannot load its
+# arm64 .so and fails with "library libuninet_c.so not found" - a message that
+# suggests a missing file rather than the wrong architecture.
+BUILD="$HERE/build-android"
+[ "$ABI" != "arm64-v8a" ] && BUILD="$HERE/build-android-$ABI"
+if [ ! -f "$BUILD/test_network" ]; then
+    echo "No build for $ABI at $BUILD." >&2
+    echo "Build one:  ./scripts/build-for-android.sh \"\" $ABI" >&2
+    exit 2
 fi
+echo "build  : $BUILD"
 echo
 
 FAILED=0

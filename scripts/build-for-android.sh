@@ -49,7 +49,15 @@ USAGE
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$HERE/build-android/deps"
+# Per ABI, because the dependencies and the library are compiled for one
+# architecture and a second ABI sharing the directory would silently overwrite
+# the first: you would end up shipping x86_64 in an arm64-v8a folder, which
+# installs fine and fails to load on the device.
+OUTDIR="$HERE/build-android-$ABI"
+# arm64-v8a keeps the original path, so anything already pointing at
+# build-android/ (a Unity project, an install script) does not break.
+[ "$ABI" = "arm64-v8a" ] && OUTDIR="$HERE/build-android"
+WORK="$OUTDIR/deps"
 PREFIX="$WORK/prefix"
 mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/include"
 
@@ -121,16 +129,16 @@ for spec in "libzmq:4.3.5:-lzmq" "libczmq:4.2.1:-lczmq -lzmq -lz" "libzyre:2.0.1
 done
 
 echo "building UniNet..."
-cmake -S "$HERE" -B "$HERE/build-android" "${COMMON[@]}" \
+cmake -S "$HERE" -B "$OUTDIR" "${COMMON[@]}" \
       -DUNINET_BUILD_CABI=ON \
       -DZLIB_LIBRARY="$PREFIX/lib/libz.a" -DZLIB_INCLUDE_DIR="$PREFIX/include" >/dev/null
 # The test binaries too, not just the library: scripts/test-on-android.sh runs
 # them on the device, and without them it silently skips the half of its work
 # that needs them, which reads as a pass.
-cmake --build "$HERE/build-android" -j"$(nproc)" \
+cmake --build "$OUTDIR" -j"$(nproc)" \
       --target uninet_c test_roundtrip test_network test_cabi uninet_demo
 
-OUT="$HERE/build-android/libuninet_c.so"
+OUT="$OUTDIR/libuninet_c.so"
 echo
 file "$OUT"
 READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
