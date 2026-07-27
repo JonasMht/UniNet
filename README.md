@@ -710,26 +710,39 @@ aapt dump permissions your.apk | grep MULTICAST
 
 ## 3D Slicer
 
-Slicer ships its own Python. The extension module must be built against **that**
-interpreter, not the system one.
+Slicer ships its own Python, so the extension has to be built against **that**
+interpreter. One command does it:
 
 ```bash
-# Point CMake at Slicer's Python (adjust the path to your install)
-SLICER_PY=/opt/Slicer/bin/PythonSlicer
-
-cmake -S . -B build-slicer -DCMAKE_BUILD_TYPE=Release \
-      -DUNINET_BUILD_PYTHON=ON \
-      -DPython3_EXECUTABLE=$($SLICER_PY -c "import sys; print(sys.executable)") \
-      -Dpybind11_DIR=$($SLICER_PY -m pybind11 --cmakedir)
-cmake --build build-slicer -j
+./scripts/build-for-slicer.sh ~/Documents/Slicer-5.8.1-linux-amd64
 ```
 
-Copy the resulting extension and package next to Slicer's `site-packages`:
+That builds and installs into Slicer's `site-packages`, then verifies the import.
+Afterwards, `import uninet` works in any Slicer module.
 
-```bash
-SITE=$($SLICER_PY -c "import site; print(site.getsitepackages()[0])")
-cp -r python/uninet "$SITE/"
-```
+<details>
+<summary>Why a script rather than three cmake flags</summary>
+
+A Slicer binary release has three traps, and the script handles all of them:
+
+1. **It ships no Python headers.** `lib/Python/include/python3.9` contains only
+   `pyconfig.h`; everything else is missing, so a build fails on `Python.h: No
+   such file or directory`. The script fetches the matching CPython source
+   headers and combines them with Slicer's own `pyconfig.h`. Slicer's Python is
+   stock CPython, so upstream headers match exactly.
+2. **`python-real` cannot run standalone.** It needs `PYTHONHOME` and
+   `LD_LIBRARY_PATH` pointing into the Slicer tree.
+3. **pybind11 finds the wrong interpreter.** Passing `-DPython3_EXECUTABLE`
+   is not enough for the legacy `FindPythonLibsNew` path Slicer's pybind11
+   takes; it silently picks up the system Python and produces an extension
+   Slicer cannot load.
+
+Verified against Slicer 5.8.1 (Python 3.9.10) on Linux.
+</details>
+
+> **If a rebuild seems to change nothing**, an older copy in Slicer's
+> `site-packages` is shadowing yours. The script replaces that directory
+> wholesale for exactly this reason.
 
 Then, in your Slicer module:
 
@@ -744,7 +757,7 @@ class MyModuleLogic:
 
     def on_message(self, msg):
         # Called on UniNet's network thread. Slicer's VTK/Qt objects are NOT
-        # thread-safe: hop to the main thread before touching the scene.
+        # thread-safe, so hop to the main thread before touching the scene.
         import qt
         qt.QTimer.singleShot(0, lambda: self.apply(msg.data))
 
@@ -753,12 +766,24 @@ class MyModuleLogic:
             ...   # safe here: this runs on Slicer's main thread
 
     def on_peer(self, peer):
-        print(f"UniNet: {peer.name} ({peer.role}) at {peer.host}")
+        print(f"UniNet: {peer.name} ({peer.role}) at {peer.endpoint}")
 ```
 
 > **The threading rule is the same as Unity's**: callbacks arrive on a
-> background thread. Marshal to the main thread before touching VTK, Qt, or the
+> background thread. Marshal to the main thread before touching VTK, Qt or the
 > MRML scene. `qt.QTimer.singleShot(0, fn)` is the idiomatic way in Slicer.
+
+Volumes are the realistic payload, and numpy is already bundled with Slicer:
+
+```python
+blob = uninet.Blob(self.net, "volumes")
+blob.on_received(self.on_volume)
+
+def on_volume(self, info, data):
+    import numpy as np
+    volume = np.frombuffer(data, dtype=np.dtype(info.meta["dtype"]))
+    volume = volume.reshape(info.meta["shape"])
+```
 
 A device list widget, since Slicer modules usually want one:
 
@@ -766,7 +791,7 @@ A device list widget, since Slicer modules usually want one:
 def refresh_device_list(self):
     self.deviceCombo.clear()
     for p in self.net.peers():
-        self.deviceCombo.addItem(f"{p.name}: {p.role} ({p.host})", p.uuid)
+        self.deviceCombo.addItem(f"{p.name} - {p.role} ({p.endpoint})", p.uuid)
 ```
 
 ---
