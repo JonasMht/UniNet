@@ -4,6 +4,7 @@
 #     ./scripts/test-all.sh              native suites only (fast)
 #     ./scripts/test-all.sh --docker     also the containerised cross-platform
 #                                        and cross-language suites
+#     ./scripts/test-all.sh --sanitizers also ThreadSanitizer and ASan/UBSan
 #
 # Native covers: C++ core, network, the C ABI compiled as C, and Python.
 # --docker adds: a Debian build with Zyre compiled from source (the path a
@@ -20,7 +21,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 BUILD="${UNINET_BUILD_DIR:-$HERE/build}"
 USE_DOCKER=0
-[ "${1:-}" = "--docker" ] && USE_DOCKER=1
+USE_SAN=0
+for arg in "$@"; do
+    case "$arg" in
+        --docker)     USE_DOCKER=1 ;;
+        --sanitizers) USE_SAN=1 ;;
+        *) echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
 
 PASSED=(); SKIPPED=(); FAILED=()
 
@@ -73,6 +81,57 @@ if OUT="$(./scripts/test-interop.sh 25 2>&1)"; then
 else
     echo "$OUT" | tail -14
     fail "interop"
+fi
+
+# ── sanitizers ────────────────────────────────────────────────────────────
+if [ "$USE_SAN" -eq 1 ]; then
+    stage "ThreadSanitizer (whole stack, dependencies included)"
+    # The dependencies MUST be instrumented too. Against a system libzmq that
+    # TSan cannot see into, it reported 47 races, all but one of them noise from
+    # synchronisation it could not observe. Built from source under TSan, the
+    # same run reports zero.
+    SAN_TSAN="$HERE/build-tsan"
+    if cmake -S . -B "$SAN_TSAN" -DCMAKE_BUILD_TYPE=Debug -DUNINET_SYSTEM_ZYRE=OFF \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -g -O1" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" >/dev/null 2>&1 \
+       && cmake --build "$SAN_TSAN" -j"$(nproc 2>/dev/null || echo 4)" --target test_network >/dev/null 2>&1; then
+        # setarch -R: TSan aborts with "unexpected memory mapping" under ASLR
+        # often enough to make the stage flaky otherwise.
+        if setarch -R "$SAN_TSAN/test_network" > /tmp/uninet-tsan.log 2>&1; then
+            RACES="$(grep -c 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log || true)"
+            if [ "${RACES:-0}" -eq 0 ]; then pass "tsan (0 races)"; else
+                grep -A6 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log | head -20
+                fail "tsan ($RACES races)"
+            fi
+        else
+            RACES="$(grep -c 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log || true)"
+            grep -A6 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log | head -20
+            fail "tsan ($RACES races)"
+        fi
+    else
+        fail "tsan (build)"
+    fi
+
+    stage "AddressSanitizer + UndefinedBehaviorSanitizer"
+    SAN_ASAN="$HERE/build-asan"
+    if cmake -S . -B "$SAN_ASAN" -DCMAKE_BUILD_TYPE=Debug -DUNINET_BUILD_CABI=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" >/dev/null 2>&1 \
+       && cmake --build "$SAN_ASAN" -j"$(nproc 2>/dev/null || echo 4)" >/dev/null 2>&1; then
+        SAN_FAIL=0
+        ASAN_OPTIONS=detect_leaks=1 "$SAN_ASAN/test_roundtrip" >/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
+        ASAN_OPTIONS=detect_leaks=0 "$SAN_ASAN/test_network" >>/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
+        if grep -qE 'ERROR: (Address|Leak)Sanitizer|runtime error' /tmp/uninet-asan.log; then SAN_FAIL=1; fi
+        if [ "$SAN_FAIL" -eq 0 ]; then pass "asan/ubsan"; else
+            grep -E 'ERROR|runtime error' /tmp/uninet-asan.log | head -10
+            fail "asan/ubsan"
+        fi
+    else
+        fail "asan/ubsan (build)"
+    fi
+else
+    skip "sanitizers" "not requested (pass --sanitizers)"
 fi
 
 # ── containerised ─────────────────────────────────────────────────────────

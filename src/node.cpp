@@ -54,11 +54,17 @@ Node::Node(std::string name, std::string uuid, Transport* transport, Compression
 }
 
 void Node::ensure_watching_() {
-    if (watching_ || !transport_ || !transport_->connected()) return;
+    // Cheap check first, then re-check under the lock: two callers must not both
+    // pass the test and install the subscription.
+    if (watching_.load(std::memory_order_acquire)) return;
+    if (!transport_ || !transport_->connected()) return;
+
+    std::lock_guard<std::mutex> lk(watch_mu_);
+    if (watching_.load(std::memory_order_relaxed)) return;
     transport_->subscribe(">", [this](const std::string& subject, const Bytes& payload) {
         this->on_raw_(subject, payload);
     });
-    watching_ = true;
+    watching_.store(true, std::memory_order_release);
 }
 
 bool Node::connect() {

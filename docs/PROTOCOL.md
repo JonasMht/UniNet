@@ -133,6 +133,46 @@ bytes. JSON is the smaller type system, so:
 - NaN and Infinity render as `null`
 - integers beyond 2⁵³ survive CBOR exactly but lose precision in JSON consumers
 
+## Large payloads
+
+`Blob` (include/uninet/blob.h) streams a payload too large for one message. It
+is built entirely on the envelope above, so it inherits routing, compression and
+the dst filter, and adds no new framing.
+
+Transfers travel on **`uninet.blob.<subject>`**, deliberately outside the
+caller's own subject tree: on `<subject>.blob` an application's own
+`<subject>.>` subscription matched the raw chunk frames and delivered them to
+code that never asked for them.
+
+Each frame's `data` is a map:
+
+| key | type | in | meaning |
+|---|---|---|---|
+| `k` | text | all | `"b"` begin, `"c"` chunk, `"e"` end |
+| `id` | text | all | transfer id, unique per sender |
+| `name` | text | begin | logical name, e.g. a filename |
+| `size` | uint | begin | total bytes |
+| `meta` | any | begin | the sender's metadata, carried verbatim |
+| `seq` | uint | chunk | 0-based, strictly sequential |
+| `d` | bytes | chunk | the payload slice |
+
+Rules a receiver enforces, because a sender on the LAN is unauthenticated:
+
+- **A transfer is keyed on (sender, id), not id alone.** Keyed on id alone, a
+  second peer could interleave chunks into another's transfer, and the result
+  arrived stamped with the first sender's uuid.
+- Chunks must arrive in order. ZRE delivers in order per peer, so a gap means
+  loss or interference; the transfer is dropped rather than reassembled wrong.
+- A `begin` for a live id is refused rather than replacing it.
+- `size` is checked against `max_blob_bytes`, the count of live transfers
+  against `max_concurrent`, and the total buffered against `max_total_bytes`.
+- A transfer with no chunk for `stall_timeout` is abandoned, so a sender that
+  crashes mid-file does not pin its buffer.
+
+A sender that cannot start a transfer reports failure rather than returning an
+id, and abandons on the first failed chunk instead of leaving the receiver
+holding a buffer it can never complete.
+
 ## Compression
 
 The tier is a per-message choice carried in the header, not a protocol change. A
@@ -184,5 +224,6 @@ Hardening that *is* in place, because every frame is unauthenticated input:
 | Transport | status | notes |
 |---|---|---|
 | `ZyreTransport` | current | brokerless peer-to-peer over ZRE; discovery included |
+| gossip mode | current | same transport, rendezvous endpoint instead of the UDP beacon, for links with no multicast |
 | `LoopbackTransport` | current | in-process, deterministic; tests and benchmarks |
 | `NatsTransport` | **removed in v0.2** | required a broker and a configured address |

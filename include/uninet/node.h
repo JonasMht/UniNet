@@ -8,6 +8,7 @@
 #include "uninet/transport.h"
 
 #include <functional>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -58,7 +59,14 @@ private:
     std::string uuid_;
     Transport* transport_;
     Compression compress_;
-    bool watching_ = false;   // internal ">" subscription established once connected
+    // The internal ">" subscription, established once the transport is up.
+    // Guarded because subscribe() may be called from several threads at once:
+    // unsynchronised, they all saw watching_ == false and each installed a
+    // duplicate subscription, so one message was delivered N times. The window
+    // is wide (it spans the transport's own mutex and a push_back), so this was
+    // a routine hit, not a rare one.
+    std::atomic<bool> watching_{false};
+    std::mutex watch_mu_;
 
     std::mutex handlers_mu_;
     std::vector<std::pair<std::string, DataHandler>> handlers_;
