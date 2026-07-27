@@ -1112,8 +1112,8 @@ Networks on this machine:
 ```
 
 If the other device is on the Wi-Fi and discovery is on the wire, name the one
-you mean: `--interface wlp0s20f3` for the tool, `cfg.iface` (C++), `iface=`
-(Python/C#). Docker and VPN interfaces are worth ruling out first: a beacon sent
+you mean: `--interface wlp0s20f3` for the tool, `cfg.iface` (C++),
+`interface=` (Python), `iface:` (C#, where `interface` is a keyword). Docker and VPN interfaces are worth ruling out first: a beacon sent
 on a bridge that routes nowhere reaches nobody, and every other symptom looks
 healthy.
 
