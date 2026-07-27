@@ -113,7 +113,14 @@ run_remote "discovery and messaging between two nodes on the device" ./test_netw
 # on the other side because adb is forwarding that exact port.
 note "discovery across the USB cable, with no network"
 if [ ! -f "$BUILD/uninet-demo" ] || [ ! -x "$HERE/build/uninet-demo" ]; then
-    echo "  SKIPPED: needs uninet-demo built for both the device and this machine"
+    # Counted as a failure, not a quiet skip. This is the only cross-device
+    # check in the suite, and "PASS" printed while it never ran is the kind of
+    # result that gets trusted.
+    echo "  FAILED: uninet-demo is missing for the device ($BUILD) or this"
+    echo "  machine ($HERE/build). Build both:"
+    echo "      ./scripts/build-for-android.sh"
+    echo "      cmake --build build -j --target uninet_demo"
+    FAILED=1
 else
     "$ADB" reverse tcp:31337 tcp:31337 >/dev/null
     "$ADB" reverse tcp:31339 tcp:31339 >/dev/null
