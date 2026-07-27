@@ -30,3 +30,5 @@ uninet_network_bench.csv
 uninet_profile.txt
 .vscode/
 wheelhouse/
+examples/android/build/
+examples/android/.debug.keystore
