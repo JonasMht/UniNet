@@ -1,4 +1,4 @@
-// UniNet — opt-in profiler implementation (mirrors UniVox's profiler).
+// UniNet: opt-in profiler implementation (mirrors UniVox's profiler).
 #include "uninet/profiler.h"
 
 #include <algorithm>
@@ -12,8 +12,8 @@ namespace uninet::profiler {
 
 namespace {
 std::mutex g_mu;                        // guards g_stats only
-// The flag is read twice per ScopedOp — i.e. on every encode, compress and
-// dispatch — so it must not be behind g_mu: with the profiler OFF, that lock made
+// The flag is read twice per ScopedOp: i.e. on every encode, compress and
+// dispatch, so it must not be behind g_mu: with the profiler OFF, that lock made
 // every thread in the pipeline queue on a global mutex, which is the opposite of
 // the "zero overhead when disabled" this header promises. Relaxed is enough: a
 // racing enable() only decides whether a given scope is sampled.

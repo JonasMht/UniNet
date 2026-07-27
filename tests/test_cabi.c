@@ -1,4 +1,4 @@
-/* UniNet — C ABI test.
+/* UniNet: C ABI test.
  *
  * Compiled as C, not C++, so it proves the header is actually usable from a C
  * compiler and that the extern "C" surface links without the C++ runtime being
@@ -84,7 +84,7 @@ int main(void) {
     char realm[128];
     snprintf(realm, sizeof realm, "uninet-ctest-%d", GETPID());
 
-    printf("UniNet C ABI test — %s\n\n", uninet_version());
+    printf("UniNet C ABI test: %s\n\n", uninet_version());
 
     /* ── conversion, no network ── */
     printf("json <-> cbor\n");
@@ -174,7 +174,7 @@ int main(void) {
 
         /* Non-ASCII must survive: the boundary is UTF-8, not the code page. */
         got.messages = 0;
-        check(uninet_session_publish_json(a, "c.utf8", "{\"name\":\"Röntgen — 20°\"}", NULL)
+        check(uninet_session_publish_json(a, "c.utf8", "{\"name\":\"Röntgen: 20°\"}", NULL)
                   == UNINET_OK, "published a non-ASCII payload");
         check(wait_until(has_message, &got, 10000), "it arrived");
         check(strstr(got.last_json, "Röntgen") != NULL, "UTF-8 survived the boundary");
@@ -190,7 +190,7 @@ int main(void) {
               "an out-of-range index is empty, not a crash");
 
         /* The header documents these pointers as valid until the snapshot is
-         * freed. Hold two at once and check the first still reads correctly —
+         * freed. Hold two at once and check the first still reads correctly -
          * a shared scratch buffer would have made `role` show the app name. */
         const char* role_ptr = uninet_peers_role(peers, 0);
         const char* app_ptr  = uninet_peers_app(peers, 0);

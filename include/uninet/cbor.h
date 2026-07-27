@@ -1,10 +1,10 @@
-// UniNet — minimal, dependency-free CBOR (RFC 8949) value type + codec. CBOR is
+// UniNet: minimal, dependency-free CBOR (RFC 8949) value type + codec. CBOR is
 // UniNet's default compact wire codec for the envelope and message payloads, built
-// directly on the standard library — no third-party CBOR library (cf. UniVox's
+// directly on the standard library, no third-party CBOR library (cf. UniVox's
 // hand-rolled .npz on zlib). Supports the subset real messages use: uint/nint,
 // byte & text strings, arrays, maps (insertion-ordered), bool/null, float32/64.
 //
-// Why own it: the ThermoNav peers each pull a different CBOR lib (PeterO.Cbor,
+// Why own it: pulling a different CBOR library per language (PeterO.Cbor,
 // nlohmann::json::to_cbor, cbor2) and hand-mirror the schema across them. One
 // codec, one source of truth.
 #pragma once
@@ -90,7 +90,7 @@ public:
 
     // Array index. size() counts the floats of an F32Array/F64Array, and the
     // decoder turns any all-float array on the wire into one, so the obvious
-    // consumer loop `for (i < v.size()) v[i]` was indexing the empty arr_ — an
+    // consumer loop `for (i < v.size()) v[i]` was indexing the empty arr_: an
     // out-of-bounds read driven by remote input. Those kinds are boxed on demand
     // here; bulk consumers still take f32_items()/f64_items() and pay nothing.
     // Out of range (or a non-array) yields a null value, never UB.
@@ -121,7 +121,7 @@ public:
     // Append a map entry WITHOUT set()'s "is this key already here" scan. Only for
     // callers that already know the key is new: the decoder, which does its own
     // duplicate detection once per map instead of once per key (set()'s scan made
-    // decoding a k-key map O(k^2) — 4.14 s for one 68 KB frame).
+    // decoding a k-key map O(k^2): 4.14 s for one 68 KB frame).
     Cbor& append_unchecked(std::string key, Cbor val) {
         kind_ = Kind::Map;
         map_.emplace_back(std::move(key), std::move(val));
@@ -158,7 +158,7 @@ private:
 Bytes encode(const Cbor& c);
 // Same, into a caller-owned buffer (cleared, capacity retained). Hot paths reuse
 // one buffer across calls instead of allocating+freeing a fresh Bytes per message
-// — above glibc's 128 KiB mmap threshold that allocation is an mmap/munmap pair.
+//: above glibc's 128 KiB mmap threshold that allocation is an mmap/munmap pair.
 void encode_into(const Cbor& c, Bytes& out);
 // Parse CBOR bytes. Sets *ok=false (if ok != nullptr) on any malformed input and
 // returns Cbor::null(). Indefinite-length containers are accepted.

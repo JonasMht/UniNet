@@ -1,4 +1,4 @@
-// UniNet — the transport. Brokerless peer-to-peer over ZeroMQ's ZRE protocol
+// UniNet: the transport. Brokerless peer-to-peer over ZeroMQ's ZRE protocol
 // (zeromq/zyre): nodes announce themselves with a UDP beacon, connect directly
 // to each other over TCP, and form a group. There is no server to install, no
 // broker to start, and no address for anyone to type.
@@ -23,7 +23,7 @@
 //
 // Threading: one background thread owns the Zyre socket and runs the event
 // loop. Public methods are safe from any thread. Callbacks fire on that
-// background thread — do not block them.
+// background thread: do not block them.
 #pragma once
 
 #include "uninet/peer.h"
@@ -48,8 +48,8 @@ struct ZyreConfig {
 
     // Which network interface to beacon on. Empty lets CZMQ choose, which is
     // right on a single-homed machine. On a box with several interfaces (wired
-    // to the navigation switch AND on hospital Wi-Fi) name the one you mean —
-    // "eth0" or "192.168.1.10" — or discovery may pick the wrong network.
+    // to the navigation switch AND on hospital Wi-Fi) name the one you mean -
+    // "eth0" or "192.168.1.10", or discovery may pick the wrong network.
     //
     // NOT named `interface`: <objbase.h> defines that as a macro on Windows
     // (#define interface struct), which breaks every translation unit that
@@ -62,6 +62,39 @@ struct ZyreConfig {
     int evasive_ms = 5000;
     int expired_ms = 30000;
 
+    // ── discovery over a link with no multicast ──
+    // The UDP beacon above needs peers to share a broadcast domain. Some links
+    // do not provide one: a USB-tethered device reached through a port forward,
+    // a VPN, a routed network, a cloud host. For those, ZRE offers gossip
+    // discovery: one node binds a rendezvous endpoint and the others connect to
+    // it, so no multicast is involved at all.
+    //
+    // Setting either of these switches this node from beacon to gossip mode.
+    // At least one node in the group must bind; every other node connects.
+    //
+    //   rendezvous:  cfg.gossip_bind    = "tcp://*:5670";
+    //   the others:  cfg.gossip_connect = "tcp://192.168.1.10:5670";
+    //
+    // Gossip carries only the introductions. Peers still open direct TCP
+    // connections to each other afterwards, so every node's `endpoint` has to be
+    // reachable from every other node. On a link where that is not automatic
+    // (a port-forwarded tunnel), set `endpoint` and `advertised_endpoint` to the
+    // address the far side should actually dial.
+    std::string gossip_bind;
+    std::string gossip_connect;
+
+    // This node's own data endpoint. Only meaningful in gossip mode, where it
+    // replaces the ephemeral port ZRE would otherwise pick. Empty keeps the
+    // default behaviour.
+    std::string endpoint;
+    // What to tell other nodes this node's endpoint is, when that differs from
+    // what it binds (behind a NAT or a forwarded port).
+    //
+    // Requires a Zyre built with -DENABLE_DRAFTS, which distribution packages
+    // usually are not. On a stable-only build this is ignored and last_error()
+    // says so; gossip_bind/gossip_connect and endpoint all work either way.
+    std::string advertised_endpoint;
+
     // Advertised to every peer at discovery time and readable as Peer::headers.
     // "role", "app" and "host" get accessors on Peer; anything else is yours.
     std::map<std::string, std::string> headers;
@@ -72,7 +105,7 @@ public:
     using PeerCallback = std::function<void(const Peer&)>;
 
     // `name` is what other devices will show for this one. Nothing else is
-    // required — no address, no port, no peer list.
+    // required, no address, no port, no peer list.
     explicit ZyreTransport(std::string name, ZyreConfig cfg = {});
     ~ZyreTransport() override;
 
@@ -98,7 +131,7 @@ public:
     void on_peer_found(PeerCallback cb);
     void on_peer_lost(PeerCallback cb);
 
-    // This node's ZRE identity — the uuid other peers address it by.
+    // This node's ZRE identity: the uuid other peers address it by.
     const std::string& uuid() const;
     const std::string& node_name() const;
 

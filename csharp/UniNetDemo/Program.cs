@@ -1,4 +1,4 @@
-// UniNet C# demo — two devices finding each other and talking, with nothing
+// UniNet C# demo: two devices finding each other and talking, with nothing
 // configured by anyone.
 //
 //   dotnet run --project csharp/UniNetDemo
@@ -24,10 +24,10 @@ class Program
         string realm = $"uninet-csharp-demo-{pid}";
 
         // ── the entire setup: a name, and nothing else ──
-        using var server = Session.Join("Navigation Server", role: "server",
+        using var server = Session.Join("Recorder", role: "server",
                                         app: "UniNetDemo", realm: realm,
                                         marshalToCaller: false);
-        using var viewer = Session.Join("Planning Laptop", role: "viewer",
+        using var viewer = Session.Join("Laptop", role: "viewer",
                                         app: "UniNetDemo", realm: realm,
                                         marshalToCaller: false);
 
@@ -44,7 +44,7 @@ class Program
         viewer.Subscribe("demo.>", msg =>
             Console.WriteLine($"[viewer] {msg.Subject}: {msg.Json}"));
 
-        // Wait for discovery — a network event, not a function call.
+        // Wait for discovery, a network event, not a function call.
         for (int i = 0; i < 100 && server.Peers().Count == 0; ++i) Thread.Sleep(100);
 
         Console.WriteLine($"\n{server.Describe()}");

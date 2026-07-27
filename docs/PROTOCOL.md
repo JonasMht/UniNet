@@ -1,15 +1,15 @@
-# UniNet — wire protocol
+# UniNet: wire protocol
 
 UniNet is a brokerless pub/sub protocol for peers on a local network. This
 document is authoritative; the C++/Python/C# implementations conform to it.
 
 There are two layers, and they are independent:
 
-1. **Discovery and delivery** — ZeroMQ's **ZRE** protocol
+1. **Discovery and delivery**: ZeroMQ's **ZRE** protocol
    ([RFC 36](https://rfc.zeromq.org/spec/36/) / [RFC 43](https://rfc.zeromq.org/spec/43/)),
    implemented by [zeromq/zyre](https://github.com/zeromq/zyre). UniNet does not
    define this layer; it uses it.
-2. **The envelope** — UniNet's own CBOR framing, carried inside a ZRE message.
+2. **The envelope**: UniNet's own CBOR framing, carried inside a ZRE message.
    This is what the rest of the document specifies.
 
 ## Goals
@@ -22,7 +22,7 @@ There are two layers, and they are independent:
 - **Negotiated compression**, so a peer can tell how a frame was encoded.
 - **Forward-compatible:** a protocol version gates every frame.
 
-## Layer 1 — ZRE (discovery and delivery)
+## Layer 1: ZRE (discovery and delivery)
 
 | | |
 |---|---|
@@ -40,7 +40,7 @@ Two consequences worth stating explicitly:
 - **A node never receives its own broadcast.** ZRE does not echo, so UniNet needs
   no echo-suppression pass on the receive path.
 - **`ENTER` fires for every node on the beacon port, regardless of group.** Realm
-  isolation therefore keys on `JOIN`/`LEAVE` of the realm group, not on `ENTER` —
+  isolation therefore keys on `JOIN`/`LEAVE` of the realm group, not on `ENTER` -
   otherwise a peer in another realm would appear in the device list.
 
 ### ZRE message shape
@@ -55,7 +55,7 @@ frame 1: UniNet envelope  (binary, see below)
 Keeping the subject in its own frame lets a receiver match subscriptions without
 decompressing or decoding the payload.
 
-## Layer 2 — the UniNet envelope
+## Layer 2: the UniNet envelope
 
 ```
 envelope = [ comp:1 ][ flags:1 ][ srclen:2 BE ][ src ][ dstlen:2 BE ][ dst ][ payload ]
@@ -85,7 +85,7 @@ decompress and decode a frame just to decide whether to keep it.
 not in the CBOR core.
 
 A receiver accepts a frame when `dst == ""` or `dst == self`. (Echo suppression
-is unnecessary — see above.)
+is unnecessary; see above.
 
 ## Subjects
 
@@ -94,7 +94,7 @@ Dot-separated, with a trailing `>` wildcard for subscriptions:
 | subject | meaning |
 |---|---|
 | `domain.D1` | exact match |
-| `domain.>` | matches `domain.D1`, `domain.D2.feed`, … (one or more trailing tokens) |
+| `domain.>` | matches `domain.D1`, `domain.D2.feed`, ... (one or more trailing tokens) |
 | `>` | matches everything |
 
 `>` is the **only** wildcard. There is no `*`; a pattern containing one matches
@@ -107,7 +107,7 @@ subjects.
 ## Message payloads
 
 `data` is an arbitrary CBOR value. UniNet's transport and codec layers are
-**schema-agnostic** — they carry any value and impose no application taxonomy.
+**schema-agnostic**. They carry any value and impose no application taxonomy.
 
 The CBOR subset UniNet encodes and decodes:
 
@@ -141,7 +141,7 @@ None-only peer interoperates with an LZ4 peer by sending None frames.
 | tier | when |
 |---|---|
 | LZ4 | live traffic (the default where liblz4 is present) |
-| zlib | archival/batch — better ratio, far slower |
+| zlib | archival/batch: better ratio, far slower |
 | None | always available |
 
 Decompression is bounded: a frame declaring an implausible decompressed size is
@@ -156,7 +156,7 @@ accepted as complete.
 
 Readers refuse unknown `pv` majors.
 
-**v0.2 is not wire-compatible with v0.1's NATS deployment** — the transport
+**v0.2 is not wire-compatible with v0.1's NATS deployment**: the transport
 changed from a broker to peer-to-peer ZRE. The envelope itself is unchanged, so
 message-handling code ports as-is. Migrate all peers together.
 

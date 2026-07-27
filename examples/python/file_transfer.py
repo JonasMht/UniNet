@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UniNet — sending a file to another machine.
+"""UniNet: sending a file to another machine.
 
     python3 file_transfer.py receive [output-dir]     # terminal 1
     python3 file_transfer.py send <path> [more...]    # terminal 2
@@ -69,7 +69,7 @@ def send(paths) -> int:
     blob = uninet.Blob(net, SUBJECT)
 
     print(net.describe())
-    print("Looking for a receiver…")
+    print("Looking for a receiver...")
     for _ in range(200):
         if net.peers():
             break

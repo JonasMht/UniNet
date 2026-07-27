@@ -3,7 +3,7 @@
 **Devices on a network find each other and talk. Nobody configures anything.**
 
 ```cpp
-auto net = uninet::Session::join("OR Headset");
+auto net = uninet::Session::join("Headset");
 net->subscribe("domain.>", [](auto& msg) { /* ... */ });
 net->publish("domain.D1", data);
 ```
@@ -56,7 +56,7 @@ net.Publish("domain.D1",
 </table>
 
 A dict published from Python arrives as a `Cbor` map in C++ and as JSON in C#.
-One codec, one wire format, three languages — see [Data](#data-json-in-cbor-on-the-wire-json-out).
+One codec, one wire format, three languages. See [Data](#data-json-in-cbor-on-the-wire-json-out).
 
 ---
 
@@ -69,6 +69,7 @@ One codec, one wire format, three languages — see [Data](#data-json-in-cbor-on
 - [Large payloads: files, volumes, meshes](#large-payloads-files-volumes-meshes)
 - [Finding devices](#finding-devices)
 - [Realms: keeping setups apart](#realms-keeping-setups-apart)
+- [Links without multicast (USB, VPN, routed)](#links-without-multicast-usb-tether-vpn-routed-networks)
 - [Unity / Meta Quest](#unity--meta-quest)
 - [3D Slicer](#3d-slicer)
 - [Command-line tools](#command-line-tools)
@@ -81,13 +82,13 @@ One codec, one wire format, three languages — see [Data](#data-json-in-cbor-on
 
 ## Why it exists
 
-Three applications — a C++ server, a Python module inside 3D Slicer, and a
-C#/Unity app on a Meta Quest — needed to talk to each other. Each had
-re-implemented the same messaging code, and all three had the broker's IP
-address `10.0.0.10:4222` compiled into their source. Changing it meant editing
-three codebases in three languages and rebuilding an APK for the headset.
+Most small distributed setups start the same way. A few programs, often in
+different languages, need to exchange data on a local network. Each one ends up
+with its own copy of the messaging code, and each one has a broker address
+written into it somewhere. Moving to another room, a new laptop, or a fresh DHCP
+lease then means editing several codebases and redeploying all of them.
 
-UniNet removes the address and the broker at the same time. Devices announce
+UniNet removes the address and the broker at the same time. Programs announce
 themselves on the local network and connect directly to each other. There is
 nothing to install on a server, because there is no server.
 
@@ -97,7 +98,7 @@ nothing to install on a server, because there is no server.
 |---|---|
 | **Zero configuration** | Devices discover each other. No addresses, anywhere. |
 | **No broker** | Peer-to-peer. Nothing to install, start, or keep running. |
-| **Three languages** | C++, Python, C# — one data model, identical bytes on the wire. |
+| **Three languages** | C++, Python, C#, one data model, identical bytes on the wire. |
 | **Presence** | Know who is on the network, and when someone joins or leaves. |
 | **JSON or CBOR** | Write JSON, send compact binary, read JSON. Your choice per call. |
 | **Fast** | 18k messages/s at 60 KB each; 2.3 GB/s at 240 KB. |
@@ -110,7 +111,7 @@ nothing to install on a server, because there is no server.
 
 UniNet needs **ZeroMQ/Zyre** (the peer-to-peer layer), **zlib**, and optionally
 **liblz4**. If Zyre is not installed, the build fetches and compiles it
-automatically — so on most machines you can skip straight to the build.
+automatically, so on most machines you can skip straight to the build.
 
 | OS | install prerequisites |
 |---|---|
@@ -120,7 +121,7 @@ automatically — so on most machines you can skip straight to the build.
 | **macOS** | `brew install cmake pkg-config zlib lz4 zyre` |
 | **Windows** | `scripts/bootstrap.ps1` (clones vcpkg for the dependencies); needs Git, CMake, and VS 2022's "Desktop development with C++" workload |
 
-> If `libzyre-dev` is unavailable, install nothing extra — CMake will build
+> If `libzyre-dev` is unavailable, install nothing extra: CMake will build
 > libzmq + czmq + zyre from source on first configure. It adds a few minutes to
 > the first build and nothing after that.
 
@@ -168,9 +169,9 @@ pip install .
 
 int main() {
     // The whole setup. The name is what other devices will show for this one.
-    auto net = uninet::Session::join("Navigation Server");
+    auto net = uninet::Session::join("Recorder");
 
-    // Who else is here — now, and as devices come and go.
+    // Who else is here: now, and as devices come and go.
     net->on_peer_found([](const uninet::Peer& p) {
         printf("found %s\n", p.describe().c_str());
     });
@@ -183,15 +184,15 @@ int main() {
         printf("%s: %s\n", msg.subject.c_str(), uninet::to_json(msg.data).c_str());
     });
 
-    // Send — to everyone…
+    // Send, to everyone...
     uninet::Cbor data = uninet::Cbor::map();
     data.set("code", uninet::Cbor::text("update"));
     net->publish("domain.D1", data);
 
-    // …or from JSON, whichever is more convenient at the call site.
+    // ...or from JSON, whichever is more convenient at the call site.
     net->publish_json("domain.D1", R"({"code":"update","n":42})");
 
-    // …or privately, to one device.
+    // ...or privately, to one device.
     for (const auto& p : net->peers())
         if (p.role() == "headset")
             net->publish("domain.D1", data, p.uuid);
@@ -212,16 +213,16 @@ find_package(UniNet REQUIRED)
 target_link_libraries(your_app PRIVATE uninet)
 ```
 
-**Configuration**, when you need it — the defaults are right for a single
+**Configuration**, when you need it: the defaults are right for a single
 network:
 
 ```cpp
 uninet::SessionConfig cfg;
 cfg.role  = "server";          // free-form label shown to other devices
-cfg.app   = "ThermoNavServer"; // owning application
+cfg.app   = "my-app";          // owning application
 cfg.realm = "or-3";            // see Realms below
 cfg.iface = "eth0";            // only on a machine with several networks
-auto net = uninet::Session::join("Navigation Server", cfg);
+auto net = uninet::Session::join("Recorder", cfg);
 ```
 
 ---
@@ -242,7 +243,7 @@ net.subscribe("domain.>", lambda msg: print(msg.subject, msg.data))
 net.publish("domain.D1", {
     "code": "update",
     "points": [1.0, 2.0, 3.0],       # numeric lists take the fast binary path
-    "nested": {"case": "liver-04"},
+    "nested": {"session": "run-04"},
 })
 
 for peer in net.peers():
@@ -311,7 +312,7 @@ Place the native library where .NET can find it: next to the executable, or in
 
 ## Data: JSON in, CBOR on the wire, JSON out
 
-UniNet sends **CBOR** — a compact binary format that carries typed values and
+UniNet sends **CBOR**, a compact binary format that carries typed values and
 stores float arrays as contiguous blocks, so a 4096-vertex mesh costs no
 per-number overhead.
 
@@ -345,7 +346,7 @@ string json = Session.CborToJson(cbor);
 | CBOR | rendered as JSON |
 |---|---|
 | byte string | base64 text |
-| float array | ordinary JSON array (on one line, even when pretty-printing — a 12288-element array on 12288 lines helps nobody) |
+| float array | ordinary JSON array (on one line, even when pretty-printing, a 12288-element array on 12288 lines helps nobody) |
 | integer > 2⁵³ | survives CBOR exactly; loses precision in JSON consumers |
 | NaN / Infinity | `null` (JSON has no representation for them) |
 
@@ -356,7 +357,7 @@ string json = Session.CborToJson(cbor);
 `publish()` sends a message: it arrives as one unit, and both ends hold it whole
 in memory. That is the right tool up to a few megabytes.
 
-A 200 MB CT volume or a case file is not a message. `Blob` chunks it, streams
+A 200 MB volume or a large dataset file is not a message. `Blob` chunks it, streams
 it, reassembles it on the far side, and reports progress at both ends:
 
 ```python
@@ -366,13 +367,13 @@ blob = uninet.Blob(net, "volumes")
 blob.on_progress(lambda info, done: print(f"{100*done/info.size:.0f}%"))
 blob.on_received(lambda info, data: save(info.name, data))
 
-# sending — metadata travels with the payload
-blob.send("patient-volume", volume, meta={
+# sending: metadata travels with the payload
+blob.send("scan-volume", volume, meta={
     "dtype": str(volume.dtype),
     "shape": list(volume.shape),
     "spacing": [0.5, 0.5, 1.0],
 })
-blob.send_file("/path/to/case.zip")
+blob.send_file("/path/to/dataset.zip")
 ```
 
 ```cpp
@@ -380,7 +381,7 @@ uninet::Blob blob(*net, "volumes");
 blob.on_received([](const uninet::BlobInfo& info, const uninet::Bytes& data) {
     save(info.name, data);
 });
-blob.send_file("/path/to/case.zip");
+blob.send_file("/path/to/dataset.zip");
 ```
 
 **Rule of thumb:** `publish()` for anything up to a few MB you want as one
@@ -398,7 +399,7 @@ Reassembly is bounded on purpose. A peer on the LAN is unauthenticated, so a
 transfer that stalls is dropped, and there are hard caps on size, on concurrent
 transfers, and on total bytes in flight (`BlobConfig`). Raise them deliberately.
 
-> Call `np.ascontiguousarray(a)` before sending a numpy array — a sliced or
+> Call `np.ascontiguousarray(a)` before sending a numpy array, a sliced or
 > transposed array is not contiguous, and the buffer protocol needs it to be.
 
 See [`examples/`](examples/) for complete, runnable versions of all of this.
@@ -409,15 +410,15 @@ See [`examples/`](examples/) for complete, runnable versions of all of this.
 
 Every device advertises a name, and optionally a role, an app, and any headers
 you choose. All of it arrives with the discovery beacon, so a peer list is
-complete the moment a device appears — no follow-up query.
+complete the moment a device appears, no follow-up query.
 
 ```cpp
 for (const uninet::Peer& p : net->peers()) {
     p.uuid;       // address for a private message
-    p.name;       // "OR Headset"
-    p.address;    // "tcp://192.168.1.31:35001" — observed, not self-reported
+    p.name;       // "Headset"
+    p.address;    // "tcp://192.168.1.31:35001": observed, not self-reported
     p.role();     // "headset"
-    p.app();      // "ThermoNavMR"
+    p.app();      // "my-app"
     p.header("anything-you-set");
 }
 ```
@@ -436,8 +437,8 @@ never changes what you see.
 Devices only see devices in the **same realm**. It is the one setting that ever
 needs changing, and it exists for two situations:
 
-- Two independent setups sharing one hospital network.
-- A developer's laptop that must not join a live clinical session.
+- Two independent setups sharing one physical network.
+- A developer's laptop that must not join a live production session.
 
 ```cpp
 cfg.realm = "or-3";                          // C++
@@ -449,8 +450,89 @@ uninet.join("Tool", realm="or-3")            # Python
 Session.Join("Tool", realm: "or-3");         // C#
 ```
 
-Realms isolate both messaging and the peer list — a device in another realm is
+Realms isolate both messaging and the peer list, a device in another realm is
 invisible, not merely unreachable.
+
+---
+
+## Links without multicast (USB tether, VPN, routed networks)
+
+Discovery uses a UDP beacon, which needs the devices to share a broadcast
+domain. Some links do not provide one:
+
+- a device tethered over USB and reached through a port forward
+- a VPN
+- two subnets separated by a router
+- a cloud host
+
+For those, ZRE offers a second discovery mode. One node binds a rendezvous
+endpoint, the others dial it, and no multicast is involved at all:
+
+```cpp
+// the rendezvous node
+uninet::SessionConfig host;
+host.gossip_bind = "tcp://*:5670";
+host.endpoint    = "tcp://192.168.1.10:5671";
+auto a = uninet::Session::join("Recorder", host);
+
+// every other node
+uninet::SessionConfig peer;
+peer.gossip_connect = "tcp://192.168.1.10:5670";
+auto b = uninet::Session::join("Laptop", peer);
+```
+
+```python
+a = uninet.join("Recorder", gossip_bind="tcp://*:5670",
+                endpoint="tcp://192.168.1.10:5671")
+b = uninet.join("Laptop", gossip_connect="tcp://192.168.1.10:5670")
+```
+
+Everything above this line works unchanged: same subjects, same payloads, same
+presence events.
+
+### USB-tethered Android device (Meta Quest and similar)
+
+This works, with one thing to be careful about. `adb` gives you the tunnel:
+
+```bash
+# on the computer: let the headset reach the computer's rendezvous port
+adb reverse tcp:5670 tcp:5670
+```
+
+The headset then dials `tcp://127.0.0.1:5670`, which `adb` forwards to the
+computer.
+
+**The part that needs attention:** gossip carries only the introductions. Once
+two nodes know about each other they open direct TCP connections, so each node's
+`endpoint` has to be an address the other can actually reach. Over a single
+forwarded port that is not automatic, so forward the data port too and tell each
+side what to advertise:
+
+```bash
+adb reverse tcp:5670 tcp:5670     # rendezvous
+adb reverse tcp:5671 tcp:5671     # the computer's data endpoint
+adb forward tcp:5672 tcp:5672     # the headset's data endpoint
+```
+
+```csharp
+// on the headset
+var net = Session.Join("Headset",
+    gossipConnect: "tcp://127.0.0.1:5670",
+    endpoint:      "tcp://*:5672",
+    advertisedEndpoint: "tcp://127.0.0.1:5672");
+```
+
+`advertised_endpoint` exists precisely for this: it is what the node tells peers
+to dial, when that differs from what it binds.
+
+Whether this is worth it depends on your case. Over Wi-Fi the beacon needs no
+setup at all, so USB is for when Wi-Fi is unavailable, blocked by client
+isolation, or too slow. A USB 3 link is faster and far more predictable than
+congested Wi-Fi, which can matter for large transfers.
+
+> Android also filters multicast in the Wi-Fi driver, so a tethered device needs
+> the multicast lock described below regardless of which discovery mode you use,
+> unless you use gossip exclusively.
 
 ---
 
@@ -462,7 +544,7 @@ invisible, not merely unreachable.
 **2. Add the C# sources.** Copy `csharp/UniNet/*.cs` into `Assets/Plugins/UniNet/`,
 or reference the built assembly.
 
-**3. Add the Wi-Fi multicast permission — this is not optional.**
+**3. Add the Wi-Fi multicast permission. This is not optional.**
 
 Android's Wi-Fi stack **silently drops multicast and subnet-broadcast frames**
 unless the app holds a `WifiManager.MulticastLock`. Without it the headset
@@ -478,7 +560,7 @@ In `Assets/Plugins/Android/AndroidManifest.xml`:
 <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
 ```
 
-It is a normal install-time permission — no runtime request needed.
+It is a normal install-time permission, no runtime request needed.
 
 **4. Acquire the lock before joining, release it on teardown.** A ready-made
 helper lives at `docs/unity/UniNetMulticastLock.cs`; copy it into your project.
@@ -496,7 +578,7 @@ public class UniNetBehaviour : MonoBehaviour
     void Start()
     {
         UniNetMulticastLock.Acquire();          // must come before Join
-        _net = Session.Join("MR Viewer", role: "headset", app: "ThermoNavMR");
+        _net = Session.Join("Headset", role: "headset", app: "my-app");
 
         _net.PeerFound += p => Debug.Log($"UniNet: found {p.Name} at {p.Host}");
         _net.Subscribe("domain.>", OnMessage);
@@ -522,7 +604,7 @@ aapt dump permissions your.apk | grep MULTICAST
 ```
 
 > **Ethernet or USB tethering on the headset:** the multicast lock applies to
-> Wi-Fi only. On a non-Wi-Fi interface the lock is harmless but does nothing —
+> Wi-Fi only. On a non-Wi-Fi interface the lock is harmless but does nothing -
 > discovery works because those interfaces do not filter multicast.
 
 ---
@@ -557,13 +639,13 @@ import uninet
 
 class MyModuleLogic:
     def __init__(self):
-        self.net = uninet.join("Slicer Viewer", role="viewer", app="ThermoNavSlicer")
-        self.net.subscribe("thermonav.v1.>", self.on_message)
+        self.net = uninet.join("Slicer Viewer", role="viewer", app="my-app")
+        self.net.subscribe("app.v1.>", self.on_message)
         self.net.on_peer_found(self.on_peer)
 
     def on_message(self, msg):
         # Called on UniNet's network thread. Slicer's VTK/Qt objects are NOT
-        # thread-safe — hop to the main thread before touching the scene.
+        # thread-safe: hop to the main thread before touching the scene.
         import qt
         qt.QTimer.singleShot(0, lambda: self.apply(msg.data))
 
@@ -585,14 +667,14 @@ A device list widget, since Slicer modules usually want one:
 def refresh_device_list(self):
     self.deviceCombo.clear()
     for p in self.net.peers():
-        self.deviceCombo.addItem(f"{p.name} — {p.role} ({p.host})", p.uuid)
+        self.deviceCombo.addItem(f"{p.name}: {p.role} ({p.host})", p.uuid)
 ```
 
 ---
 
 ## Command-line tools
 
-### `uninet-discover` — what is on my network?
+### `uninet-discover`, what is on my network?
 
 The tool to run when someone says "the headset can't see the server".
 
@@ -603,14 +685,14 @@ uninet-discover --once       # one snapshot, then exit
 
 ```
 DEVICE                     ADDRESS          ROLE         APP
-Navigation Server          192.168.1.10     server       ThermoNavServer
-OR Headset                 192.168.1.31     headset      ThermoNavMR
-Planning Laptop            192.168.1.24     viewer       ThermoNavSlicer
+Recorder                   192.168.1.10     server       my-app
+Headset                    192.168.1.31     headset      my-app
+Laptop                     192.168.1.24     viewer       my-app
 
 3 devices.
 ```
 
-When it finds nothing, it says what to check — in order, in plain language.
+When it finds nothing, it says what to check, in order, in plain language.
 
 | flag | meaning |
 |---|---|
@@ -620,17 +702,17 @@ When it finds nothing, it says what to check — in order, in plain language.
 | `--interface <n>` | which network to look on (`eth0`, or an IP) |
 | `--version` | the ZeroMQ/Zyre versions in use |
 
-### `uninet-demo` — two devices talking, with nothing configured
+### `uninet-demo`: two devices talking, with nothing configured
 
 ```bash
-uninet-demo "Planning Laptop"
-uninet-demo "OR Headset" --role headset      # another terminal, or another machine
+uninet-demo "Laptop"
+uninet-demo "Headset" --role headset      # another terminal, or another machine
 ```
 
 Each prints the other arriving, then they exchange messages. Nobody types an
 address. `scripts/demo.sh` runs three at once.
 
-### `uninet-file-transfer` — send a file, no address needed
+### `uninet-file-transfer`: send a file, no address needed
 
 ```bash
 uninet-file-transfer receive ./incoming     # one machine
@@ -651,7 +733,7 @@ Measures cold-start discovery and end-to-end throughput, appending each run to
 ## Performance
 
 Measured with `uninet-benchmark` on a 32-core Linux box, two sessions exchanging
-mesh payloads over the full stack — encode → compress → frame → TCP → unframe →
+mesh payloads over the full stack: encode → compress → frame → TCP → unframe →
 decompress → decode → dispatch:
 
 | payload | size on the wire | messages/s | throughput | delivered |
@@ -705,11 +787,11 @@ include/uninet/   session.h  ← start here
 src/              one .cpp per header
 python/           bindings.cpp (pybind11) · uninet/ (package) · tests/
 csharp/           UniNet/ (Session.cs, Native.cs) · UniNetDemo/
-examples/         demo.cpp · file_transfer.cpp · python/ — see examples/README.md
+examples/         demo.cpp · file_transfer.cpp · python/ (see examples/README).md
 tests/            test_roundtrip (codec) · test_network · test_cabi (C)
                   benchmark (codec) · benchmark_network (end-to-end)
-                  interop/ — the three-language interop participants
-                  docker/  — Linux and Windows-cross test images
+                  interop/: the three-language interop participants
+                  docker/ : Linux and Windows-cross test images
 tools/            uninet_discover.cpp
 scripts/          test-all.sh · test-interop.sh · demo.sh · bootstrap.{sh,ps1}
 docs/             PROTOCOL.md · unity/UniNetMulticastLock.cs
@@ -717,12 +799,12 @@ docs/             PROTOCOL.md · unity/UniNetMulticastLock.cs
 
 **Discovery** is ZRE's UDP beacon: each node broadcasts its presence on the
 local link, peers hear it and open a direct TCP connection. Beacons carry a hop
-limit of 1, so they never cross a router — discovery cannot leak into the rest of
-a hospital network.
+limit of 1, so they never cross a router: discovery cannot leak into the rest of
+the wider network.
 
 **Delivery** is peer-to-peer TCP. A broadcast is a `SHOUT` to the realm group; an
 addressed message is a `WHISPER` to one peer, which is a genuine unicast rather
-than a broadcast everyone else filters. Echo suppression is free — ZRE never
+than a broadcast everyone else filters. Echo suppression is free: ZRE never
 delivers a node its own broadcast.
 
 **The payload** is UniNet's own CBOR envelope, carrying the subject, the sender's
@@ -756,23 +838,23 @@ PYTHONPATH=python pytest python/tests -v       # Python
 |---|---|
 | `test_roundtrip` | CBOR round-trips, compression, framing, hostile frames |
 | `test_network` | real discovery, departure, broadcast, unicast, realm isolation, concurrent publish/subscribe, large-payload transfer |
-| `test_cabi` | the C ABI compiled **as C** — the exact path C#/Unity takes, including UTF-8, null-safety and pointer lifetimes |
+| `test_cabi` | the C ABI compiled **as C**: the exact path C#/Unity takes, including UTF-8, null-safety and pointer lifetimes |
 | `python/tests` | dict round-trips, numpy volumes, discovery, wildcards, threading, error handling |
 | `scripts/test-interop.sh` | a C++, a Python and a C# node in one realm, each verifying the others' payloads field by field |
 
 Every network test runs in a realm unique to its process, so a demo on the same
-machine — or a second CI job on the same box — cannot perturb it.
+machine, or a second CI job on the same box: cannot perturb it.
 
 **Cross-platform.** `tests/docker/` holds three images:
 
 | image | what it verifies |
 |---|---|
-| `Dockerfile.linux` | Debian with Zyre built from source — the path a machine without a system Zyre takes — running C++, Python and C# |
+| `Dockerfile.linux` | Debian with Zyre built from source: the path a machine without a system Zyre takes: running C++, Python and C# |
 | `Dockerfile.windows-check` | every translation unit compiles for `x86_64-w64-mingw32` at `-Werror` |
 | `Dockerfile.windows-run` | the cross-compiled `.exe` files actually **run**, under Wine |
 
 **How far the Windows coverage goes, precisely.** The MinGW images catch what is
-otherwise invisible until someone tries a Windows build — they are what caught
+otherwise invisible until someone tries a Windows build. They are what caught
 `interface` being a macro in `<objbase.h>`, and `gmtime_r` not existing on MSVC.
 Under Wine, `test_roundtrip.exe` passes in full (codec, compression, framing,
 hostile input) and `test_cabi.exe` passes its JSON/CBOR and null-safety
@@ -781,7 +863,7 @@ sections as genuine Windows code.
 What Wine **cannot** cover is discovery: czmq enumerates interfaces with
 `GetAdaptersAddresses` and asserts on `ERROR_BUFFER_OVERFLOW`, a buffer-sizing
 protocol Wine does not implement. The runner reports that as an *expected stop*,
-never as a pass. Closing it needs a real Windows machine — the `windows:msvc`
+never as a pass. Closing it needs a real Windows machine: the `windows:msvc`
 job in `.gitlab-ci.yml` does exactly that once a Windows runner exists.
 
 MSVC itself cannot run on Linux at all, so that job is the only route to it.
@@ -810,7 +892,7 @@ cmake --build build-tsan -j && ./build-tsan/test_network
    This is the single most common cause. A normal network, or a cable, works.
 3. Is UDP port 5670 open? A host firewall will block the beacon.
 4. On a machine with several networks, name the one you mean:
-   `cfg.iface = "eth0"` (C++), `iface="eth0"` (Python/C#) — otherwise discovery
+   `cfg.iface = "eth0"` (C++), `iface="eth0"` (Python/C#): otherwise discovery
    may pick the wrong one.
 5. On a Meta Quest / Android device, see [Unity / Meta Quest](#unity--meta-quest):
    without the multicast permission the headset receives nothing.
@@ -820,14 +902,14 @@ one with the problem.
 
 **Devices see each other but messages do not arrive.** Check the realms match,
 and check the subject: `domain.D1` does not match a subscription to `domain.D1.>`
-— use `domain.>` to catch everything below `domain`.
+- use `domain.>` to catch everything below `domain`.
 
 **`libuninet_c.so: cannot open shared object file`.** Add its directory to
 `LD_LIBRARY_PATH`, or on Windows place `uninet_c.dll` next to the executable. In
 Unity it belongs in `Assets/Plugins/<platform>/`.
 
 **The Python extension imports but `join()` fails.** Check
-`uninet.zyre_version()` — if that works the library is loaded correctly and the
+`uninet.zyre_version()`, if that works the library is loaded correctly and the
 problem is the network, not the build.
 
 ---

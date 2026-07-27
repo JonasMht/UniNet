@@ -1,7 +1,7 @@
-// UniNet benchmark — complete pipeline diagnostic. Mirrors UniVox's approach
+// UniNet benchmark: complete pipeline diagnostic. Mirrors UniVox's approach
 // (operation-level ScopedOp instrumentation + an opt-in profiler report) but
 // exercises the *whole* path (encode → compress → frame → deliver → unframe →
-// decode) so the report pinpoints the dominant cost — the lever for the next
+// decode) so the report pinpoints the dominant cost: the lever for the next
 // "massive improvement".
 //
 // It also logs every run to a CSV (append) and dumps the latest profiler report
@@ -44,7 +44,7 @@ static double mean_ns(F&& f, int reps) {
     return std::chrono::duration<double, std::nano>(t1 - t0).count() / reps;
 }
 
-// CSV row logger — appends to `path`, writing the header on first creation.
+// CSV row logger: appends to `path`, writing the header on first creation.
 static void log_row(const std::string& path, const std::string& run,
                     int verts, double payload_kib, const std::string& op,
                     double mean_us, double mbps, double extra) {
@@ -56,7 +56,7 @@ static void log_row(const std::string& path, const std::string& run,
         << mean_us << ',' << mbps << ',' << extra << '\n';
 }
 
-// A realistic ThermoNav "mesh update": points (float32 x3) + flat triangle
+// A realistic "mesh update": points (float32 x3) + flat triangle
 // indices packed as little-endian uint32 bytes + a 4x4 transform.
 static Cbor make_mesh_payload(int verts, Bytes& polys_out) {
     std::vector<float> pts(size_t(verts) * 3);
@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
     }
     std::string rep = profiler::report();
     std::printf("%s", rep.c_str());
-    { std::ofstream f("uninet_profile.txt"); f << "# UniNet profiler — " << caps() << "\n" << rep; }
+    { std::ofstream f("uninet_profile.txt"); f << "# UniNet profiler: " << caps() << "\n" << rep; }
     std::printf("# saved profiler report -> uninet_profile.txt\n");
 
     // Dominant-op callout (the next thing to optimize).

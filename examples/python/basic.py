@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UniNet — connecting two nodes.
+"""UniNet: connecting two nodes.
 
 The smallest complete program. Run it in two terminals:
 
@@ -21,7 +21,7 @@ def main() -> int:
     net = uninet.join(name, role="demo", app="uninet-examples")
     print(net.describe())
 
-    # Who else is here — fires for devices already present, and as they arrive.
+    # Who else is here: fires for devices already present, and as they arrive.
     net.on_peer_found(lambda p: print(f"  + {p.name} at {p.endpoint} on {p.host}"))
     net.on_peer_lost(lambda p: print(f"  - {p.name} left"))
 
@@ -37,7 +37,7 @@ def main() -> int:
             net.publish("chat.room", {"from": name, "text": f"hello #{tick}"})
             print(f"[{len(net.peers())} peer(s)] sent hello #{tick}")
     except KeyboardInterrupt:
-        print("\nleaving — the others see it immediately")
+        print("\nleaving: the others see it immediately")
     return 0
 
 

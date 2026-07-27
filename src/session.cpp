@@ -1,4 +1,4 @@
-// UniNet — Session implementation. See include/uninet/session.h.
+// UniNet: Session implementation. See include/uninet/session.h.
 #include "uninet/session.h"
 
 #include "uninet/json.h"
@@ -16,12 +16,16 @@ struct Session::Impl {
 
 Session::Session() : impl_(new Impl()) {}
 
-Session::~Session() {
+Session::~Session() { close(); }
+
+void Session::close() {
     // Order matters: Node holds a raw Transport* and a subscription that calls
     // back into it, so the Node goes first.
     impl_->node.reset();
     impl_->transport.reset();
 }
+
+bool Session::open() const { return impl_->transport != nullptr; }
 
 std::unique_ptr<Session> Session::join(const std::string& name, SessionConfig cfg) {
     std::unique_ptr<Session> s(new Session());
@@ -31,9 +35,13 @@ std::unique_ptr<Session> Session::join(const std::string& name, SessionConfig cf
     zcfg.realm     = cfg.realm;
     zcfg.port      = cfg.port;
     zcfg.iface = cfg.iface;
+    zcfg.gossip_bind          = cfg.gossip_bind;
+    zcfg.gossip_connect       = cfg.gossip_connect;
+    zcfg.endpoint             = cfg.endpoint;
+    zcfg.advertised_endpoint  = cfg.advertised_endpoint;
     zcfg.headers   = cfg.headers;
     // Role and app ride the discovery beacon, so a peer list is complete the
-    // moment a device appears — no follow-up query to ask what it is.
+    // moment a device appears, no follow-up query to ask what it is.
     if (!cfg.role.empty()) zcfg.headers["role"] = cfg.role;
     if (!cfg.app.empty())  zcfg.headers["app"]  = cfg.app;
     // Which machine this peer runs on. Two devices can share a name ("Viewer"),
@@ -67,30 +75,42 @@ bool Session::publish_json(const std::string& subject, const std::string& json,
 }
 
 void Session::subscribe(const std::string& subject, Node::DataHandler handler) {
-    impl_->node->subscribe(subject, std::move(handler));
+    if (impl_->node) impl_->node->subscribe(subject, std::move(handler));
 }
 
-std::vector<Peer> Session::peers() const { return impl_->transport->peers(); }
+std::vector<Peer> Session::peers() const {
+    return impl_->transport ? impl_->transport->peers() : std::vector<Peer>{};
+}
 
-void Session::on_peer_found(PeerCallback cb) { impl_->transport->on_peer_found(std::move(cb)); }
-void Session::on_peer_lost(PeerCallback cb)  { impl_->transport->on_peer_lost(std::move(cb)); }
+void Session::on_peer_found(PeerCallback cb) {
+    if (impl_->transport) impl_->transport->on_peer_found(std::move(cb));
+}
+void Session::on_peer_lost(PeerCallback cb) {
+    if (impl_->transport) impl_->transport->on_peer_lost(std::move(cb));
+}
 
-bool Session::connected() const { return impl_->transport->connected(); }
+bool Session::connected() const {
+    return impl_->transport && impl_->transport->connected();
+}
 const std::string& Session::name() const { return impl_->name; }
-const std::string& Session::uuid() const { return impl_->transport->uuid(); }
+const std::string& Session::uuid() const {
+    static const std::string kNone;
+    return impl_->transport ? impl_->transport->uuid() : kNone;
+}
 
 Node&          Session::node()      { return *impl_->node; }
 ZyreTransport& Session::transport() { return *impl_->transport; }
 
 std::string Session::describe() const {
+    if (!impl_->transport) return "Closed.";
     if (!impl_->transport->connected()) {
         const std::string err = impl_->transport->last_error();
-        return "Not on the network" + (err.empty() ? "." : " — " + err);
+        return "Not on the network" + (err.empty() ? "." : ": " + err);
     }
     const size_t n = impl_->transport->peers().size();
     if (n == 0) return "On the network as \"" + impl_->name +
-                       "\" — no other devices yet.";
-    return "On the network as \"" + impl_->name + "\" — " + std::to_string(n) +
+                       "\", no other devices yet.";
+    return "On the network as \"" + impl_->name + "\": " + std::to_string(n) +
            (n == 1 ? " other device." : " other devices.");
 }
 

@@ -9,7 +9,7 @@
     <PackageId>UniNet</PackageId>
     <Version>0.2.0</Version>
     <Authors>JonasMht</Authors>
-    <Description>UniNet — brokerless peer-to-peer messaging with LAN discovery built in. C# bindings to the compiled C++ core.</Description>
+    <Description>UniNet: brokerless peer-to-peer messaging with LAN discovery built in. C# bindings to the compiled C++ core.</Description>
     <PackageTags>networking;pubsub;cbor;json;zeromq;zyre;discovery;unity</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

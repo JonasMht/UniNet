@@ -1,4 +1,4 @@
-// UniNet — correctness tests: CBOR round-trip, compression round-trip, envelope
+// UniNet: correctness tests: CBOR round-trip, compression round-trip, envelope
 // frame/unframe, and loopback pub/sub (echo suppression, dst targeting, wildcard).
 #include "uninet/cbor.h"
 #include "uninet/codec.h"
@@ -98,7 +98,7 @@ static void test_loopback_pubsub() {
         last_text = env.data["text"].as_text();
         last_subj = env.subject;
     });
-    // alice subscribes too — must NOT receive her own echo.
+    // alice subscribes too: must NOT receive her own echo.
     a.subscribe("domain.D1", [&](const Envelope&) { ++a_recv; });
 
     a.publish("domain.D1", Cbor::map().set("text", Cbor::text("hi bob")));
@@ -140,7 +140,7 @@ static void test_hostile_frames() {
     ok = true; decode(huge_text.data(), huge_text.size(), &ok);
     CHECK(!ok);
 
-    // Float-array fast path with a count whose n*5 wraps to a small value —
+    // Float-array fast path with a count whose n*5 wraps to a small value -
     // the stride check then let the scan walk off the end of the buffer.
     Bytes ovf_f32 = {0x9B, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x34};
     for (int i = 0; i < 8; ++i) ovf_f32.push_back(0xFA);
@@ -163,13 +163,13 @@ static void test_hostile_frames() {
 
 // A payload that compresses better than the decompressor's old size guess was
 // silently dropped: unframe() returned nullopt and Node discarded the message.
-// Sparse safety maps (a documented ThermoNav payload) compress ~220x.
+// Sparse grids (mostly one repeated value) compress ~220x.
 static void test_high_ratio_payload_survives() {
     for (int side : {128, 256, 512}) {
         std::vector<float> grid(size_t(side) * size_t(side), 0.0f);
         for (size_t i = 0; i < grid.size(); i += 997) grid[i] = 1.0f;
         Envelope env;
-        env.subject = "thermonav.v1.safety_map";
+        env.subject = "app.v1.grid";
         env.src_uuid = "srv";
         env.compression = DEFAULT_COMPRESSION;
         env.data = Cbor::map().set("grid", Cbor::f32_array(grid));

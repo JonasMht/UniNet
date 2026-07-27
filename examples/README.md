@@ -1,7 +1,7 @@
 # UniNet examples
 
 Every example runs on **two terminals on one machine, or two machines on the
-same network** — the commands are identical either way, because nothing is
+same network**: the commands are identical either way, because nothing is
 configured. Start them in any order.
 
 Build the C++ ones first:
@@ -15,7 +15,7 @@ For the Python ones: `pip install .` (or `export PYTHONPATH=python` after a
 
 ---
 
-## Start here — two nodes talking
+## Start here: two nodes talking
 
 | | |
 |---|---|
@@ -37,10 +37,10 @@ address. `../scripts/demo.sh` runs three at once.
 
 | what | example | why this way |
 |---|---|---|
-| **Messages** (up to a few MB) | [`python/basic.py`](python/basic.py) | `publish()` — one call, arrives as one unit |
+| **Messages** (up to a few MB) | [`python/basic.py`](python/basic.py) | `publish()`, one call, arrives as one unit |
 | **A mesh**, streaming | [`python/mesh_transfer.py`](python/mesh_transfer.py) | `publish()` at 20 Hz; float arrays take the binary fast path |
-| **A file** | [`file_transfer.cpp`](file_transfer.cpp) · [`python/file_transfer.py`](python/file_transfer.py) | `Blob` — chunked, with progress |
-| **A 3D volume** (numpy) | [`python/volume_transfer.py`](python/volume_transfer.py) | `Blob` — 64 MB+ with shape and dtype attached |
+| **A file** | [`file_transfer.cpp`](file_transfer.cpp) · [`python/file_transfer.py`](python/file_transfer.py) | `Blob`: chunked, with progress |
+| **A 3D volume** (numpy) | [`python/volume_transfer.py`](python/volume_transfer.py) | `Blob`: 64 MB+ with shape and dtype attached |
 
 **The rule of thumb:** `publish()` for anything up to a few MB that you want as
 one message. `Blob` for anything larger, or anything you want a progress bar on.
@@ -67,12 +67,12 @@ the same and verifies a SHA-256 that travels as metadata.
 python3 python/volume_transfer.py receive        python3 python/volume_transfer.py send
 ```
 
-A 256×256×256 float32 volume — 67 MB — with its shape, dtype and voxel spacing
+A 256×256×256 float32 volume: 67 MB, with its shape, dtype and voxel spacing
 carried alongside, so the receiver rebuilds the exact array:
 
 ```python
 # sender
-blob.send("patient-volume", volume, meta={
+blob.send("scan-volume", volume, meta={
     "dtype": str(volume.dtype),
     "shape": list(volume.shape),
     "spacing": [0.5, 0.5, 1.0],
@@ -98,7 +98,7 @@ python3 python/mesh_transfer.py receive        python3 python/mesh_transfer.py s
 
 Streams a 4096-vertex surface at 20 Hz. Vertices are floats and take the
 contiguous binary fast path; triangle indices are integers and **stay
-integers** — which is why a list of ints is never silently converted to floats.
+integers**, which is why a list of ints is never silently converted to floats.
 
 ---
 

@@ -1,8 +1,8 @@
-// UniNet — envelope framing + compression. The Envelope is the one wire contract
+// UniNet: envelope framing + compression. The Envelope is the one wire contract
 // every peer shares: who sent it, who it's for, what subject, and an arbitrary
 // Cbor payload. `frame()` produces the on-wire bytes; `unframe()` parses them.
 //
-// Wire format (see docs/PROTOCOL.md) — routing in a CLEAR header, content
+// Wire format (see docs/PROTOCOL.md): routing in a CLEAR header, content
 // compressed, so a receiver can filter echoes/targeting WITHOUT decompressing:
 //
 //   frame = [ comp:1 ][ flags:1 ][ srclen:2 BE ][ src ][ dstlen:2 BE ][ dst ][ payload ]
@@ -10,7 +10,7 @@
 //   core    = { "pv": uint, "sub": text, "data": <any> }   // src/dst live in the header
 //
 // This split is what lets Node::on_raw_ drop a peer's own echo (and messages not
-// addressed to it) at the cost of reading ~tens of header bytes — no decompress,
+// addressed to it) at the cost of reading ~tens of header bytes, no decompress,
 // no CBOR decode. With compression on (the recommended config) that is the
 // difference between decoding every frame twice and decoding it once.
 #pragma once
@@ -33,11 +33,11 @@ struct Envelope {
 };
 
 // Core (subject + data + version) <-> Cbor. Routing (src/dst/compression) is NOT
-// in the Cbor — it rides in the binary header so it stays readable when compressed.
+// in the Cbor. It rides in the binary header so it stays readable when compressed.
 Cbor to_cbor(const Envelope& e);
 std::optional<Envelope> from_cbor(const Cbor& c);   // reads core; src/dst/compression left default
 
-// Routing lifted from the wire header — cheap, no decompress/decode.
+// Routing lifted from the wire header: cheap, no decompress/decode.
 struct Routing {
     Compression compression = Compression::None;
     std::string src;
@@ -63,7 +63,7 @@ Bytes compress(const Bytes& raw, Compression method);
 Bytes decompress(const Bytes& comp, Compression method);
 
 // Same, into a caller-owned buffer (cleared, capacity retained). decompress_into()
-// returns false (and clears `out`) on malformed, truncated, or over-large input —
+// returns false (and clears `out`) on malformed, truncated, or over-large input -
 // it never throws: it runs on the receive path, where every byte is hostile until
 // proven otherwise, and its callers treat it as noexcept.
 void compress_into(const uint8_t* raw, size_t n, Compression method, Bytes& out);
@@ -79,7 +79,7 @@ std::optional<Envelope> unframe(const Bytes& wire);
 // ── allocation-free hot path ──
 // frame()/unframe() each allocate and free their intermediate buffers. Above
 // glibc's (dynamic, initially 128 KiB) mmap threshold every such buffer is an
-// mmap/munmap syscall pair plus page faults on first touch — for the mesh-sized
+// mmap/munmap syscall pair plus page faults on first touch, for the mesh-sized
 // payloads UniNet actually carries (100–450 KiB) that allocator traffic costs
 // more than the encode and the compression combined. These overloads let a
 // steady-state publisher/receiver reuse one set of buffers and allocate nothing.
@@ -94,7 +94,7 @@ struct Scratch {
 void frame_into(const Envelope& e, Bytes& wire, Scratch& scratch);
 
 // Parse a wire frame held elsewhere. The uncompressed payload is decoded in
-// place — no copy — and only the compressed case touches `scratch`.
+// place, no copy, and only the compressed case touches `scratch`.
 std::optional<Envelope> unframe_into(const uint8_t* wire, size_t n, Scratch& scratch);
 
 }  // namespace uninet

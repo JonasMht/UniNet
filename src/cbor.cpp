@@ -1,4 +1,4 @@
-// UniNet — CBOR codec implementation (RFC 8949). Dependency-free; definite-length
+// UniNet: CBOR codec implementation (RFC 8949). Dependency-free; definite-length
 // by default with indefinite-length input accepted.
 #include "uninet/cbor.h"
 
@@ -82,7 +82,7 @@ void encode_rec(const Cbor& c, Bytes& out) {
         }
         case Cbor::Kind::F32Array: {
             // Bulk-write path (profiler-flagged: per-float push_back was 86% of
-            // framing). Pre-size the buffer once and write directly — no per-element
+            // framing). Pre-size the buffer once and write directly, no per-element
             // size check / reallocation in the hot loop.
             const auto& v = c.f32_items();
             put_head(out, 4, v.size());
@@ -142,7 +142,7 @@ void encode_rec(const Cbor& c, Bytes& out) {
 
 void encode_into(const Cbor& c, Bytes& out) {
     profiler::ScopedOp _("cbor.encode");
-    out.clear();                 // keeps capacity — the point of this overload
+    out.clear();                 // keeps capacity: the point of this overload
     encode_rec(c, out);
     _.set_bytes_in(out.size());
     _.set_bytes_out(out.size());
@@ -160,7 +160,7 @@ namespace {
 // controlled and 64 bits wide. `c.i + n` and `n * 5` both wrap on 64-bit, which
 // turned every bounds check below into a no-op for crafted inputs: a 9-byte
 // frame declaring a 2^64-1 byte string reached the std::vector range ctor and
-// aborted the process. Depth is capped for the same reason — decode_one
+// aborted the process. Depth is capped for the same reason: decode_one
 // recurses once per nesting level, and ~8.5k levels (which LZ4-compress to
 // about 60 bytes) exhausted the stack.
 constexpr int kMaxDepth = 128;
@@ -395,7 +395,7 @@ Cbor decode_one(Cursor& c) {
             }
             return m;
         }
-        case 6: {  // tag — skip the tag number, decode the content
+        case 6: {  // tag: skip the tag number, decode the content
             (void)read_arg(c, ai);
             if (!c.ok) return Cbor::null();
             return decode_one(c);
@@ -417,7 +417,7 @@ Cbor decode_one(Cursor& c) {
                 if (v < 32) { c.ok = false; return Cbor::null(); }  // must have used ai<24
                 return Cbor::uint(v);
             }
-            if (ai == 25) {  // IEEE half — what the C# peer emits for exact floats
+            if (ai == 25) {  // IEEE half, what the C# peer emits for exact floats
                 if (c.i + 2 > c.len) { c.ok = false; return Cbor::null(); }
                 uint16_t h = uint16_t(read_be(c, 2));
                 return Cbor::f32(half_to_float(h));

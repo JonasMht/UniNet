@@ -1,4 +1,4 @@
-// UniNet — JSON in, CBOR on the wire, JSON out.
+// UniNet: JSON in, CBOR on the wire, JSON out.
 //
 // CBOR is what UniNet sends: compact, typed, and it carries float arrays as
 // contiguous blocks so a 4096-vertex mesh costs no per-element overhead. But

@@ -1,8 +1,8 @@
-// UniNet — C ABI implementation. See include/uninet/cabi.h.
+// UniNet: C ABI implementation. See include/uninet/cabi.h.
 //
 // Every extern "C" function is wrapped in a catch-all. A C++ exception that
 // escapes through a C frame is undefined behaviour, and the callers on the far
-// side — C#, Unity, plain C — cannot unwind it. v0.1 had no guards at all, so a
+// side: C#, Unity, plain C: cannot unwind it. v0.1 had no guards at all, so a
 // std::bad_alloc on a large payload killed the process.
 #include "uninet/cabi.h"
 
@@ -26,7 +26,7 @@ thread_local std::string g_error;
 void set_error(const std::string& e) { g_error = e; }
 
 // Copy into a caller-provided buffer. Returns the bytes written, or
-// UNINET_ERR_BUFFER when it would not fit — never a truncated string the caller
+// UNINET_ERR_BUFFER when it would not fit, never a truncated string the caller
 // might mistake for the whole value.
 int copy_out(const std::string& s, char* buf, size_t buflen) {
     if (!buf || buflen == 0) {
@@ -48,7 +48,7 @@ const char* safe(const char* s) { return s ? s : ""; }
 
 // The handle types are the C++ objects plus whatever the ABI keeps alive for
 // them. Subscriptions capture a C function pointer and a void*, so nothing needs
-// pinning here — but the Session must outlive every callback it holds, and
+// pinning here, but the Session must outlive every callback it holds, and
 // freeing the handle is what stops them.
 struct uninet_session {
     std::unique_ptr<Session> session;
@@ -57,7 +57,7 @@ struct uninet_session {
 struct uninet_peers {
     std::vector<Peer> items;
     // role/app/header return computed strings, so they need storage that
-    // outlives the call. One shared scratch buffer would alias — a caller
+    // outlives the call. One shared scratch buffer would alias, a caller
     // holding the result of role() and then calling app() would find its first
     // pointer now showing the second value. Each (index, key) therefore gets its
     // own entry, and std::map guarantees the value's address never moves.
@@ -66,9 +66,11 @@ struct uninet_peers {
 
 // ── session ───────────────────────────────────────────────────────────────
 
-extern "C" uninet_session_t* uninet_session_join(const char* name, const char* role,
-                                                 const char* app, const char* realm,
-                                                 const char* iface, int port) {
+extern "C" uninet_session_t* uninet_session_join_ex(
+        const char* name, const char* role, const char* app, const char* realm,
+        const char* iface, int port, const char* gossip_bind,
+        const char* gossip_connect, const char* endpoint,
+        const char* advertised_endpoint) {
     try {
         if (!name || !*name) { set_error("name is required"); return nullptr; }
         SessionConfig cfg;
@@ -77,6 +79,10 @@ extern "C" uninet_session_t* uninet_session_join(const char* name, const char* r
         if (realm && *realm) cfg.realm = realm;
         if (iface && *iface) cfg.iface = iface;
         if (port > 0)        cfg.port = port;
+        cfg.gossip_bind         = safe(gossip_bind);
+        cfg.gossip_connect      = safe(gossip_connect);
+        cfg.endpoint            = safe(endpoint);
+        cfg.advertised_endpoint = safe(advertised_endpoint);
 
         auto handle = std::unique_ptr<uninet_session>(new uninet_session());
         handle->session = Session::join(name, std::move(cfg));
@@ -88,6 +94,13 @@ extern "C" uninet_session_t* uninet_session_join(const char* name, const char* r
         set_error("unknown error while joining the network");
         return nullptr;
     }
+}
+
+extern "C" uninet_session_t* uninet_session_join(const char* name, const char* role,
+                                                 const char* app, const char* realm,
+                                                 const char* iface, int port) {
+    return uninet_session_join_ex(name, role, app, realm, iface, port,
+                                  nullptr, nullptr, nullptr, nullptr);
 }
 
 extern "C" void uninet_session_free(uninet_session_t* session) {

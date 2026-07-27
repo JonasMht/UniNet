@@ -1,10 +1,10 @@
-// UniNet — ZRE transport implementation. See include/uninet/zyre_transport.h.
+// UniNet: ZRE transport implementation. See include/uninet/zyre_transport.h.
 //
 // Zyre's socket, like every ZeroMQ socket, belongs to exactly one thread. So a
 // single background thread owns it and runs the whole event loop, and every
 // public method that needs to touch Zyre posts a command to that thread over an
 // inproc pipe instead of reaching for the socket itself. That is the standard
-// CZMQ actor pattern, and it means there is no lock around the network at all —
+// CZMQ actor pattern, and it means there is no lock around the network at all -
 // publishing from ten threads costs ten inproc sends, not ten contended mutexes.
 #include "uninet/zyre_transport.h"
 
@@ -33,7 +33,7 @@ std::string Peer::describe() const {
     const std::string where = endpoint();
     if (!where.empty()) s += " (" + where + ")";
     const std::string r = role();
-    if (!r.empty()) s += " — " + r;
+    if (!r.empty()) s += ": " + r;
     return s;
 }
 
@@ -74,7 +74,7 @@ struct ZyreTransport::Impl {
 
     // Guards everything below, which the actor thread writes and callers read.
     mutable std::mutex mu;
-    // Peers that have joined OUR realm — the ones callers see.
+    // Peers that have joined OUR realm: the ones callers see.
     std::map<std::string, Peer> peers;
     // Peers seen on the wire but not (yet) in our realm. ZRE's ENTER fires for
     // every node sharing the beacon port, so a dev laptop in another realm shows
@@ -118,7 +118,7 @@ struct ZyreTransport::Impl {
         }
     }
 
-    // ENTER: a ZRE node appeared on the beacon port. It is NOT yet one of ours —
+    // ENTER: a ZRE node appeared on the beacon port. It is NOT yet one of ours -
     // every realm shares the port, so we only record what we learned and wait for
     // a JOIN naming our realm.
     void peer_entered(const char* uuid_c, const char* name_c, const char* addr_c,
@@ -160,7 +160,7 @@ struct ZyreTransport::Impl {
     }
 
     // LEAVE our realm, or EXIT the network entirely: either way the peer stops
-    // being visible. `forget` distinguishes the two — a peer that merely left the
+    // being visible. `forget` distinguishes the two, a peer that merely left the
     // group is still on the network and keeps its record.
     void peer_gone(const char* uuid_c, bool forget) {
         if (!uuid_c) return;
@@ -212,7 +212,7 @@ struct ZyreTransport::Impl {
             zframe_destroy(&body);
         }
         // EVASIVE / SILENT are ZRE's "peer is slow to answer" warnings. A peer
-        // that is genuinely gone produces EXIT, which is what removes it — so
+        // that is genuinely gone produces EXIT, which is what removes it: so
         // a device is not dropped from the list for one late heartbeat.
     }
 
@@ -289,7 +289,7 @@ ZyreTransport::ZyreTransport(std::string name, ZyreConfig cfg) : impl_(new Impl(
     if (impl_->node) {
         impl_->uuid = zyre_uuid(impl_->node);
         // Advertised with the beacon, so a peer knows what we are the moment it
-        // sees us — no round-trip needed to build a device list.
+        // sees us, no round-trip needed to build a device list.
         zyre_set_header(impl_->node, "app", "%s", "uninet");
         for (const auto& kv : impl_->cfg.headers)
             zyre_set_header(impl_->node, kv.first.c_str(), "%s", kv.second.c_str());
@@ -313,14 +313,48 @@ bool ZyreTransport::connect() {
     if (impl_->running.load()) return true;
     if (!impl_->node) return false;
 
-    if (impl_->cfg.port > 0) zyre_set_port(impl_->node, impl_->cfg.port);
+    // Gossip mode replaces the UDP beacon entirely, so the beacon settings below
+    // do not apply to it. Setting the endpoint is what switches ZRE over.
+    const bool gossip = !impl_->cfg.gossip_bind.empty() ||
+                        !impl_->cfg.gossip_connect.empty();
+    if (gossip) {
+        // ZRE requires an explicit endpoint in gossip mode: with no beacon there
+        // is nothing to announce an ephemeral port. Pick a sane default rather
+        // than failing, so the common case needs one setting, not three.
+        const std::string ep = impl_->cfg.endpoint.empty()
+                                   ? std::string("tcp://*:") + std::to_string(impl_->cfg.port + 1)
+                                   : impl_->cfg.endpoint;
+        if (zyre_set_endpoint(impl_->node, "%s", ep.c_str()) != 0) {
+            impl_->set_error("could not bind the node endpoint '" + ep + "'");
+            return false;
+        }
+        if (!impl_->cfg.advertised_endpoint.empty()) {
+            // zyre_set_advertised_endpoint is a DRAFT API: it exists only when
+            // Zyre was built with -DENABLE_DRAFTS. Distro packages usually are
+            // not, so guard it and say so rather than failing to compile there.
+#ifdef ZYRE_BUILD_DRAFT_API
+            zyre_set_advertised_endpoint(impl_->node,
+                                         impl_->cfg.advertised_endpoint.c_str());
+#else
+            impl_->set_error(
+                "advertised_endpoint needs a Zyre built with -DENABLE_DRAFTS; "
+                "this build has the stable API only, so the setting is ignored");
+#endif
+        }
+        if (!impl_->cfg.gossip_bind.empty())
+            zyre_gossip_bind(impl_->node, "%s", impl_->cfg.gossip_bind.c_str());
+        if (!impl_->cfg.gossip_connect.empty())
+            zyre_gossip_connect(impl_->node, "%s", impl_->cfg.gossip_connect.c_str());
+    } else if (impl_->cfg.port > 0) {
+        zyre_set_port(impl_->node, impl_->cfg.port);
+    }
     if (!impl_->cfg.iface.empty())
         zyre_set_interface(impl_->node, impl_->cfg.iface.c_str());
     zyre_set_evasive_timeout(impl_->node, impl_->cfg.evasive_ms);
     zyre_set_expired_timeout(impl_->node, impl_->cfg.expired_ms);
 
     if (zyre_start(impl_->node) != 0) {
-        impl_->set_error("could not start discovery — another program may hold UDP port "
+        impl_->set_error("could not start discovery: another program may hold UDP port "
                          + std::to_string(impl_->cfg.port));
         return false;
     }
@@ -399,7 +433,7 @@ std::vector<Peer> ZyreTransport::peers() const {
 
 void ZyreTransport::on_peer_found(PeerCallback cb) {
     // Replay the peers already known, so a caller that registers after connect()
-    // still learns about everyone — otherwise "who is here" silently depends on
+    // still learns about everyone: otherwise "who is here" silently depends on
     // whether you registered before or after the first beacon.
     std::vector<Peer> known;
     {

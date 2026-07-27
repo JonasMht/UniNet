@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UniNet — streaming a 3D mesh, the way a live navigation view does.
+"""UniNet: streaming a 3D mesh, the way a live navigation view does.
 
 A mesh is small enough to send as an ordinary message, so this uses publish()
 rather than Blob. The point it demonstrates is the float fast path: a numeric
@@ -19,11 +19,11 @@ import numpy as np
 
 import uninet
 
-SUBJECT = "thermonav.v1.mesh"
+SUBJECT = "scene.v1.mesh"
 
 
 def make_mesh(n_verts: int):
-    """A sphere-ish surface — points plus triangle indices."""
+    """A sphere-ish surface: points plus triangle indices."""
     rng = np.random.default_rng(7)
     phi = rng.uniform(0, np.pi, n_verts)
     theta = rng.uniform(0, 2 * np.pi, n_verts)
@@ -63,7 +63,7 @@ def send() -> int:
     net = uninet.join("Mesh Source", role="server", app="uninet-examples")
 
     print(net.describe())
-    print("Looking for a viewer…")
+    print("Looking for a viewer...")
     for _ in range(200):
         if net.peers():
             break
@@ -74,7 +74,7 @@ def send() -> int:
     print(f"Found {net.peers()[0].name}\n")
 
     pts, tris = make_mesh(4096)
-    print(f"Streaming a {len(pts)}-vertex mesh at 20 Hz (Ctrl+C to stop)…")
+    print(f"Streaming a {len(pts)}-vertex mesh at 20 Hz (Ctrl+C to stop)...")
 
     frame = 0
     t0 = time.monotonic()
@@ -84,7 +84,7 @@ def send() -> int:
             # Wobble the mesh so each frame differs, as a live surface would.
             wobble = pts * (1.0 + 0.01 * np.sin(frame * 0.1))
             net.publish(SUBJECT, {
-                "name": "liver-surface",
+                "name": "surface-01",
                 "frame": frame,
                 "points": wobble.ravel(),      # numpy -> contiguous float array
                 "polys": tris.ravel(),

@@ -1,11 +1,11 @@
-// UniNet — raw P/Invoke declarations. Nothing here is meant to be called by an
+// UniNet: raw P/Invoke declarations. Nothing here is meant to be called by an
 // application; use Session (Session.cs), which owns the lifetimes and the
 // threading. This file exists so every marshalling decision sits in one place.
 //
 // Two rules govern everything below:
 //
 //  1. **UTF-8, never ANSI.** The C ABI is byte-transparent UTF-8. .NET's default
-//     string marshalling is ANSI, which on Windows means the active code page —
+//     string marshalling is ANSI, which on Windows means the active code page -
 //     so a device named "Röntgen" round-tripped as mojibake. Every string in and
 //     out is explicitly LPUTF8Str / PtrToStringUTF8.
 //
@@ -71,6 +71,19 @@ namespace UniNet
             [MarshalAs(UnmanagedType.LPUTF8Str)] string realm,
             [MarshalAs(UnmanagedType.LPUTF8Str)] string iface,
             int port);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr uninet_session_join_ex(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string role,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string app,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string realm,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string iface,
+            int port,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string gossipBind,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string gossipConnect,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string endpoint,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string advertisedEndpoint);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void uninet_session_free(IntPtr session);

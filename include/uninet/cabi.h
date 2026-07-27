@@ -1,10 +1,10 @@
-// UniNet — C ABI. A flat extern "C" surface over the C++ core, for C# (P/Invoke),
+// UniNet: C ABI. A flat extern "C" surface over the C++ core, for C# (P/Invoke),
 // Unity, and any other language with an FFI.
 //
 // The shape mirrors the C++ Session: join the network under a name, publish,
 // subscribe, and ask who else is there. No address, no port, no broker.
 //
-//     uninet_session_t* s = uninet_session_join("MR Viewer", "headset", "ThermoNavMR",
+//     uninet_session_t* s = uninet_session_join("Viewer", "viewer", "MyApp",
 //                                               NULL, NULL, 0);
 //     uninet_session_subscribe_json(s, "domain.>", on_message, NULL);
 //     uninet_session_publish_json(s, "domain.D1", "{\"code\":\"update\"}", NULL);
@@ -25,7 +25,7 @@
 //
 // THREADING. **Callbacks are invoked on UniNet's background network thread, not
 // on the thread that registered them.** In Unity this means you must NOT touch
-// the Unity API from a callback — marshal to the main thread first. The C#
+// the Unity API from a callback: marshal to the main thread first. The C#
 // wrapper does this for you by default; a raw C consumer must do it itself.
 // Callbacks must not block: the network loop is stalled while one runs.
 //
@@ -56,7 +56,7 @@ typedef struct uninet_peers   uninet_peers_t;
 // CBOR->JSON conversion per message.
 typedef void (*uninet_json_cb)(const char* subject, const char* src_uuid,
                                const char* json, void* user);
-// The same message with the payload as raw CBOR bytes — for a consumer that has
+// The same message with the payload as raw CBOR bytes, for a consumer that has
 // its own CBOR library, or that wants to avoid the text conversion on a large
 // mesh payload.
 typedef void (*uninet_cbor_cb)(const char* subject, const char* src_uuid,
@@ -68,10 +68,21 @@ typedef void (*uninet_peer_cb)(const char* uuid, const char* name, const char* a
 // ── session ───────────────────────────────────────────────────────────────
 // Join the network. Only `name` is required; pass NULL for any of the rest to
 // take the default (realm "uninet", auto interface, port 5670). Never blocks
-// long, and returns a handle even when the network is unavailable — check
+// long, and returns a handle even when the network is unavailable: check
 // uninet_session_connected().
 uninet_session_t* uninet_session_join(const char* name, const char* role, const char* app,
                                       const char* realm, const char* iface, int port);
+
+// Same, for a link with no multicast: a USB-tethered device behind a port
+// forward, a VPN, a routed network. One node passes `gossip_bind` to become the
+// rendezvous; the others pass `gossip_connect` pointing at it. `endpoint` is
+// this node's own data endpoint, and `advertised_endpoint` is what to tell peers
+// to dial when that differs from what it binds. Any of them may be NULL.
+uninet_session_t* uninet_session_join_ex(const char* name, const char* role, const char* app,
+                                         const char* realm, const char* iface, int port,
+                                         const char* gossip_bind, const char* gossip_connect,
+                                         const char* endpoint,
+                                         const char* advertised_endpoint);
 
 // Leave the network and release the handle. Peers are told immediately rather
 // than waiting for a timeout. Safe to call with NULL.
@@ -93,7 +104,7 @@ int uninet_session_publish_cbor(uninet_session_t* session, const char* subject,
                                 const uint8_t* cbor, size_t len, const char* dst);
 
 // Receive. `subject` is exact, or ends in ">" to match everything below it.
-// The callback fires on the network thread — see THREADING above.
+// The callback fires on the network thread (see THREADING above).
 int uninet_session_subscribe_json(uninet_session_t* session, const char* subject,
                                   uninet_json_cb cb, void* user);
 int uninet_session_subscribe_cbor(uninet_session_t* session, const char* subject,
@@ -130,7 +141,7 @@ const char* uninet_last_error(void);
 
 uint16_t    uninet_protocol_version(void);
 int         uninet_has_lz4(void);
-const char* uninet_version(void);   // "zyre x.y.z / czmq … / zmq …"; static storage
+const char* uninet_version(void);   // "zyre x.y.z / czmq ... / zmq ..."; static storage
 
 #ifdef __cplusplus
 }

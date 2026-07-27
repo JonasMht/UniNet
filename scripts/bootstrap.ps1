@@ -1,4 +1,4 @@
-# UniNet — one-command bootstrap for Windows (PowerShell).
+# UniNet: one-command bootstrap for Windows (PowerShell).
 #
 # Installs vcpkg (if absent), uses it for zlib + lz4, then configures, builds,
 # and tests UniNet with Visual Studio's CMake. Safe to re-run.
@@ -39,7 +39,7 @@ if ($BuildPython) {
         $pydir = (python -m pybind11 --cmakedir).Trim()
         $extra += @("-DUNINET_BUILD_PYTHON=ON", "-Dpybind11_DIR=$pydir")
         Say "Python extension will be built"
-    } else { Write-Warning "pybind11 not importable — skipping Python extension." }
+    } else { Write-Warning "pybind11 not importable: skipping Python extension." }
 }
 
 # ── 3. configure + build ────────────────────────────────────────────────────

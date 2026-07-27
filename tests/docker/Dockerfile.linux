@@ -2,7 +2,7 @@
 #
 # Debian + the .NET SDK, so one container can build and run all three language
 # bindings against the same native library. Debian does not package Zyre, so it
-# is built from source here — which doubles as a test of the path UniNet takes
+# is built from source here, which doubles as a test of the path UniNet takes
 # on any machine without a system Zyre.
 #
 #   docker build -f tests/docker/Dockerfile.linux -t uninet-test .

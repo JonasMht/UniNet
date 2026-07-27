@@ -1,4 +1,4 @@
-// UniNet — Python bindings.
+// UniNet: Python bindings.
 //
 // The goal is that Python code looks like Python:
 //
@@ -7,14 +7,14 @@
 //     net.publish("domain.D1", {"code": "update", "points": [1.0, 2.0]})
 //
 // A dict goes in and a dict comes out. The CBOR layer is there when you want it
-// (uninet.Cbor) but nothing requires you to touch it — a Python value converts
+// (uninet.Cbor) but nothing requires you to touch it, a Python value converts
 // to the same wire bytes a C++ Cbor builder or a C# JSON string would produce,
 // which is the whole point of owning one codec.
 //
 // Two things this file has to get right, because the previous version did not:
 //
 //  1. THE GIL. Callbacks arrive on Zyre's network thread. Every entry into
-//     Python needs the GIL — and not only at call time: Node copies its handler
+//     Python needs the GIL, and not only at call time: Node copies its handler
 //     list before dispatching, so a captured py::function would have its
 //     refcount touched on that thread with no GIL held. Handlers are therefore
 //     held through a shared_ptr whose deleter takes the GIL, and the
@@ -54,12 +54,12 @@ namespace {
 
 Cbor py_to_cbor(const py::handle& obj, int depth = 0);
 
-// A list of FLOATS becomes a contiguous float array — the fast path the codec
+// A list of FLOATS becomes a contiguous float array: the fast path the codec
 // exists for. Mesh vertices arrive as an ordinary Python list and still cost one
 // bulk write rather than a Cbor node per coordinate.
 //
 // Integers deliberately do NOT take this path. A list of ints is data whose
-// int-ness matters — mesh triangle indices, an array shape, a voxel count — and
+// int-ness matters: mesh triangle indices, an array shape, a voxel count: and
 // silently returning it as [256.0, 256.0, 256.0] breaks the caller in a way that
 // is very hard to trace back to here.
 bool all_floats(const py::sequence& seq) {
@@ -202,7 +202,7 @@ struct Message {
 }  // namespace
 
 PYBIND11_MODULE(_uninet, m) {
-    m.doc() = "UniNet — brokerless peer-to-peer messaging with discovery built in.";
+    m.doc() = "UniNet: brokerless peer-to-peer messaging with discovery built in.";
 
     py::enum_<Compression>(m, "Compression")
         // NOT "None": that is a Python keyword, so the attribute would be
@@ -213,7 +213,7 @@ PYBIND11_MODULE(_uninet, m) {
 
     // ── Cbor: available, never required ──
     py::class_<Cbor> cbor(m, "Cbor",
-        "The wire value type. You rarely need it — publish() takes a dict.");
+        "The wire value type. You rarely need it: publish() takes a dict.");
     py::enum_<Cbor::Kind>(cbor, "Kind")
         .value("Null", Cbor::Kind::Null).value("Bool", Cbor::Kind::Bool)
         .value("Uint", Cbor::Kind::Uint).value("Nint", Cbor::Kind::Nint)
@@ -284,7 +284,7 @@ PYBIND11_MODULE(_uninet, m) {
     m.def("to_json", [](const py::object& v, int indent) {
         return to_json(py_to_cbor(v), indent);
     }, py::arg("value"), py::arg("indent") = 0,
-       "Render a value as JSON — the same text a C++ or C# peer would produce.");
+       "Render a value as JSON: the same text a C++ or C# peer would produce.");
 
     m.def("from_json", [](const std::string& text) {
         bool ok = false;
@@ -330,7 +330,7 @@ PYBIND11_MODULE(_uninet, m) {
     py::class_<Transport>(m, "Transport");
 
     py::class_<LoopbackTransport, Transport>(m, "LoopbackTransport",
-        "In-process bus. Deterministic, no network — for tests.")
+        "In-process bus. Deterministic, no network, for tests.")
         .def(py::init<>())
         .def("connect", &LoopbackTransport::connect)
         .def("disconnect", &LoopbackTransport::disconnect)
@@ -341,6 +341,10 @@ PYBIND11_MODULE(_uninet, m) {
         .def_readwrite("realm", &ZyreConfig::realm)
         .def_readwrite("port", &ZyreConfig::port)
         .def_readwrite("iface", &ZyreConfig::iface)
+        .def_readwrite("gossip_bind", &ZyreConfig::gossip_bind)
+        .def_readwrite("gossip_connect", &ZyreConfig::gossip_connect)
+        .def_readwrite("endpoint", &ZyreConfig::endpoint)
+        .def_readwrite("advertised_endpoint", &ZyreConfig::advertised_endpoint)
         .def_readwrite("headers", &ZyreConfig::headers);
 
     py::class_<ZyreTransport, Transport>(m, "ZyreTransport",
@@ -371,7 +375,7 @@ PYBIND11_MODULE(_uninet, m) {
                            const std::string& dst) {
             Cbor c = py_to_cbor(data);          // convert while we hold the GIL
             py::gil_scoped_release unlock;      // send without it
-            n.publish(subject, std::move(c), dst);
+            return n.publish(subject, std::move(c), dst);
         }, py::arg("subject"), py::arg("data"), py::arg("dst") = "")
         .def("subscribe", [](Node& n, const std::string& subject, py::function cb) {
             auto held = hold(std::move(cb));
@@ -388,6 +392,10 @@ PYBIND11_MODULE(_uninet, m) {
         .def_readwrite("realm", &SessionConfig::realm)
         .def_readwrite("port", &SessionConfig::port)
         .def_readwrite("iface", &SessionConfig::iface)
+        .def_readwrite("gossip_bind", &SessionConfig::gossip_bind)
+        .def_readwrite("gossip_connect", &SessionConfig::gossip_connect)
+        .def_readwrite("endpoint", &SessionConfig::endpoint)
+        .def_readwrite("advertised_endpoint", &SessionConfig::advertised_endpoint)
         .def_readwrite("headers", &SessionConfig::headers);
 
     py::class_<Session>(m, "Session", "A device on the network. Created by uninet.join().")
@@ -395,9 +403,11 @@ PYBIND11_MODULE(_uninet, m) {
                            const std::string& dst) {
             Cbor c = py_to_cbor(data);
             py::gil_scoped_release unlock;
-            s.publish(subject, std::move(c), dst);
+            // Returning the result matters: without it a publish during a
+            // network outage is indistinguishable from a delivered one.
+            return s.publish(subject, std::move(c), dst);
         }, py::arg("subject"), py::arg("data"), py::arg("dst") = "",
-           "Send to everyone, or to one peer's uuid.")
+           "Send to everyone, or to one peer's uuid. False if it could not be sent.")
         .def("publish_json", [](Session& s, const std::string& subject,
                                 const std::string& json, const std::string& dst) {
             py::gil_scoped_release unlock;
@@ -420,6 +430,9 @@ PYBIND11_MODULE(_uninet, m) {
             s.on_peer_lost([held](const Peer& p) { call_guarded(held, "on_peer_lost", p); });
         }, py::arg("handler"))
         .def("connected", &Session::connected)
+        .def("close", &Session::close, py::call_guard<py::gil_scoped_release>(),
+             "Leave the network. Idempotent.")
+        .def("open", &Session::open)
         .def("name", &Session::name)
         .def("uuid", &Session::uuid, "This device's address on the network.")
         .def("describe", &Session::describe, "One plain sentence about the connection.")
@@ -432,7 +445,7 @@ PYBIND11_MODULE(_uninet, m) {
         .def_readonly("src", &BlobInfo::src, "uuid of the sender.")
         .def_readonly("size", &BlobInfo::size, "Total bytes.")
         .def_property_readonly("meta", [](const BlobInfo& i) { return cbor_to_py(i.meta); },
-                               "Whatever the sender attached: array shape, dtype, case id…")
+                               "Whatever the sender attached: array shape, dtype, case id...")
         .def("__repr__", [](const BlobInfo& i) {
             return "<uninet.BlobInfo " + i.name + " " + std::to_string(i.size) + "B>";
         });

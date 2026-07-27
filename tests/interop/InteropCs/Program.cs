@@ -1,4 +1,4 @@
-// UniNet cross-language interop — the C# participant.
+// UniNet cross-language interop: the C# participant.
 //
 // See interop_cpp.cpp for what this proves. Run:
 //
@@ -77,7 +77,7 @@ static class Program
         string[] expected = (args.Length > 2 ? args[2] : "cpp,python")
             .Split(',', StringSplitOptions.RemoveEmptyEntries);
 
-        // marshalToCaller: false — this is a console app with no main-thread
+        // marshalToCaller: false. This is a console app with no main-thread
         // requirement, so events are taken directly on the network thread.
         using var net = Session.Join("csharp", role: "interop", app: "csharp",
                                      realm: realm, marshalToCaller: false);

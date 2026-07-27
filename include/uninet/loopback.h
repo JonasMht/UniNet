@@ -1,7 +1,7 @@
-// UniNet — in-process transport. Routes publishes to matching subscribers (exact
+// UniNet: in-process transport. Routes publishes to matching subscribers (exact
 // subject or ">" wildcard) on the SAME LoopbackTransport instance, so
 // two Nodes sharing one LoopbackTransport talk to each other. Synchronous dispatch
-// — deterministic for tests/benchmarks. The always-available backend (no broker,
+//: deterministic for tests/benchmarks. The always-available backend (no broker,
 // no network), analogous to UniVox's CPU baseline. An async thread-pool dispatch
 // mode is staged.
 #pragma once
@@ -17,7 +17,7 @@ namespace uninet {
 class LoopbackTransport : public Transport {
 public:
     // online_/delivered_ are touched from whatever thread calls connect(),
-    // publish() or delivered() — ThreadSanitizer flagged both as races when they
+    // publish() or delivered(): ThreadSanitizer flagged both as races when they
     // were a plain bool and a plain counter (the counter was incremented under
     // mu_ but read without it). Atomics, not the mutex: publish() reads the flag
     // before it takes any lock.
