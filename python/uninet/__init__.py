@@ -47,6 +47,7 @@ try:
         encode,
         from_json,
         local_hostname,
+        local_interfaces,
         profiler_enable,
         profiler_report,
         profiler_reset,
