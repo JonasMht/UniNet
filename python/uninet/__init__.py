@@ -1,4 +1,4 @@
-"""UniNet — brokerless peer-to-peer messaging, with discovery built in.
+"""UniNet: brokerless peer-to-peer messaging, with discovery built in.
 
 Two devices on the same network find each other and talk. No broker to install,
 no server to run, no IP address for anyone to type::
@@ -14,11 +14,13 @@ no server to run, no IP address for anyone to type::
 
 A dict goes in and a dict comes out. The same dict published from Python arrives
 as the same object in C++ and the same JSON in C#, because all three share one
-CBOR codec — see ``docs/PROTOCOL.md``.
+CBOR codec (see ``docs/PROTOCOL).md``.
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
+import weakref
 from typing import Any, Dict, Iterator, Optional
 
 from ._uninet import (  # noqa: F401
@@ -63,17 +65,21 @@ def join(
     realm: str = "uninet",
     interface: str = "",
     port: int = 5670,
+    gossip_bind: str = "",
+    gossip_connect: str = "",
+    endpoint: str = "",
+    advertised_endpoint: str = "",
     headers: Optional[Dict[str, str]] = None,
     compression: Optional[Compression] = None,
 ) -> Session:
     """Join the network under ``name`` and return a :class:`Session`.
 
-    This is the whole setup. Nothing else is required — no address, no port, no
+    This is the whole setup. Nothing else is required, no address, no port, no
     broker, no configuration file.
 
     Args:
-        name: what other devices show for this one, e.g. ``"OR Headset"``.
-        role: free-form label — ``"server"``, ``"headset"``, ``"viewer"``.
+        name: what other devices show for this one, e.g. ``"Headset"``.
+        role: free-form label: ``"server"``, ``"headset"``, ``"viewer"``.
         app: the owning application, for a device list.
         realm: devices only see devices in the same realm. Change it to keep a
             development machine out of a live session, or to run two independent
@@ -81,6 +87,13 @@ def join(
         interface: only needed on a machine with several networks, where
             discovery could otherwise pick the wrong one (``"eth0"`` or an IP).
         port: UDP discovery port. Leave it alone unless it collides.
+        gossip_bind: bind a rendezvous endpoint (``"tcp://*:5670"``) instead of
+            using the UDP beacon. For links with no multicast: a USB-tethered
+            device behind a port forward, a VPN, a routed network.
+        gossip_connect: connect to another node's rendezvous endpoint.
+        endpoint: this node's own data endpoint, in gossip mode.
+        advertised_endpoint: what to tell peers this node's endpoint is, when
+            that differs from what it binds (a forwarded port).
         headers: extra key/value advertised to peers, readable via
             ``peer.header(key)``.
         compression: wire compression. The default is the fastest tier the build
@@ -97,15 +110,21 @@ def join(
     cfg.realm = realm
     cfg.iface = interface
     cfg.port = port
+    cfg.gossip_bind = gossip_bind
+    cfg.gossip_connect = gossip_connect
+    cfg.endpoint = endpoint
+    cfg.advertised_endpoint = advertised_endpoint
     if headers:
         cfg.headers = dict(headers)
     if compression is not None:
         cfg.compression = compression
-    return _join(name, cfg)
+    session = _join(name, cfg)
+    _live.add(session)
+    return session
 
 
 # Session is a C++ type, so the context-manager protocol is attached here rather
-# than in the binding — it keeps the pybind11 layer to data and these to Python.
+# than in the binding. It keeps the pybind11 layer to data and these to Python.
 def _session_enter(self: Session) -> Session:
     return self
 
@@ -115,21 +134,33 @@ def _session_exit(self: Session, *exc: Any) -> bool:
     return False
 
 
-def _session_close(self: Session) -> None:
-    """Leave the network. Peers see the departure immediately.
-
-    Called automatically when the session is garbage-collected or when a
-    ``with`` block ends; call it explicitly for a prompt, predictable goodbye.
-    """
-    # The C++ destructor does the work; dropping the last reference is how it is
-    # reached. Nothing to do here beyond making the intent explicit and letting
-    # `with` blocks read naturally.
-    pass
-
-
 Session.__enter__ = _session_enter          # type: ignore[attr-defined]
 Session.__exit__ = _session_exit            # type: ignore[attr-defined]
-Session.close = _session_close              # type: ignore[attr-defined]
+
+
+# Every live session, so they can be closed before the process exits.
+#
+# WHY THIS EXISTS. ZeroMQ installs a C `atexit` handler that tears down its
+# global context. A session still holding sockets when that runs makes czmq
+# abort inside zsock_set_sndtimeo. Relying on the garbage collector is not
+# enough: a session referenced by a module-level name, or captured by a
+# subscriber callback, routinely outlives interpreter finalization.
+#
+# Python's own `atexit` runs during finalization, before the C handler, so
+# closing here is correctly ordered. Weak references mean this never keeps a
+# session alive that the caller has dropped.
+_live: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def _close_all_sessions() -> None:
+    for session in list(_live):
+        try:
+            session.close()
+        except Exception:      # nothing useful to do while the process is exiting
+            pass
+
+
+atexit.register(_close_all_sessions)
 
 
 @contextlib.contextmanager

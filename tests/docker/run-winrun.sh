@@ -27,11 +27,11 @@ grep -E 'error' <<<"$OUT" | head -20
 if [ $RC -ne 0 ] || grep -q 'error' <<<"$OUT"; then
     echo "BUILD FAILED"; exit 1
 fi
-echo "build OK — $(ls build-win/*.exe 2>/dev/null | wc -l) Windows executables linked"
+echo "build OK: $(ls build-win/*.exe 2>/dev/null | wc -l) Windows executables linked"
 echo
 
 # MinGW links its C++ runtime dynamically and zlib was cross-built as a DLL, so
-# the .exe files need those beside them — exactly as a Windows deployment would
+# the .exe files need those beside them, exactly as a Windows deployment would
 # ship them. Resolve from the import table so a new dependency is never missed.
 for dll in $(x86_64-w64-mingw32-objdump -p build-win/test_roundtrip.exe \
              | awk '/DLL Name:/ {print $3}' | sort -u); do
@@ -44,7 +44,7 @@ done
 
 FAILED=0
 
-echo "=== test_roundtrip.exe — codec, compression, framing, hostile input ==="
+echo "=== test_roundtrip.exe: codec, compression, framing, hostile input ==="
 TOUT="$(wine build-win/test_roundtrip.exe 2>&1)"; TRC=$?
 tail -5 <<<"$TOUT"
 if [ $TRC -eq 0 ]; then echo "  -> PASS"; else echo "  -> FAIL (exit $TRC)"; FAILED=1; fi
@@ -52,9 +52,9 @@ echo
 
 # These reach the network and stop at Wine's GetAdaptersAddresses limitation.
 # Their pre-network sections are still real Windows coverage, so they are run
-# and reported — but a stop at ziflist.c is expected, not a regression.
+# and reported, but a stop at ziflist.c is expected, not a regression.
 for t in test_cabi test_network; do
-    echo "=== $t.exe — up to the network boundary ==="
+    echo "=== $t.exe, up to the network boundary ==="
     TOUT="$(wine "build-win/$t.exe" 2>&1)"; TRC=$?
     tail -6 <<<"$TOUT"
     if [ $TRC -eq 0 ]; then
@@ -63,12 +63,12 @@ for t in test_cabi test_network; do
         echo "  -> EXPECTED STOP: Wine does not implement GetAdaptersAddresses'"
         echo "     buffer-sizing protocol (czmq ziflist.c). Pre-network checks passed."
     else
-        echo "  -> FAIL (exit $TRC) — not the known Wine limitation"; FAILED=1
+        echo "  -> FAIL (exit $TRC), not the known Wine limitation"; FAILED=1
     fi
     echo
 done
 
 echo "=== RESULT: $([ $FAILED -eq 0 ] && echo PASS || echo FAIL) ==="
-echo "note: discovery/messaging on Windows is NOT covered here — see the"
+echo "note: discovery/messaging on Windows is NOT covered here. See the"
 echo "      windows:msvc job in .gitlab-ci.yml, which needs a Windows runner."
 exit $FAILED

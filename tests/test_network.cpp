@@ -1,4 +1,4 @@
-// UniNet — network tests. Two real nodes, a real UDP beacon, real TCP between
+// UniNet: network tests. Two real nodes, a real UDP beacon, real TCP between
 // them. This is the test the old suite did not have: everything before it was
 // single-threaded loopback, which is why three data races and a use-after-free
 // survived to be found by an audit rather than by CI.
@@ -46,7 +46,7 @@ bool wait_until(F pred, std::chrono::milliseconds timeout) {
 }
 
 // Every test uses its own realm so a developer running the demo on the same
-// machine — or two CI jobs on one build box — cannot perturb the results.
+// machine, or two CI jobs on one build box: cannot perturb the results.
 std::string unique_realm(const char* tag) {
     static std::atomic<unsigned> n{0};
     return std::string("uninet-test-") + tag + "-" +
@@ -107,7 +107,7 @@ void test_departure() {
     std::atomic<bool> lost{false};
     a->on_peer_lost([&](const uninet::Peer&) { lost.store(true); });
 
-    b.reset();   // clean shutdown sends EXIT — no waiting out a timeout
+    b.reset();   // clean shutdown sends EXIT, no waiting out a timeout
     check(wait_until([&] { return lost.load(); }, std::chrono::seconds(20)),
           "departure reported promptly on clean shutdown");
     check(wait_until([&] { return a->peers().empty(); }, std::chrono::seconds(5)),
@@ -177,7 +177,7 @@ void test_realm_isolation() {
 
     std::this_thread::sleep_for(std::chrono::seconds(3));
     check(a->peers().empty(), "a device in another realm is invisible");
-    check(b->peers().empty(), "…in both directions");
+    check(b->peers().empty(), "...in both directions");
 }
 
 // ── many threads publishing at once ───────────────────────────────────────
@@ -439,10 +439,69 @@ void test_blob_empty() {
     check(size.load() == 0, "and arrives empty");
 }
 
+// ── discovery without multicast ───────────────────────────────────────────
+// The path a USB-tethered device or a VPN link takes: no shared broadcast
+// domain, so one node binds a rendezvous endpoint and the other dials it.
+void test_gossip_discovery() {
+    std::printf("gossip discovery (no multicast)\n");
+    const std::string realm = unique_realm("gossip");
+
+    // Ports derived from the pid so two test runs on one box do not collide.
+    const int base = 24000 + int(
+#ifdef _WIN32
+        0
+#else
+        ::getpid() % 300
+#endif
+    ) * 4;
+
+    uninet::SessionConfig ca;
+    ca.realm = realm;
+    ca.gossip_bind = "tcp://127.0.0.1:" + std::to_string(base);
+    ca.endpoint    = "tcp://127.0.0.1:" + std::to_string(base + 1);
+
+    uninet::SessionConfig cb;
+    cb.realm = realm;
+    cb.gossip_connect = "tcp://127.0.0.1:" + std::to_string(base);
+    cb.endpoint       = "tcp://127.0.0.1:" + std::to_string(base + 2);
+
+    auto a = uninet::Session::join("Rendezvous", ca);
+    auto b = uninet::Session::join("Dialer", cb);
+    check(a->connected() && b->connected(), "both nodes bound their endpoints");
+
+    check(wait_until([&] { return a->peers().size() == 1 && b->peers().size() == 1; },
+                     std::chrono::seconds(25)),
+          "peers found each other with no beacon involved");
+
+    std::atomic<int> got{0};
+    b->subscribe("g.>", [&](const uninet::Envelope&) { got.fetch_add(1); });
+    a->publish_json("g.x", "{\"n\":1}");
+    check(wait_until([&] { return got.load() == 1; }, std::chrono::seconds(15)),
+          "a message crossed the gossip link");
+}
+
+// ── close() ───────────────────────────────────────────────────────────────
+void test_close() {
+    std::printf("close\n");
+    uninet::SessionConfig cfg;
+    cfg.realm = unique_realm("close");
+    auto a = uninet::Session::join("Closer", cfg);
+    check(a->open() && a->connected(), "session starts open");
+
+    a->close();
+    check(!a->open(), "close() marks it closed");
+    check(!a->connected(), "and disconnected");
+
+    a->close();                                   // idempotent
+    check(a->peers().empty(), "peers() on a closed session is empty, not a crash");
+    check(!a->publish_json("t.x", "{}"), "publish on a closed session reports failure");
+    check(a->describe() == "Closed.", "describe() says so plainly");
+}
+
 }  // namespace
 
 int main() {
-    std::printf("UniNet network tests — %s\n\n", uninet::zyre_version_string().c_str());
+    std::printf("UniNet network tests: %s\n\n", uninet::zyre_version_string().c_str());
 
     test_json_bridge();
     test_discovery();
@@ -455,6 +514,8 @@ int main() {
     test_blob_addressed();
     test_blob_concurrent();
     test_blob_empty();
+    test_gossip_discovery();
+    test_close();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");

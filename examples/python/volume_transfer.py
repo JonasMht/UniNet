@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""UniNet — sending a 3D volume (numpy) to another machine.
+"""UniNet: sending a 3D volume (numpy) to another machine.
 
-A CT/MR volume is far too large for a single message, so it goes over `Blob`,
+A 3D volume is far too large for a single message, so it goes over `Blob`,
 which chunks it, streams it, reassembles it, and reports progress at both ends.
 
 The array's shape and dtype travel with it as metadata, so the receiver
-reconstructs the exact array — no side channel, no agreed-in-advance layout.
+reconstructs the exact array, no side channel, no agreed-in-advance layout.
 
     python3 volume_transfer.py receive        # terminal 1
     python3 volume_transfer.py send           # terminal 2
@@ -65,7 +65,7 @@ def send() -> int:
     blob = uninet.Blob(net, SUBJECT)
 
     print(net.describe())
-    print("Looking for a receiver…")
+    print("Looking for a receiver...")
     for _ in range(200):
         if net.peers():
             break
@@ -78,7 +78,7 @@ def send() -> int:
 
     # A realistic volume: 256^3 float32 is 64 MiB.
     shape = (256, 256, 256)
-    print(f"Building a {shape} float32 volume ({np.prod(shape) * 4 / 1e6:.0f} MB)…")
+    print(f"Building a {shape} float32 volume ({np.prod(shape) * 4 / 1e6:.0f} MB)...")
     rng = np.random.default_rng(42)
     volume = rng.random(shape, dtype=np.float32)
 
@@ -89,19 +89,19 @@ def send() -> int:
     meta = {
         "dtype": str(volume.dtype),
         "shape": list(volume.shape),
-        "spacing": [0.5, 0.5, 1.0],       # mm — whatever your application needs
-        "modality": "CT",
+        "spacing": [0.5, 0.5, 1.0],       # units: whatever your application needs
+        "kind": "density",
         "checksum": int(volume.sum()),
     }
 
-    print("Sending…")
+    print("Sending...")
     t0 = time.monotonic()
-    blob.send("patient-volume", volume, meta=meta)
+    blob.send("scan-volume", volume, meta=meta)
     elapsed = time.monotonic() - t0
     mb = volume.nbytes / 1e6
     print(f"  queued {mb:.0f} MB in {elapsed:.2f}s ({mb / max(elapsed, 1e-9):.0f} MB/s)")
 
-    # Let the chunks drain before the process — and its session — goes away.
+    # Let the chunks drain before the process, and its session: goes away.
     time.sleep(3)
     print("done")
     return 0

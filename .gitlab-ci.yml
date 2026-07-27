@@ -6,7 +6,7 @@
 #
 # Jobs that need a runner tag the project may not have (windows, macos) are
 # marked `allow_failure` so a missing runner reports as a warning rather than
-# blocking the pipeline — but when the runner exists, a genuine failure is still
+# blocking the pipeline, but when the runner exists, a genuine failure is still
 # visible. Remove `allow_failure` once the runners are provisioned.
 
 stages: [build, test, interop]
@@ -16,7 +16,7 @@ variables:
 
 # ── Linux ─────────────────────────────────────────────────────────────────
 # The container image carries the toolchain, Zyre built from source, Python and
-# the .NET SDK — see tests/docker/Dockerfile.linux.
+# the .NET SDK (see tests/docker/Dockerfile).linux.
 .linux-base:
   image: debian:bookworm
   before_script:
@@ -98,7 +98,7 @@ windows:portability-check:
 # Runs the cross-compiled .exe files under Wine. Covers the codec, the JSON
 # bridge and the C ABI as real Windows code. Discovery is NOT covered: Wine does
 # not implement GetAdaptersAddresses' buffer-sizing protocol, which czmq asserts
-# on — only the msvc job below can close that gap.
+# on, only the msvc job below can close that gap.
 windows:wine-runtime:
   stage: test
   image: docker:latest

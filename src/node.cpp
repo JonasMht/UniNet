@@ -1,4 +1,4 @@
-// UniNet — Node implementation (the high-level peer).
+// UniNet: Node implementation (the high-level peer).
 #include "uninet/node.h"
 #include "uninet/profiler.h"
 
@@ -16,7 +16,7 @@ namespace uninet {
 // gmtime is not thread-safe, and the reentrant spelling differs per platform:
 // POSIX has gmtime_r, MSVC has gmtime_s with the arguments the other way round.
 // This was the single POSIX-only call in the tree, on the constructor path of
-// every Node — it alone made an MSVC build impossible.
+// every Node. It alone made an MSVC build impossible.
 static bool gmtime_utc(std::time_t t, std::tm& out) {
 #ifdef _WIN32
     return gmtime_s(&out, &t) == 0;
@@ -119,7 +119,7 @@ bool Node::publish(const std::string& subject, Cbor data, const std::string& dst
 }
 
 void Node::subscribe(const std::string& subject, DataHandler handler) {
-    ensure_watching_();   // app subscribe implies "I want to receive" — make sure we're watching
+    ensure_watching_();   // app subscribe implies "I want to receive": make sure we're watching
     std::lock_guard<std::mutex> lk(handlers_mu_);
     handlers_.emplace_back(subject, std::move(handler));
 }

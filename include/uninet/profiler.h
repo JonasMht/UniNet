@@ -1,4 +1,4 @@
-// UniNet — opt-in performance analytics. Pinpoints where time goes in the
+// UniNet: opt-in performance analytics. Pinpoints where time goes in the
 // encode / compress / dispatch pipeline so the codec and transports can be tuned.
 //
 // Zero overhead when disabled (the default): ScopedOp reads no clock and records
@@ -49,7 +49,7 @@ public:
     ~ScopedOp() {
         // Only scopes that were timed may be recorded. Asking enabled() again here
         // meant a profiler switched on mid-scope reported clock::now() minus a
-        // default-constructed time_point — machine uptime (245489 s was observed
+        // default-constructed time_point: machine uptime (245489 s was observed
         // in one report), which then dominated the table it was supposed to rank.
         if (armed_) {
             double s = std::chrono::duration<double>(clock::now() - start_).count();

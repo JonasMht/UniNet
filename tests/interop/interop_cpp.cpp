@@ -1,15 +1,15 @@
-// UniNet cross-language interop — the C++ participant.
+// UniNet cross-language interop: the C++ participant.
 //
 // Three participants (C++, Python, C#) join one realm, each publishes an
 // identical payload, and each verifies that what it receives from the other two
 // decodes to exactly that payload. If the wire format diverged between
-// languages — a float encoded differently, a UTF-8 string mangled, an integer
-// silently promoted — this is where it shows.
+// languages, a float encoded differently, a UTF-8 string mangled, an integer
+// silently promoted. This is where it shows.
 //
 //     interop_cpp <realm> [seconds] [expected-peers-csv]
 //
 // `expected-peers-csv` defaults to "python,csharp". A language that is not
-// installed is passed out of the list rather than counted as a failure — a
+// installed is passed out of the list rather than counted as a failure: a
 // skipped participant is a gap in coverage, not a defect.
 //
 // Prints one PASS/FAIL line per peer seen, then a verdict. Exit 0 only if every
@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
     //
     // Once satisfied, keep publishing through a short settle period rather than
     // exiting immediately. Leaving the moment WE have heard everyone tears down
-    // the session while the others may still be waiting on OUR payload — which
+    // the session while the others may still be waiting on OUR payload: which
     // makes the run fail for whoever happened to finish last.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     auto settle_until = std::chrono::steady_clock::time_point::max();

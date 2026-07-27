@@ -1,9 +1,9 @@
-// UniNet — end-to-end network benchmark.
+// UniNet: end-to-end network benchmark.
 //
 // tests/benchmark.cpp measures the codec in isolation (encode, compress, frame).
 // This one measures what a user actually experiences: two real nodes on the real
 // network, one publishing and the other receiving, counting messages that
-// completed the whole trip — encode, compress, frame, TCP, unframe, decompress,
+// completed the whole trip: encode, compress, frame, TCP, unframe, decompress,
 // decode, dispatch.
 //
 // It also measures the number that matters most for the "no configuration"
@@ -110,7 +110,7 @@ Result run_throughput(uninet::Session& tx,
     const double send_s = seconds_since(t0);
 
     // Let the tail arrive. A slow receiver is a real result, not a reason to
-    // stop counting — but do not wait forever.
+    // stop counting, but do not wait forever.
     const auto deadline = clock_t_::now() + std::chrono::seconds(30);
     while (received.load() < count && clock_t_::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -169,12 +169,12 @@ int main(int argc, char** argv) {
     const std::string csv = (argc > 2) ? argv[2] : "uninet_network_bench.csv";
     const std::string realm = unique_realm();
 
-    std::printf("UniNet network benchmark — %s\n", uninet::zyre_version_string().c_str());
+    std::printf("UniNet network benchmark: %s\n", uninet::zyre_version_string().c_str());
     std::printf("%d messages per size, loopback network (two processes' worth of\n"
                 "work in one process: the bytes still cross the full stack).\n\n", count);
 
     // ── discovery ──
-    std::printf("Measuring cold-start discovery…\n");
+    std::printf("Measuring cold-start discovery...\n");
     const double discovery_s = measure_discovery_seconds(realm);
     if (discovery_s < 0)
         std::printf("  discovery FAILED (no peer found within 30 s)\n\n");
@@ -192,7 +192,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 300 && tx->peers().empty(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     if (tx->peers().empty()) {
-        std::fprintf(stderr, "benchmark: the two sessions never found each other — "
+        std::fprintf(stderr, "benchmark: the two sessions never found each other: "
                              "is UDP 5670 blocked on this machine?\n");
         return 1;
     }
@@ -223,7 +223,7 @@ int main(int argc, char** argv) {
     // could not keep up and ZeroMQ's high-water mark dropped messages.
     for (const auto& r : rows) {
         if (r.delivered < r.sent) {
-            std::printf("\nNOTE: %d of %d messages did not arrive at %d verts — the\n"
+            std::printf("\nNOTE: %d of %d messages did not arrive at %d verts: the\n"
                         "receiver could not keep up at this rate.\n",
                         r.sent - r.delivered, r.sent, r.verts);
         }

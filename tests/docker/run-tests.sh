@@ -23,7 +23,7 @@ BUILD_OUT="$(cmake --build build -j"$(nproc)" 2>&1)"
 BUILD_RC=$?
 grep -E 'warning|error' <<<"$BUILD_OUT" | head -20
 # grep -q inside a pipeline is a trap under `set -o pipefail`: grep exits on the
-# first match, the producer takes SIGPIPE, and the pipeline reports failure — so
+# first match, the producer takes SIGPIPE, and the pipeline reports failure: so
 # `if ... | grep -q error` reads as "no error". Use a herestring instead.
 if [ $BUILD_RC -ne 0 ] || grep -q 'error' <<<"$BUILD_OUT"; then
     echo "BUILD FAILED"; exit 1

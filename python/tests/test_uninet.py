@@ -2,7 +2,7 @@
 
 Two kinds of test live here. The codec tests are pure and fast. The network
 tests start real sessions that discover each other over a real UDP beacon, so
-they are slower and given generous timeouts — discovery is a network event, not
+they are slower and given generous timeouts: discovery is a network event, not
 a function call, and asserting immediately after join() would test the scheduler.
 
 Every network test uses a realm unique to this process, so a developer running
@@ -14,6 +14,8 @@ the result.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import threading
 import time
 
@@ -50,7 +52,7 @@ def net_pair(request):
     if not (a.connected() and b.connected()):
         pytest.skip("no usable network on this machine")
     if not wait_until(lambda: len(a.peers()) == 1 and len(b.peers()) == 1):
-        pytest.skip("peers did not discover each other — network may block UDP 5670")
+        pytest.skip("peers did not discover each other: network may block UDP 5670")
     yield a, b
     del a, b
 
@@ -204,8 +206,8 @@ def test_sender_does_not_receive_its_own_broadcast(net_pair):
 def test_wildcard_subject_matching(net_pair):
     a, b = net_pair
     got = []
-    b.subscribe("thermonav.v1.>", got.append)
-    a.publish("thermonav.v1.update.mesh", {"n": 1})
+    b.subscribe("app.v1.>", got.append)
+    a.publish("app.v1.update.mesh", {"n": 1})
     a.publish("other.topic", {"n": 2})
 
     assert wait_until(lambda: len(got) == 1, timeout=10)
@@ -420,3 +422,92 @@ def test_node_survives_a_temporary_transport():
     node = uninet.Node("solo", uninet.LoopbackTransport())
     node.connect()
     node.publish("t.x", {"n": 1})          # would be a use-after-free without keep_alive
+
+
+# ── shutdown ──────────────────────────────────────────────────────────────
+
+def test_close_is_idempotent(net_pair):
+    a, _ = net_pair
+    a.close()
+    a.close()                       # must not raise or crash
+    assert not a.open()
+    assert not a.connected()
+
+
+def test_operations_after_close_are_safe(net_pair):
+    a, _ = net_pair
+    a.close()
+    # Nothing here should crash; a closed session is inert, not a trap.
+    assert a.peers() == []
+    assert a.publish("t.x", {"n": 1}) is False
+    assert "Closed" in a.describe()
+    a.subscribe("t.>", lambda m: None)
+
+
+def test_process_exits_cleanly_with_a_live_subscriber():
+    """A session still alive at interpreter exit must not abort the process.
+
+    Regression: ZeroMQ's C atexit handler tears down its global context, and a
+    session still holding sockets at that point made czmq abort inside
+    zsock_set_sndtimeo. It reproduced whenever a subscriber callback kept the
+    session reachable, which is the normal way people use this.
+    """
+    script = """
+import time, os, uninet
+r = "exitcheck-%d" % os.getpid()
+a = uninet.join("A", realm=r)
+b = uninet.join("B", realm=r)
+got = []
+b.subscribe("t.>", lambda m: got.append(m.data))
+for _ in range(100):
+    if a.peers() and b.peers():
+        break
+    time.sleep(0.1)
+a.publish("t.x", {"n": 1})
+for _ in range(60):
+    if got:
+        break
+    time.sleep(0.1)
+print("ok", len(got))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.dirname(os.path.dirname(uninet.__file__)), env.get("PYTHONPATH", "")]
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, timeout=120, env=env)
+    # A crash shows up as a negative return code (a signal), not a Python error.
+    assert proc.returncode == 0, (
+        f"process exited with {proc.returncode}\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr[-2000:]}"
+    )
+    assert "ok" in proc.stdout
+
+
+# ── discovery without multicast ───────────────────────────────────────────
+
+def test_gossip_discovery_without_multicast():
+    """Two nodes find each other over a rendezvous endpoint, no beacon involved.
+
+    This is the path a USB-tethered device or a VPN link takes, where the two
+    ends share no broadcast domain.
+    """
+    r = realm("gossip")
+    base = 25730 + (os.getpid() % 200) * 4
+    a = uninet.join("Rendezvous", realm=r,
+                    gossip_bind=f"tcp://127.0.0.1:{base}",
+                    endpoint=f"tcp://127.0.0.1:{base + 1}")
+    b = uninet.join("Dialer", realm=r,
+                    gossip_connect=f"tcp://127.0.0.1:{base}",
+                    endpoint=f"tcp://127.0.0.1:{base + 2}")
+    if not (a.connected() and b.connected()):
+        pytest.skip("could not bind the gossip endpoints")
+
+    assert wait_until(lambda: a.peers() and b.peers()), "gossip peers did not pair"
+    assert a.peers()[0].name == "Dialer"
+
+    got = []
+    b.subscribe("g.>", lambda m: got.append(m.data))
+    a.publish("g.x", {"over": "gossip"})
+    assert wait_until(lambda: got, timeout=15)
+    assert got[0]["over"] == "gossip"

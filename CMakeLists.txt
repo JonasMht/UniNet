@@ -43,13 +43,13 @@ if(UNINET_LZ4)
         set(UNINET_LZ4_TARGET PkgConfig::LZ4)
     endif()
     if(LZ4_FOUND)
-        message(STATUS "UniNet: liblz4 found — LZ4 compression tier enabled.")
+        message(STATUS "UniNet: liblz4 found: LZ4 compression tier enabled.")
     else()
-        message(STATUS "UniNet: liblz4 NOT found — falling back to zlib.")
+        message(STATUS "UniNet: liblz4 NOT found: falling back to zlib.")
     endif()
 endif()
 
-# ── The network: ZeroMQ/Zyre (ZRE). This is what makes UniNet brokerless —
+# ── The network: ZeroMQ/Zyre (ZRE). This is what makes UniNet brokerless -
 # nodes discover each other with a UDP beacon and connect directly. Preferred
 # from the system; built from source when absent, so a fresh machine needs no
 # manual dependency install.
@@ -62,7 +62,7 @@ if(UNINET_SYSTEM_ZYRE)
     endif()
     if(ZYRE_FOUND)
         # libzyre.pc lists czmq/libzmq only as private requirements, which
-        # pkg-config does not expand for a dynamic link — so linking against
+        # pkg-config does not expand for a dynamic link, so linking against
         # zyre alone fails with "DSO missing from command line". Ask for them.
         pkg_check_modules(CZMQ IMPORTED_TARGET libczmq)
         pkg_check_modules(ZMQ  IMPORTED_TARGET libzmq)
@@ -77,7 +77,7 @@ if(UNINET_SYSTEM_ZYRE)
     endif()
 endif()
 if(NOT UNINET_ZYRE_TARGET)
-    message(STATUS "UniNet: zyre not found — building libzmq + czmq + zyre from source.")
+    message(STATUS "UniNet: zyre not found: building libzmq + czmq + zyre from source.")
     include(FetchContent)
     set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
     set(BUILD_SHARED  OFF CACHE BOOL "" FORCE)
@@ -151,10 +151,11 @@ add_test(NAME network COMMAND test_network)
 set_tests_properties(network PROPERTIES TIMEOUT 90)
 
 # ── Benchmarks ──
-# `benchmark` measures the codec in isolation; `uninet-benchmark` measures what a
-# user experiences: two real nodes exchanging real mesh payloads over the network.
-add_executable(benchmark tests/benchmark.cpp)
-target_link_libraries(benchmark PRIVATE uninet uninet_warnings)
+# Two, with names that say which is which: the codec in isolation, and what a
+# user actually experiences (two real nodes over the network).
+add_executable(benchmark_codec tests/benchmark_codec.cpp)
+target_link_libraries(benchmark_codec PRIVATE uninet uninet_warnings)
+set_target_properties(benchmark_codec PROPERTIES OUTPUT_NAME uninet-benchmark-codec)
 
 add_executable(benchmark_network tests/benchmark_network.cpp)
 target_link_libraries(benchmark_network PRIVATE uninet uninet_warnings)

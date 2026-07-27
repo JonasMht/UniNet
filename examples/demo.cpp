@@ -1,10 +1,10 @@
-// UniNet demo — several devices finding each other and talking, with nothing
+// UniNet demo: several devices finding each other and talking, with nothing
 // configured by anyone.
 //
 // Run it in two terminals, or on two machines on the same network:
 //
-//     uninet-demo "Planning Laptop"
-//     uninet-demo "OR Headset" --role headset
+//     uninet-demo "Laptop"
+//     uninet-demo "Headset" --role headset
 //
 // No address is typed. Neither instance is told the other exists. They find
 // each other in about a second and start exchanging messages.
@@ -42,7 +42,7 @@ void say(const std::string& line) {
 
 void usage() {
     std::printf(
-        "uninet-demo — devices finding each other with zero configuration\n\n"
+        "uninet-demo: devices finding each other with zero configuration\n\n"
         "  uninet-demo <device name> [options]\n\n"
         "Options:\n"
         "  --role <role>    what this device is: server / headset / viewer\n"
@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Who is here — now, and as devices come and go.
+    // Who is here: now, and as devices come and go.
     net->on_peer_found([](const uninet::Peer& p) { say("JOINED  " + p.describe()); });
     net->on_peer_lost ([](const uninet::Peer& p) { say("LEFT    " + p.describe()); });
 
@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
         say("MESSAGE on " + env.subject + ": " + uninet::to_json(env.data));
     });
 
-    // What we send. JSON in, CBOR on the wire, JSON out at the other end — the
+    // What we send. JSON in, CBOR on the wire, JSON out at the other end: the
     // same bytes a C++ Cbor builder or a Python dict would have produced.
     int tick = 0;
     while (!g_stop.load()) {
@@ -120,6 +120,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    say("\"" + name + "\" leaving — the others will see it immediately.");
+    say("\"" + name + "\" leaving: the others will see it immediately.");
     return 0;
 }

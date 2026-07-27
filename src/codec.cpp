@@ -1,4 +1,4 @@
-// UniNet — envelope framing + compression implementation.
+// UniNet: envelope framing + compression implementation.
 #include "uninet/codec.h"
 #include "uninet/profiler.h"
 
@@ -161,7 +161,7 @@ bool decompress_into(const uint8_t* comp, size_t n, Compression method, Bytes& o
         // so one sized decompress replaces the old grow-and-retry streaming loop
         // and its per-call scratch allocation.
         //
-        // One context per thread, reused across frames — and OWNED, so it is freed
+        // One context per thread, reused across frames, and OWNED, so it is freed
         // when the thread exits. The bare thread_local pointer this replaces was
         // never freed: ~131 KB leaked per thread that ever received an LZ4 frame
         // (LeakSanitizer).
@@ -245,7 +245,7 @@ void frame_into(const Envelope& e, Bytes& wire, Scratch& scratch) {
     profiler::ScopedOp _("frame");
     // The header's length fields are 16 bits. A longer uuid used to be truncated
     // by the uint16_t cast, which does not produce a frame addressed to the wrong
-    // peer — it produces a frame whose header no longer parses, so a unicast
+    // peer. It produces a frame whose header no longer parses, so a unicast
     // silently became malformed garbage. Refuse to build it instead.
     if (e.src_uuid.size() > 0xFFFF || e.dst_uuid.size() > 0xFFFF) { wire.clear(); return; }
     encode_into(to_cbor(e), scratch.core);
@@ -275,7 +275,7 @@ std::optional<Envelope> unframe_into(const uint8_t* wire, size_t n, Scratch& scr
     Header h = parse_header(wire, n);
     if (!h.ok) return std::nullopt;
 
-    // Uncompressed frames decode straight out of the caller's buffer — the old
+    // Uncompressed frames decode straight out of the caller's buffer: the old
     // path copied the whole payload out first purely to get a Bytes to hand to
     // decompress().
     const uint8_t* core = wire + h.payload_offset;

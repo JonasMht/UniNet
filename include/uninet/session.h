@@ -1,6 +1,6 @@
-// UniNet — the whole library in one call.
+// UniNet: the whole library in one call.
 //
-//     auto net = uninet::Session::join("OR Headset");
+//     auto net = uninet::Session::join("Headset");
 //     net->subscribe("domain.D1", [](const uninet::Envelope& e) { ... });
 //     net->publish("domain.D1", data);
 //
@@ -8,8 +8,8 @@
 // no server to install. Start the same program on another machine on the same
 // network and the two find each other in about a second.
 //
-// Everything underneath stays reachable — node() and transport() expose the
-// full surface — but nothing below this line is required to use UniNet.
+// Everything underneath stays reachable: node() and transport() expose the
+// full surface, but nothing below this line is required to use UniNet.
 #pragma once
 
 #include "uninet/node.h"
@@ -24,17 +24,26 @@ namespace uninet {
 struct SessionConfig {
     // Shown to other devices in a peer list. Both optional, both free-form.
     std::string role;    // "server" / "headset" / "viewer"
-    std::string app;     // "ThermoNavServer"
+    std::string app;     // your application's name
 
     // The one setting that ever needs changing: devices only see devices in the
     // same realm. Use it to keep a development machine out of a live session, or
-    // to run two independent setups on one hospital network.
+    // to run two independent setups on one physical network.
     std::string realm = "uninet";
 
-    // Advanced, and normally left alone. `interface` matters only on a machine
+    // Discovery over a link with no multicast: a USB-tethered device reached
+    // through a port forward, a VPN, a routed network. One node binds a
+    // rendezvous endpoint, the others connect to it. See ZyreConfig for the
+    // details and for the endpoint caveat on tunnelled links.
+    std::string gossip_bind;      // e.g. "tcp://*:5670" on the rendezvous node
+    std::string gossip_connect;   // e.g. "tcp://127.0.0.1:5670" on the others
+    std::string endpoint;             // this node's data endpoint (gossip mode)
+    std::string advertised_endpoint;  // what to tell peers, if it differs
+
+    // Advanced, and normally left alone. `iface` matters only on a machine
     // with several networks, where discovery could otherwise pick the wrong one.
     int         port = 5670;
-    // See ZyreConfig::iface — deliberately not called `interface`, which is a
+    // See ZyreConfig::iface: deliberately not called `interface`, which is a
     // macro in the Windows headers.
     std::string iface;
 
@@ -57,6 +66,16 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
+    // Leave the network and release the transport. Idempotent, and safe to call
+    // from a shutdown hook. The destructor calls it, but relying on destruction
+    // alone is not enough everywhere: a garbage-collected host (Python, C#) may
+    // finalize this object after the ZeroMQ context has already been torn down,
+    // and closing a socket after that aborts inside czmq. Call it explicitly
+    // when you control the shutdown order.
+    void close();
+    // False once close() has run.
+    bool open() const;
+
     // ── sending ──
     // `dst` empty broadcasts to every device; otherwise the message is sent to
     // that one peer's uuid and nobody else receives it.
@@ -64,13 +83,13 @@ public:
     // the result is fine for fire-and-forget telemetry; check it when the
     // message matters.
     bool publish(const std::string& subject, Cbor data, const std::string& dst = "");
-    // Same, from JSON text — the identical bytes reach the wire either way.
+    // Same, from JSON text: the identical bytes reach the wire either way.
     bool publish_json(const std::string& subject, const std::string& json,
                       const std::string& dst = "");
 
     // ── receiving ──
     // `subject` is exact, or ends in ">" to match everything below it
-    // ("thermonav.v1.>"). ">" alone matches everything.
+    // ("sensors.>"). ">" alone matches everything.
     void subscribe(const std::string& subject, Node::DataHandler handler);
 
     // ── who else is here ──

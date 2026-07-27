@@ -1,4 +1,4 @@
-// UniNet — base value types. The library is transport-agnostic messaging: a peer
+// UniNet: base value types. The library is transport-agnostic messaging: a peer
 // (Node) publishes/subscribes Envelopes over a pluggable Transport, with a compact
 // CBOR codec and optional compression. Consumers build Cbor payloads from their
 // own message types; UniNet owns the framing, the codec, and the bus.
@@ -18,12 +18,12 @@ using Bytes = std::vector<uint8_t>;
 constexpr uint16_t CURRENT_PROTOCOL_VERSION = 1;
 
 // Wire compression of the framed envelope. Negotiated per-message via the frame's
-// 1-byte header — the field the three ThermoNav peers currently lack (each ships
+// 1-byte header, so a receiver always knows how a frame was encoded (a bus
 // LZ4 code force-disabled to NONE because no peer can tell how a frame was encoded).
 enum class Compression : uint8_t {
-    None = 0,   // identity — always available
-    Zlib = 1,   // deflate — always available (zlib)
-    Lz4  = 2,   // LZ4 frame — optional (liblz4; auto-detected at build)
+    None = 0,   // identity: always available
+    Zlib = 1,   // deflate: always available (zlib)
+    Lz4  = 2,   // LZ4 frame: optional (liblz4; auto-detected at build)
 };
 
 inline const char* compression_name(Compression m) {
@@ -36,7 +36,7 @@ inline const char* compression_name(Compression m) {
 }
 
 // The recommended compression for LIVE traffic (the OR, ~20 Hz mesh streaming): LZ4
-// when liblz4 is present (~14.8 GB/s, ~1.4x ratio — cheap enough to leave on for
+// when liblz4 is present (~14.8 GB/s, ~1.4x ratio: cheap enough to leave on for
 // every frame). zlib is kept for archival/batch (better ratio, ~400x slower) and as
 // the dependency-free fallback when liblz4 is absent; see docs/PROTOCOL.md.
 #ifdef UNINET_HAS_LZ4

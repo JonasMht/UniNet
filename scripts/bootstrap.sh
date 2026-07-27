@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# UniNet — one-command bootstrap for Linux & macOS.
+# UniNet: one-command bootstrap for Linux & macOS.
 #
 # Installs build prerequisites (if a known package manager is present), then
 # configures, builds, and tests UniNet. Safe to re-run.
@@ -42,7 +42,7 @@ if [[ "${UNINET_SKIP_DEPS:-0}" != "1" ]]; then
     echo "No supported package manager found. Install manually: a C++17 compiler, cmake, pkg-config, zlib, lz4."
   fi
 fi
-command -v cmake >/dev/null || { echo "cmake not found — install it and re-run."; exit 1; }
+command -v cmake >/dev/null || { echo "cmake not found: install it and re-run."; exit 1; }
 
 # ── 2. Python extension? ─────────────────────────────────────────────────────
 CMAKE_EXTRA=()
@@ -54,7 +54,7 @@ if [[ "$BUILD_PYTHON" == "1" && "${UNINET_NO_PYTHON:-0}" != "1" ]]; then
       CMAKE_EXTRA+=("-DUNINET_BUILD_PYTHON=ON" "-Dpybind11_DIR=$PYDIR")
       say "Python extension will be built"
     else
-      echo "pybind11 not importable — skipping Python extension."
+      echo "pybind11 not importable: skipping Python extension."
     fi
   fi
 fi

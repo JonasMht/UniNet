@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# UniNet demo — three devices finding each other, with nothing configured.
+# UniNet demo: three devices finding each other, with nothing configured.
 #
 #     ./scripts/demo.sh [seconds]
 #
 # Starts three peers in one realm, lets them discover each other and exchange
 # messages, then shuts them down. Nobody types an address anywhere.
 #
-# The same three commands work on three separate machines on the same network —
+# The same three commands work on three separate machines on the same network -
 # that is the point. Running them here just makes the demo self-contained.
 set -euo pipefail
 
@@ -25,7 +25,7 @@ if [ -z "$DEMO" ]; then
     exit 1
 fi
 
-# A realm unique to this run, so the demo cannot join — or disturb — a real
+# A realm unique to this run, so the demo cannot join, or disturb, a real
 # session that happens to be on the same network.
 REALM="uninet-demo-$$"
 LOGDIR="$(mktemp -d)"
@@ -37,7 +37,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "UniNet demo — three devices, zero configuration"
+echo "UniNet demo: three devices, zero configuration"
 echo "realm: $REALM   duration: ${DURATION}s"
 echo
 
@@ -46,11 +46,11 @@ start() {  # start <name> <role>
     PIDS+=($!)
 }
 
-start "Navigation Server" server
+start "Recorder" server
 sleep 1
-start "OR Headset"        headset
+start "Headset"        headset
 sleep 1
-start "Planning Laptop"   viewer
+start "Laptop"   viewer
 
 sleep "$DURATION"
 cleanup

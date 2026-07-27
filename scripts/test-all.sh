@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# UniNet — run every test we can run on this machine.
+# UniNet: run every test we can run on this machine.
 #
 #     ./scripts/test-all.sh              native suites only (fast)
 #     ./scripts/test-all.sh --docker     also the containerised cross-platform
@@ -10,10 +10,10 @@
 # machine without a system Zyre takes) running all three languages; a MinGW
 # compile check for Windows; and a Wine run of the cross-compiled Windows
 # binaries. See tests/docker/Dockerfile.windows-run for exactly how far the
-# Windows coverage goes — the network layer needs a real Windows machine.
+# Windows coverage goes: the network layer needs a real Windows machine.
 #
 # Every stage reports PASS/SKIP/FAIL and the script exits non-zero if any FAILed.
-# A SKIP is never counted as a pass — an untested thing is not a working thing.
+# A SKIP is never counted as a pass, an untested thing is not a working thing.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,7 +26,7 @@ PASSED=(); SKIPPED=(); FAILED=()
 
 stage() { printf '\n\033[1m── %s ──\033[0m\n' "$1"; }
 pass()  { PASSED+=("$1");  echo "PASS  $1"; }
-skip()  { SKIPPED+=("$1"); echo "SKIP  $1 — $2"; }
+skip()  { SKIPPED+=("$1"); echo "SKIP  $1: $2"; }
 fail()  { FAILED+=("$1");  echo "FAIL  $1"; }
 
 # ── native ────────────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ if [ "$USE_DOCKER" -eq 1 ]; then
         if docker build --network host -f tests/docker/Dockerfile.windows-run \
                 -t uninet-winrun . >/dev/null 2>&1 \
            && docker run --rm --network host -v "$PWD":/src:ro uninet-winrun 2>&1 | tail -20; then
-            pass "windows runtime (network layer not covered — needs real Windows)"
+            pass "windows runtime (network layer not covered: needs real Windows)"
         else
             fail "windows runtime"
         fi

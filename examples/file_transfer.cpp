@@ -1,4 +1,4 @@
-// UniNet — sending a file to another machine, in C++.
+// UniNet: sending a file to another machine, in C++.
 //
 //     uninet-file-transfer receive [output-dir]     # terminal 1
 //     uninet-file-transfer send <path> [more...]    # terminal 2
@@ -6,7 +6,7 @@
 // Or on two machines, one running each. No address is configured: the sender
 // finds the receiver and streams the file, with progress at both ends.
 //
-// publish() would be the wrong tool here — a file has to be chunked, and the
+// publish() would be the wrong tool here, a file has to be chunked, and the
 // receiver wants to know it is 40% through. Blob does both.
 #include "uninet/blob.h"
 #include "uninet/session.h"
@@ -98,7 +98,7 @@ int send(const std::vector<std::string>& paths) {
 
     uninet::Blob blob(*net, kSubject);
 
-    std::printf("%s\nLooking for a receiver…\n", net->describe().c_str());
+    std::printf("%s\nLooking for a receiver...\n", net->describe().c_str());
     for (int i = 0; i < 200 && net->peers().empty(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     if (net->peers().empty()) {
@@ -117,7 +117,7 @@ int send(const std::vector<std::string>& paths) {
             std::printf("    failed to start the transfer\n");
     }
 
-    // Let the chunks drain before the session — and its network thread — goes away.
+    // Let the chunks drain before the session, and its network thread: goes away.
     std::this_thread::sleep_for(std::chrono::seconds(3));
     std::printf("done\n");
     return 0;
@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
     if (mode == "send" && argc > 2) {
         return send(std::vector<std::string>(argv + 2, argv + argc));
     }
-    std::printf("uninet-file-transfer — send a file to another machine, no address needed\n\n"
+    std::printf("uninet-file-transfer: send a file to another machine, no address needed\n\n"
                 "  uninet-file-transfer receive [output-dir]\n"
                 "  uninet-file-transfer send <path> [more...]\n");
     return 2;

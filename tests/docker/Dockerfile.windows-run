@@ -1,4 +1,4 @@
-# UniNet Windows RUNTIME test — cross-compile with MinGW-w64, then execute the
+# UniNet Windows RUNTIME test: cross-compile with MinGW-w64, then execute the
 # resulting .exe files under Wine.
 #
 # WHAT THIS PROVES
@@ -12,7 +12,7 @@
 #   - Discovery and messaging. czmq enumerates network interfaces with
 #     GetAdaptersAddresses and asserts on ERROR_BUFFER_OVERFLOW (ziflist.c:288);
 #     Wine does not implement that buffer-sizing protocol, so every network test
-#     stops there. This is a Wine limitation, not a UniNet or czmq defect — the
+#     stops there. This is a Wine limitation, not a UniNet or czmq defect: the
 #     same binaries are expected to work on real Windows.
 #   - Anything MSVC-specific. MSVC does not run on Linux at all; the
 #     `windows:msvc` job in .gitlab-ci.yml covers that on a Windows runner.

@@ -1,15 +1,15 @@
-// Android Wi-Fi multicast lock — required for UniNet LAN peer discovery.
+// Android Wi-Fi multicast lock: required for UniNet LAN peer discovery.
 //
 // WHY: Android's Wi-Fi driver filters out multicast and subnet-broadcast frames
 // before they ever reach userspace, to save power. An app only sees them while it
 // holds a WifiManager.MulticastLock (which in turn needs the manifest permission
-// android.permission.CHANGE_WIFI_MULTICAST_STATE — see
+// android.permission.CHANGE_WIFI_MULTICAST_STATE: see
 // Assets/Plugins/Android/AndroidManifest.xml). Unicast is unaffected, so the NATS
 // connection to the broker works with or without this.
 //
 // WHAT BREAKS WITHOUT IT: UniNet's Zyre/ZRE discovery beacon is a UDP broadcast on
 // port 5670. On the headset the beacons are silently dropped on the way in, so the
-// MR sees no peers, and — because it never answers a beacon — no peer sees the MR
+// MR sees no peers, and, because it never answers a beacon, no peer sees the MR
 // either. There is no error anywhere: discovery just "mysteriously finds nothing",
 // which is exactly the symptom this class exists to prevent. Hence the warnings
 // below: if the lock cannot be taken we want it in the log, not in silence.
@@ -27,7 +27,7 @@ public static class UniNetMulticastLock
     private static readonly object _mutex = new object();
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-    // Shows up in `adb shell dumpsys wifi` — keep it recognisable.
+    // Shows up in `adb shell dumpsys wifi`: keep it recognisable.
     private const string LOCK_TAG = "UniNetZreDiscovery";
     private static AndroidJavaObject _lock;
 #endif
@@ -44,7 +44,7 @@ public static class UniNetMulticastLock
         lock (_mutex)
         {
             _refCount++;
-            if (_refCount > 1) return;   // already held — nothing to do
+            if (_refCount > 1) return;   // already held: nothing to do
 #if UNITY_ANDROID && !UNITY_EDITOR
             AcquireNative();
 #endif
@@ -80,7 +80,7 @@ public static class UniNetMulticastLock
                 if (wifi == null)
                 {
                     _refCount = 0;
-                    Debug.LogWarning("[UniNet] no WifiManager (getSystemService(\"wifi\") returned null) — " +
+                    Debug.LogWarning("[UniNet] no WifiManager (getSystemService(\"wifi\") returned null): " +
                                      "multicast lock NOT held, LAN peer discovery will find nothing.");
                     return;
                 }
@@ -89,7 +89,7 @@ public static class UniNetMulticastLock
                 if (_lock == null)
                 {
                     _refCount = 0;
-                    Debug.LogWarning("[UniNet] createMulticastLock returned null — multicast lock NOT held, " +
+                    Debug.LogWarning("[UniNet] createMulticastLock returned null: multicast lock NOT held, " +
                                      "LAN peer discovery will find nothing.");
                     return;
                 }
@@ -105,7 +105,7 @@ public static class UniNetMulticastLock
             // shipped manifest (SecurityException), so say so explicitly.
             _refCount = 0;
             if (_lock != null) { try { _lock.Dispose(); } catch { } _lock = null; }
-            Debug.LogWarning("[UniNet] could not acquire the Wi-Fi multicast lock — LAN peer discovery " +
+            Debug.LogWarning("[UniNet] could not acquire the Wi-Fi multicast lock: LAN peer discovery " +
                              "will receive no beacons. Check that android.permission.CHANGE_WIFI_MULTICAST_STATE " +
                              $"is in the shipped manifest. Cause: {e}");
         }

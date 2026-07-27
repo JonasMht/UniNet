@@ -1,4 +1,4 @@
-// UniNet — the C# API. One call joins the network:
+// UniNet: the C# API. One call joins the network:
 //
 //     using var net = UniNet.Session.Join("MR Viewer", role: "headset");
 //     net.PeerFound += p => Debug.Log($"found {p.Name} at {p.Address}");
@@ -10,7 +10,7 @@
 // ── THREADING, and why Unity needs the pump ───────────────────────────────
 // Messages and presence events arrive on UniNet's network thread. Touching the
 // Unity API from there throws or crashes the player, so by default this class
-// queues every event and hands it to you when you call Update() — which you do
+// queues every event and hands it to you when you call Update(), which you do
 // from MonoBehaviour.Update(), on the main thread:
 //
 //     void Update() => net.Update();
@@ -54,14 +54,14 @@ namespace UniNet
         }
 
         public override string ToString() =>
-            string.IsNullOrEmpty(Role) ? $"{Name} ({Host})" : $"{Name} ({Host}) — {Role}";
+            string.IsNullOrEmpty(Role) ? $"{Name} ({Host})" : $"{Name} ({Host}): {Role}";
     }
 
     /// <summary>One received message.</summary>
     public sealed class Message
     {
         public string Subject { get; }
-        /// <summary>uuid of the sender — pass it as `dst` to reply privately.</summary>
+        /// <summary>uuid of the sender: pass it as `dst` to reply privately.</summary>
         public string Src { get; }
         /// <summary>Payload as JSON text.</summary>
         public string Json { get; }
@@ -102,7 +102,7 @@ namespace UniNet
         /// <summary>
         /// Join the network under <paramref name="name"/>. This is the whole setup.
         /// </summary>
-        /// <param name="name">What other devices show for this one, e.g. "OR Headset".</param>
+        /// <param name="name">What other devices show for this one, e.g. "Headset".</param>
         /// <param name="role">Free-form label: "server", "headset", "viewer".</param>
         /// <param name="app">Owning application, for a device list.</param>
         /// <param name="realm">Devices only see devices in the same realm. Use it to
@@ -112,19 +112,32 @@ namespace UniNet
         /// <param name="port">UDP discovery port; 0 keeps the default (5670).</param>
         /// <param name="marshalToCaller">Queue events for Update() instead of
         /// delivering them on the network thread. Keep this true in Unity.</param>
+        /// <param name="gossipBind">Bind a rendezvous endpoint ("tcp://*:5670")
+        /// instead of using the UDP beacon. For links with no multicast: a
+        /// USB-tethered device behind a port forward, a VPN, a routed network.</param>
+        /// <param name="gossipConnect">Dial another node's rendezvous endpoint.</param>
+        /// <param name="endpoint">This node's own data endpoint, in gossip mode.</param>
+        /// <param name="advertisedEndpoint">What to tell peers this node's
+        /// endpoint is, when that differs from what it binds (a forwarded port).</param>
         public static Session Join(string name,
                                    string role = "",
                                    string app = "",
                                    string realm = "uninet",
                                    string iface = "",
                                    int port = 0,
-                                   bool marshalToCaller = true)
+                                   bool marshalToCaller = true,
+                                   string gossipBind = "",
+                                   string gossipConnect = "",
+                                   string endpoint = "",
+                                   string advertisedEndpoint = "")
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException("a device name is required", nameof(name));
 
-            IntPtr handle = Native.uninet_session_join(name, role ?? "", app ?? "",
-                                                       realm ?? "uninet", iface ?? "", port);
+            IntPtr handle = Native.uninet_session_join_ex(
+                name, role ?? "", app ?? "", realm ?? "uninet", iface ?? "", port,
+                gossipBind ?? "", gossipConnect ?? "", endpoint ?? "",
+                advertisedEndpoint ?? "");
             if (handle == IntPtr.Zero)
                 throw new InvalidOperationException("UniNet: " + Native.LastError());
 
@@ -213,7 +226,7 @@ namespace UniNet
                 throw new InvalidOperationException("UniNet publish: " + Native.LastError());
         }
 
-        /// <summary>Send a payload that is already CBOR — skips the JSON conversion.</summary>
+        /// <summary>Send a payload that is already CBOR: skips the JSON conversion.</summary>
         public void PublishCbor(string subject, byte[] cbor, string dst = "")
         {
             ThrowIfDisposed();
@@ -270,7 +283,7 @@ namespace UniNet
                 : Native.ReadBuffer((b, n) => Native.uninet_session_describe(_handle, b, n));
 
         // ── conversion helpers ──
-        /// <summary>JSON text to CBOR bytes — the same bytes any other language produces.</summary>
+        /// <summary>JSON text to CBOR bytes: the same bytes any other language produces.</summary>
         public static byte[] JsonToCbor(string json)
         {
             int rc = Native.uninet_json_to_cbor(json, null, UIntPtr.Zero, out UIntPtr needed);
@@ -311,7 +324,7 @@ namespace UniNet
             _handle = IntPtr.Zero;
 
             // Free the native handle FIRST: that is what stops the network thread
-            // calling back. Only then is it safe to let the delegates go — the
+            // calling back. Only then is it safe to let the delegates go: the
             // reverse order leaves a window where native code holds a pointer to
             // a delegate the GC may already have collected.
             Native.uninet_session_free(handle);

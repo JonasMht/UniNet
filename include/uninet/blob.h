@@ -1,8 +1,8 @@
-// UniNet — large payload transfer.
+// UniNet: large payload transfer.
 //
 // publish() is for messages. A message has to fit comfortably in memory on both
-// ends and arrive as one unit, which makes it the wrong tool for a 200 MB CT
-// volume or a case file: the sender blocks while it is serialized, the receiver
+// ends and arrive as one unit, which makes it the wrong tool for a 200 MB
+// volume or a large dataset file: the sender blocks while it is serialized, the receiver
 // has no idea anything is happening until it all lands, and a single lost peer
 // wastes the whole transfer.
 //
@@ -13,7 +13,7 @@
 //     blob.on_received([](const uninet::BlobInfo& info, const uninet::Bytes& data) {
 //         save(info.name, data);
 //     });
-//     blob.send_file("/path/to/case.zip");
+//     blob.send_file("/path/to/dataset.zip");
 //
 // Arbitrary metadata rides with the payload, which is what makes a typed
 // transfer (a numpy array's shape and dtype, a mesh's vertex count) a one-liner
@@ -37,9 +37,9 @@ namespace uninet {
 
 struct BlobInfo {
     std::string id;      // unique per transfer
-    std::string name;    // logical name — a filename, a volume id, whatever you use
+    std::string name;    // logical name, a filename, a volume id, whatever you use
     std::string src;     // uuid of the sender
-    Cbor        meta;    // yours: array shape and dtype, mesh counts, case id …
+    Cbor        meta;    // yours: array shape and dtype, mesh counts, case id ...
     size_t      size = 0;   // total bytes
 };
 
@@ -48,7 +48,7 @@ struct BlobInfo {
 using BlobProgress = std::function<void(const BlobInfo& info, size_t done)>;
 // Fired once, when a transfer is complete.
 using BlobHandler  = std::function<void(const BlobInfo& info, const Bytes& data)>;
-// Fired when a transfer is abandoned — the sender vanished, or it stalled.
+// Fired when a transfer is abandoned: the sender vanished, or it stalled.
 using BlobFailed   = std::function<void(const BlobInfo& info, const std::string& why)>;
 
 struct BlobConfig {
@@ -63,7 +63,7 @@ struct BlobConfig {
 
     // Hard ceilings on what an incoming transfer may cost us. A peer on the LAN
     // is unauthenticated, so these are a memory-exhaustion guard, not a tuning
-    // knob — raise them deliberately.
+    // knob: raise them deliberately.
     size_t max_blob_bytes = size_t(2) * 1024 * 1024 * 1024;   // 2 GiB per transfer
     size_t max_total_bytes = size_t(4) * 1024 * 1024 * 1024;  // 4 GiB in flight
     size_t max_concurrent = 32;

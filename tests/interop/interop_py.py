@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UniNet cross-language interop — the Python participant.
+"""UniNet cross-language interop: the Python participant.
 
 See interop_cpp.cpp for what this proves. Run:
 
@@ -13,7 +13,7 @@ import time
 import uninet
 
 # The one payload all three languages must produce identically. Kept in sync
-# with interop_cpp.cpp and InteropCs/Program.cs by hand — that is the point: if
+# with interop_cpp.cpp and InteropCs/Program.cs by hand. That is the point: if
 # a language encodes any of these differently, the comparison below fails.
 def payload(lang: str) -> dict:
     return {

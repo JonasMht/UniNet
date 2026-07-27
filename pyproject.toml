@@ -5,11 +5,11 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "uninet"
 version = "0.2.0"
-description = "UniNet — brokerless peer-to-peer messaging with LAN discovery built in. No broker, no addresses to configure."
+description = "UniNet: brokerless peer-to-peer messaging with LAN discovery built in. No broker, no addresses to configure."
 readme = "README.md"
 requires-python = ">=3.9"
 # No runtime dependencies. numpy arrays are accepted (via .tolist()) but numpy is
-# never imported, so it is not a dependency — the previous release declared one
+# never imported, so it is not a dependency: the previous release declared one
 # for code that did not exist, forcing it on every consumer.
 dependencies = []
 license = { text = "MIT" }

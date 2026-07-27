@@ -1,8 +1,8 @@
-// UniNet — a peer on the network. Discovered, never configured.
+// UniNet, a peer on the network. Discovered, never configured.
 //
 // A Peer is what one node learns about another when it appears on the LAN: who
 // it is, what it calls itself, where it is, and whatever it chose to advertise.
-// Nobody types any of it — it arrives with the ZRE discovery beacon.
+// Nobody types any of it. It arrives with the ZRE discovery beacon.
 #pragma once
 
 #include <map>
@@ -14,7 +14,7 @@ struct Peer {
     // Assigned by ZRE, stable for the life of the remote process. This is the
     // address you `publish(..., dst)` to for a private message.
     std::string uuid;
-    // Human-facing name the peer chose, e.g. "OR Headset".
+    // Human-facing name the peer chose, e.g. "Headset".
     std::string name;
     // Observed endpoint, e.g. "tcp://192.168.1.31:35001". Taken from the
     // connection, not from anything the peer claims about itself.
@@ -37,7 +37,7 @@ struct Peer {
         return it == headers.end() ? std::string{} : it->second;
     }
 
-    // "OR Headset (192.168.1.31) — headset", for a device list or a log line.
+    // "Headset (192.168.1.31): headset", for a device list or a log line.
     std::string describe() const;
 };
 

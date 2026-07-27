@@ -1,4 +1,4 @@
-// uninet-discover — "what is on my network?", answered without asking the user
+// uninet-discover: "what is on my network?", answered without asking the user
 // for anything:
 //
 //     uninet-discover              watch devices arrive and leave, live
@@ -53,7 +53,7 @@ void print_table(const std::vector<uninet::Peer>& peers) {
         std::printf("     each other. A normal network, or a cable, will work.\n");
         std::printf("  4. A firewall may be blocking UDP port 5670.\n");
         std::printf("  5. On a machine with several networks, the app may be looking at\n");
-        std::printf("     the wrong one — set the network interface in its settings.\n");
+        std::printf("     the wrong one: set the network interface in its settings.\n");
         return;
     }
     std::printf("\n%s %s %s %s\n",
@@ -71,7 +71,7 @@ void print_table(const std::vector<uninet::Peer>& peers) {
 
 void usage() {
     std::printf(
-        "uninet-discover — show the UniNet devices on this network\n\n"
+        "uninet-discover: show the UniNet devices on this network\n\n"
         "  uninet-discover                 watch devices arrive and leave (Ctrl+C to stop)\n"
         "  uninet-discover --once          print who is here now, then exit\n\n"
         "Options:\n"
@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ZRE has no passive listener — you join the network to hear it. So this
+    // ZRE has no passive listener. You join the network to hear it. So this
     // tool appears in everyone else's list too, honestly labelled.
     cfg.headers["role"] = "observer";
     cfg.headers["app"]  = "uninet-discover";
@@ -149,7 +149,7 @@ int main(int argc, char** argv) {
 
     std::printf("Looking for UniNet devices on your network");
     if (cfg.realm != "uninet") std::printf(" (session group \"%s\")", cfg.realm.c_str());
-    std::printf("…\nPress Ctrl+C to stop.\n\n");
+    std::printf("...\nPress Ctrl+C to stop.\n\n");
     std::fflush(stdout);
 
     while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -1,4 +1,4 @@
-// UniNet — in-process transport implementation.
+// UniNet: in-process transport implementation.
 #include "uninet/loopback.h"
 #include "uninet/profiler.h"
 
@@ -15,10 +15,10 @@ bool LoopbackTransport::publish(const std::string& subject, const uint8_t* data,
     // otherwise clobber the bytes still being delivered. Allocating that copy
     // fresh each time costs an mmap/munmap pair per message once frames pass
     // glibc's ~128 KiB threshold, so keep one buffer per re-entrancy depth and
-    // reuse it — depth 0 is the steady state and allocates nothing after the
+    // reuse it: depth 0 is the steady state and allocates nothing after the
     // first message.
     // A deque, because a re-entrant publish grows the pool while an outer frame
-    // still holds a reference into it — deque keeps existing elements pinned.
+    // still holds a reference into it: deque keeps existing elements pinned.
     static thread_local std::deque<Bytes> pool;
     static thread_local size_t depth = 0;
     while (depth >= pool.size()) pool.emplace_back();

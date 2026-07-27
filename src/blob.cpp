@@ -1,4 +1,4 @@
-// UniNet — large payload transfer. See include/uninet/blob.h.
+// UniNet: large payload transfer. See include/uninet/blob.h.
 #include "uninet/blob.h"
 
 #include <atomic>
@@ -148,7 +148,7 @@ struct Blob::Impl {
 
                 // Chunks must arrive in order. ZRE delivers in order per peer, so
                 // a gap means loss or interleaving from a second sender reusing an
-                // id — either way the buffer can no longer be trusted.
+                // id: either way the buffer can no longer be trusted.
                 if (seq != in.next_seq) {
                     bad = true;
                     info = in.info;
@@ -240,7 +240,7 @@ std::string Blob::send(const std::string& name, const uint8_t* data, size_t len,
         c.set("d", Cbor::bytes(Bytes(data + off, data + off + n)));
         // Abandon on the first failure. Sending the remaining chunks would only
         // leave the receiver holding a buffer it can never complete, which its
-        // stall timeout would eventually reap — but slowly, and confusingly.
+        // stall timeout would eventually reap, but slowly, and confusingly.
         if (!impl_->session.publish(topic, std::move(c), dst)) return "";
     }
 

@@ -1,4 +1,4 @@
-// UniNet — JSON <-> Cbor bridge. See include/uninet/json.h.
+// UniNet: JSON <-> Cbor bridge. See include/uninet/json.h.
 //
 // Dependency-free, like the CBOR codec next to it, and written to the same
 // standard: this parses text that arrived from the network, so it is bounded,
@@ -308,7 +308,7 @@ void write(const Cbor& v, std::string& out, int indent, int depth) {
         }
         case Cbor::Kind::F32Array:
         case Cbor::Kind::F64Array: {
-            // Mesh payloads land here — thousands of numbers. They stay on one
+            // Mesh payloads land here: thousands of numbers. They stay on one
             // line whatever the indent, because a 12288-line array helps nobody.
             const size_t n = v.size();
             out.append("[");

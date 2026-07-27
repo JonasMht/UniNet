@@ -1,8 +1,7 @@
-// UniNet — high-level peer. A Node owns a UUID, a Transport, and a default
+// UniNet: high-level peer. A Node owns a UUID, a Transport, and a default
 // compression. It encodes Envelopes, suppresses self-echo, honors dst_uuid
 // targeting, and reconnects with backoff. This is the single place the protocol
-// lives — exactly what ThermoNavMR (Networking.cs), ThermoNavServer
-// (networking.cpp), and ThermoNavSlicer (networking.py) each re-implement today.
+// lives, so no application has to reimplement it.
 #pragma once
 
 #include "uninet/codec.h"
@@ -45,7 +44,7 @@ public:
     // message goes to that peer alone when the transport can address one
     // (ZyreTransport can), and falls back to a broadcast that receivers filter
     // on dst_uuid when it cannot (loopback).
-    // Returns false when the message could not be handed to the transport —
+    // Returns false when the message could not be handed to the transport -
     // not connected, or the transport refused it. A void return made a publish
     // during a network outage indistinguishable from a successful one.
     bool publish(const std::string& subject, Cbor data, const std::string& dst_uuid = "");

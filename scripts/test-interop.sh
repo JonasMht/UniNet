@@ -6,7 +6,7 @@
 # Starts a C++, a Python and a C# node in one private realm. Each publishes an
 # identical payload and verifies what the others send. It passes only if every
 # participant saw both of the others AND every field decoded to exactly the
-# expected value — which is what "the same data in every language" has to mean.
+# expected value, which is what "the same data in every language" has to mean.
 #
 # C# is skipped with a clear notice when the .NET SDK is absent; C++ and Python
 # still run, and the script reports which languages were actually covered.
@@ -69,7 +69,7 @@ COVERED+=("C++")
 
 # ── Python ────────────────────────────────────────────────────────────────
 if [ "$have_python" -eq 0 ]; then
-    SKIPPED+=("Python (module not importable — pip install . or build with -DUNINET_BUILD_PYTHON=ON)")
+    SKIPPED+=("Python (module not importable: pip install . or build with -DUNINET_BUILD_PYTHON=ON)")
 else
     "${PY_ENV[@]}" "$PYTHON" "$HERE/tests/interop/interop_py.py" \
         "$REALM" "$SECONDS_LIMIT" "$(peers_excluding python)" > "$LOGDIR/python.log" 2>&1 &
@@ -80,7 +80,7 @@ fi
 # ── C# ────────────────────────────────────────────────────────────────────
 if [ "$have_csharp" -eq 0 ]; then
     if command -v dotnet >/dev/null 2>&1; then
-        SKIPPED+=("C# (native library missing — configure with -DUNINET_BUILD_CABI=ON)")
+        SKIPPED+=("C# (native library missing: configure with -DUNINET_BUILD_CABI=ON)")
     else
         SKIPPED+=("C# (dotnet not installed)")
     fi
@@ -122,8 +122,8 @@ fi
 
 echo
 if [ "$FAILED" -eq 0 ]; then
-    echo "INTEROP PASS — every language decoded every other language's payload identically."
+    echo "INTEROP PASS, every language decoded every other language's payload identically."
 else
-    echo "INTEROP FAIL — see the logs above."
+    echo "INTEROP FAIL (see the logs above)."
 fi
 exit "$FAILED"
