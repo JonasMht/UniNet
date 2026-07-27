@@ -90,6 +90,19 @@ public:
     // ── receiving ──
     // `subject` is exact, or ends in ">" to match everything below it
     // ("sensors.>"). ">" alone matches everything.
+    //
+    // LIFETIME. The handler runs on the network thread and keeps running until
+    // the session is closed. Anything it captures by reference must outlive the
+    // session:
+    //
+    //     std::vector<Msg> received;              // declared BEFORE the session
+    //     auto net = Session::join("Viewer");     // so it is destroyed AFTER it
+    //     net->subscribe("t.>", [&](auto& e) { received.push_back(...); });
+    //
+    // Declared the other way round, `received` is destroyed first (locals go in
+    // reverse order) and a message arriving in that window writes to freed
+    // memory. Calling close() before the captured state goes away is the
+    // explicit way to be sure.
     void subscribe(const std::string& subject, Node::DataHandler handler);
 
     // ── who else is here ──

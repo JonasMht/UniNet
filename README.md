@@ -460,6 +460,27 @@ that cannot start says so rather than returning a plausible-looking id.
 
 ---
 
+### One lifetime rule
+
+A handler runs on the network thread and keeps running until the session is
+closed, so anything it captures must outlive the session.
+
+```cpp
+std::vector<Msg> received;                 // declared BEFORE the session,
+auto net = uninet::Session::join("Viewer"); // so it is destroyed AFTER it
+net->subscribe("t.>", [&](const uninet::Envelope& e) { received.push_back(...); });
+```
+
+Declared the other way round, `received` dies first (C++ destroys locals in
+reverse order) and a message arriving in that window writes to freed memory.
+Calling `net->close()` before the captured state goes away is the explicit way
+to be sure, and is what the tests do.
+
+Python and C# are not exposed to this: the garbage collector keeps captured
+objects alive as long as the handler can reach them.
+
+---
+
 ## Finding devices
 
 Every device advertises a name, and optionally a role, an app, and any headers

@@ -60,14 +60,23 @@ linux:sanitizers:
   script:
     # The network path is threaded; TSan is the only thing that reliably catches
     # a regression there. ASan/UBSan cover the codec's hostile-input handling.
-    - cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug
+    # UNINET_SYSTEM_ZYRE=OFF matters: against an uninstrumented system libzmq,
+    # TSan reported 47 races, all but one of them synchronisation it could not
+    # see into. With the dependencies built under TSan the same run reports 0.
+    - cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DUNINET_SYSTEM_ZYRE=OFF
+        -DCMAKE_C_FLAGS="-fsanitize=thread -g -O1"
         -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
-    - cmake --build build-tsan -j"$(nproc)"
-    - ./build-tsan/test_network
-    - cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug
-        -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -g -O1"
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+    - cmake --build build-tsan -j"$(nproc)" --target test_network
+    # setarch -R: TSan aborts under ASLR often enough to make the job flaky.
+    - setarch -R ./build-tsan/test_network 2>&1 | tee tsan.log
+    - "! grep -q 'WARNING: ThreadSanitizer' tsan.log" 
+    - cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DUNINET_BUILD_CABI=ON
+        -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1"
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
     - cmake --build build-asan -j"$(nproc)"
-    - ./build-asan/test_roundtrip
+    - ASAN_OPTIONS=detect_leaks=1 ./build-asan/test_roundtrip
+    - ASAN_OPTIONS=detect_leaks=0 ./build-asan/test_network
   allow_failure: false
 
 # ── Windows portability, without a Windows runner ─────────────────────────

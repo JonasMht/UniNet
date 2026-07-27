@@ -47,6 +47,23 @@ bool wait_until(F pred, std::chrono::milliseconds timeout) {
 
 // Every test uses its own realm so a developer running the demo on the same
 // machine, or two CI jobs on one build box: cannot perturb the results.
+// Stops every session it holds when it goes out of scope.
+//
+// Handlers run on the network thread and capture state by reference. Locals are
+// destroyed in reverse declaration order, so state declared AFTER a session dies
+// BEFORE it, and a message arriving in that window writes to freed memory.
+// ThreadSanitizer caught exactly that here. Declaring one of these after the
+// captured state makes it the first thing destroyed, so the sessions are quiet
+// before anything a handler touches goes away. Applications need the same
+// discipline, which is why Session::subscribe documents it.
+struct StopFirst {
+    std::vector<uninet::Session*> sessions;
+    explicit StopFirst(std::initializer_list<uninet::Session*> s) : sessions(s) {}
+    ~StopFirst() { for (auto* s : sessions) if (s) s->close(); }
+    StopFirst(const StopFirst&) = delete;
+    StopFirst& operator=(const StopFirst&) = delete;
+};
+
 std::string unique_realm(const char* tag) {
     static std::atomic<unsigned> n{0};
     return std::string("uninet-test-") + tag + "-" +
@@ -104,6 +121,7 @@ void test_departure() {
     check(wait_until([&] { return a->peers().size() == 1; }, std::chrono::seconds(20)),
           "peer appeared");
 
+    StopFirst stop{a.get()};
     std::atomic<bool> lost{false};
     a->on_peer_lost([&](const uninet::Peer&) { lost.store(true); });
 
@@ -129,6 +147,7 @@ void test_messaging() {
 
     std::mutex mu;
     std::vector<std::string> b_got, c_got;
+    StopFirst stop{a.get(), b.get(), c.get()};
     b->subscribe("t.>", [&](const uninet::Envelope& e) {
         std::lock_guard<std::mutex> lk(mu);
         b_got.push_back(uninet::to_json(e.data));
@@ -195,6 +214,7 @@ void test_concurrent_publish() {
           "publisher sees the collector");
 
     std::atomic<int> received{0};
+    StopFirst stop{a.get(), b.get()};
     b->subscribe("load.>", [&](const uninet::Envelope&) { received.fetch_add(1); });
 
     constexpr int kThreads = 4, kEach = 50;
@@ -230,6 +250,7 @@ void test_concurrent_subscribe() {
           "nodes paired");
 
     std::atomic<int> hits{0};
+    StopFirst stop{a.get(), b.get()};
     std::vector<std::thread> subs;
     for (int t = 0; t < 4; ++t)
         subs.emplace_back([&] {
@@ -294,6 +315,7 @@ void test_blob_transfer() {
 
     std::mutex mu;
     std::vector<uninet::BlobInfo> done;
+    StopFirst stop{tx.get(), rx.get()};
     std::vector<uninet::Bytes>    payloads;
     std::atomic<size_t> progress_calls{0};
     std::atomic<size_t> last_progress{0};
@@ -364,6 +386,7 @@ void test_blob_addressed() {
     uninet::Blob target(*rx, "files");
     uninet::Blob bystander(*by, "files");
 
+    StopFirst stop{tx.get(), rx.get(), by.get()};
     std::atomic<int> target_got{0}, bystander_got{0};
     target.on_received([&](const uninet::BlobInfo&, const uninet::Bytes&) { target_got.fetch_add(1); });
     bystander.on_received([&](const uninet::BlobInfo&, const uninet::Bytes&) { bystander_got.fetch_add(1); });
@@ -393,6 +416,7 @@ void test_blob_concurrent() {
 
     std::mutex mu;
     std::map<std::string, uninet::Bytes> got;
+    StopFirst stop{a.get(), b.get(), rx.get()};
     recv.on_received([&](const uninet::BlobInfo& info, const uninet::Bytes& data) {
         std::lock_guard<std::mutex> lk(mu);
         got[info.name] = data;
@@ -425,6 +449,7 @@ void test_blob_empty() {
           "nodes paired");
 
     uninet::Blob send_side(*tx, "files"), recv_side(*rx, "files");
+    StopFirst stop{tx.get(), rx.get()};
     std::atomic<bool> arrived{false};
     std::atomic<size_t> size{999};
     recv_side.on_received([&](const uninet::BlobInfo&, const uninet::Bytes& d) {
@@ -474,6 +499,7 @@ void test_gossip_discovery() {
           "peers found each other with no beacon involved");
 
     std::atomic<int> got{0};
+    StopFirst stop{a.get(), b.get()};
     b->subscribe("g.>", [&](const uninet::Envelope&) { got.fetch_add(1); });
     a->publish_json("g.x", "{\"n\":1}");
     check(wait_until([&] { return got.load() == 1; }, std::chrono::seconds(15)),

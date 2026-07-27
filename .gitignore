@@ -2,7 +2,9 @@
 bin/
 build-*/
 build/
+build-asan/
 build-cache/          # Windows vcpkg clone (bootstrap.ps1)
+build-tsan/
 .cache/
 .cmake/
 compile_commands.json

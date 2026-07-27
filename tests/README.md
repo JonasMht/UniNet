@@ -57,7 +57,21 @@ which is what the `windows:msvc` job in `.gitlab-ci.yml` is for.
 
 ## Sanitizers
 
-Run these when changing the transport or the codec:
+```bash
+./scripts/test-all.sh --sanitizers
+```
+
+**Build the dependencies under the sanitizer too.** Against a system libzmq that
+ThreadSanitizer cannot see into, a run reported 47 races: all but one were
+synchronisation inside an uninstrumented library. With `-DUNINET_SYSTEM_ZYRE=OFF`
+so the whole stack is instrumented, the same run reports zero. A TSan result
+against uninstrumented dependencies is not evidence of anything.
+
+The one real race it did find was `Node::ensure_watching_`, where two threads
+calling `subscribe()` could each install the internal subscription and every
+message was then delivered twice.
+
+Run them by hand when changing the transport or the codec:
 
 ```bash
 cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
