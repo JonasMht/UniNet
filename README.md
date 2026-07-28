@@ -112,8 +112,10 @@ nothing to install on a server, because there is no server.
 ### Prerequisites
 
 UniNet needs **ZeroMQ/Zyre** (the peer-to-peer layer), **zlib**, and optionally
-**liblz4**. If Zyre is not installed, the build fetches and compiles it
-automatically, so on most machines you can skip straight to the build.
+**liblz4**. Every one of them is fetched and compiled by the build when the
+machine does not have it, so a compiler and CMake are the only real
+prerequisites and on most machines you can skip straight to the build.
+Installing them yourself only makes the first build faster.
 
 | OS | install prerequisites |
 |---|---|
@@ -137,10 +139,16 @@ is built from source at all.
 What CMake reports tells you which path it took:
 
 ```
--- UniNet: using system zyre 2.0.1.        <- nothing built from source
--- UniNet: using system libzmq 4.3.5.      <- only zyre is built
--- UniNet: fetching libzmq.                <- libzmq is built too
+-- UniNet: using system zyre 2.0.1.               <- nothing built from source
+-- UniNet: using system libzmq 4.3.5.             <- only zyre is built
+-- UniNet: fetching libzmq.                       <- libzmq is built too
+-- UniNet: zlib headers not found, building ...   <- even zlib is built
 ```
+
+> **`zlib1g-dev` is the one people are surprised by.** Every Linux desktop has
+> `libz` as a library and almost none has its headers, so `Could NOT find ZLIB`
+> used to be the first thing a clean machine saw — for the compression tier that
+> is meant to be the one that is always available. It is fetched now too.
 
 To force a source build of everything, pass `-DUNINET_SYSTEM_ZYRE=OFF`.
 
@@ -747,41 +755,145 @@ aapt dump permissions your.apk | grep MULTICAST
 
 ## 3D Slicer
 
-Slicer ships its own Python, so the extension has to be built against **that**
-interpreter. One command does it:
+Slicer ships its own Python, so UniNet's extension has to be built against
+**that** interpreter. One file does all of it — `scripts/UniNetSlicer.py`. It
+finds Slicer, works out what that Slicer's Python needs, installs UniNet into
+it, and can check again every time Slicer starts. Nothing to configure, no
+cmake, and you do not have to know where Slicer is.
 
-```bash
-./scripts/build-for-slicer.sh ~/Documents/Slicer-5.8.1-linux-amd64
+**In Slicer's Python console** (`View → Python Console`), which needs no
+terminal at all:
+
+```python
+exec(open("/path/to/UniNet/scripts/UniNetSlicer.py").read())
 ```
 
-That builds and installs into Slicer's `site-packages`, then verifies the import.
-Afterwards, `import uninet` works in any Slicer module.
+```
+[uninet] UniNet is not installed for this Slicer; installing it now
+[uninet] uninet 0.2.0 is ready in this Slicer
+[uninet] for a check at every start, run:  UniNetSlicer.install_startup_hook()
+```
+
+**Or from a terminal**, with any Python (it drives Slicer's for you):
+
+```bash
+python3 scripts/UniNetSlicer.py              # find Slicer, install, verify
+python3 scripts/UniNetSlicer.py status       # what is installed, and where
+python3 scripts/UniNetSlicer.py hook         # check at every Slicer start
+```
+
+**Or with no checkout at all**, pasted into Slicer's Python console:
+
+```python
+import urllib.request as u; exec(u.urlopen("https://raw.githubusercontent.com/"
+    "JonasMht/UniNet/main/scripts/UniNetSlicer.py").read().decode())
+```
+
+Afterwards `import uninet` works in any Slicer module. The first install builds
+from source and takes a few minutes; every one after that is a second, because
+the build leaves a wheel in the cache.
+
+### Giving it to somebody else
+
+```bash
+python3 scripts/UniNetSlicer.py wheel
+#   ~/.cache/uninet/wheels/uninet-0.2.0-cp39-cp39-linux_x86_64.whl
+```
+
+Put that file next to `UniNetSlicer.py` (or point `UNINET_WHEEL` at it) and
+anyone with the same Slicer version installs in seconds **with no compiler, no
+checkout and no network**. ZeroMQ, czmq and zyre are compiled into it — those
+are the ones nobody has — so the other machine needs nothing but its own C++
+runtime.
+
+> Everything else the build happens to find is still linked normally, and a
+> library in `/usr/local` or a home directory is one *your* machine has and the
+> next one does not. `wheel` runs `ldd` over what it built and says so when that
+> happens; the answer is to build the wheel on a plain machine or in a
+> container. A wheel built here on a developer box needed `liblz4.so.1` from
+> `/usr/local/lib`, which is exactly the case this warns about.
+
+### The startup check
+
+`hook` adds a small managed block to Slicer's `.slicerrc.py`:
+
+```
+python3 scripts/UniNetSlicer.py hook       # add it
+python3 scripts/UniNetSlicer.py unhook     # remove it, leaving your own rc alone
+```
+
+At every start it checks that UniNet is importable, which costs a few
+milliseconds when it is. When it is not — a fresh machine, or a Slicer that was
+just updated to a new version with an empty `site-packages` — it asks whether to
+install it, shows the build as it happens, and never blocks startup on its own.
+"Don't ask again" is remembered in Slicer's settings.
+
+The block is written where Slicer will actually read it: Slicer prefers
+`.slicerrc.py` in its own directory over the one in your home directory, and a
+hook written to the wrong one never runs and never says so.
+
+### From your own module
+
+If you ship a Slicer module that needs UniNet, let it install itself rather than
+putting instructions in a README:
+
+```python
+import UniNetSlicer                      # add scripts/ to sys.path, or vendor the file
+uninet = UniNetSlicer.ensure()           # a few ms when it is already there
+```
 
 <details>
-<summary>Why a script rather than three cmake flags</summary>
+<summary>What it is doing, and why any of it is necessary</summary>
 
-A Slicer binary release has three traps, and the script handles all of them:
+A Slicer binary release has four traps. Every one of them produces an error that
+names something other than the actual problem:
 
 1. **It ships no Python headers.** `lib/Python/include/python3.9` contains only
-   `pyconfig.h`; everything else is missing, so a build fails on `Python.h: No
-   such file or directory`. The script fetches the matching CPython source
-   headers and combines them with Slicer's own `pyconfig.h`. Slicer's Python is
-   stock CPython, so upstream headers match exactly.
-2. **`python-real` cannot run standalone.** It needs `PYTHONHOME` and
-   `LD_LIBRARY_PATH` pointing into the Slicer tree.
-3. **pybind11 finds the wrong interpreter.** Passing `-DPython3_EXECUTABLE`
-   is not enough for the legacy `FindPythonLibsNew` path Slicer's pybind11
-   takes; it silently picks up the system Python and produces an extension
-   Slicer cannot load.
+   `pyconfig.h`, so any build fails on `Python.h: No such file or directory`.
+   The installer fetches the matching CPython source headers from python.org and
+   combines them with Slicer's own `pyconfig.h`. Slicer's Python is stock
+   CPython, so the upstream headers match exactly.
+2. **Slicer's Python remembers the compiler it was built with.** On the Linux
+   releases that is `/opt/rh/devtoolset-7/root/usr/bin/gcc`, exported as `CC`
+   during the build, and cmake stops with *"Could not find compiler set in
+   environment variable CC"* naming a path that exists on nobody's machine.
+3. **pybind11 reads a different variable than scikit-build-core sets.** The
+   include directory has to arrive as `Python_INCLUDE_DIR`, `Python3_INCLUDE_DIR`
+   *and* as a `-I` flag, because different Slicer releases ship different
+   pybind11 versions that read different ones.
+4. **`python-real` cannot run standalone**, and the environment inside a running
+   Slicer is not the environment a compiler should inherit — `LD_LIBRARY_PATH`
+   points into Slicer's own libraries. The installer builds in the environment
+   Slicer was *started* from.
 
-Verified against Slicer 5.8.1 (Python 3.9.10) on Linux.
+It also always builds ZeroMQ, czmq and zyre from source rather than linking the
+system ones. That costs a few minutes once. Linked against a system `libzyre`,
+the wheel imports only on machines that also have it, and the error lands on a
+colleague, at import time, reading `libzyre.so.2: cannot open shared object
+file` about a library they never installed.
+
+Where things go: the wheel, the fetched headers and the build tree live in
+`~/.cache/uninet` (`%LOCALAPPDATA%\UniNet\cache` on Windows), never inside
+Slicer — a Slicer update replaces that directory wholesale. If Slicer's
+`site-packages` is not writable (a system-wide install under `/opt` or
+`Program Files`), UniNet is installed into that cache instead, and the startup
+hook is what puts it on Slicer's path.
+
+Environment overrides, all optional: `UNINET_SLICER`, `UNINET_SOURCE`,
+`UNINET_WHEEL`, `UNINET_CACHE`, `UNINET_CC`/`UNINET_CXX`.
+
+Tested against Slicer 5.8.1 (Python 3.9.10) on Linux, including on a machine
+with no cmake, no zlib headers and no ZeroMQ (`scripts/test-slicer-setup.sh`,
+and `python/tests/test_slicer_setup.py` for the decisions it makes).
+`scripts/build-for-slicer.sh` still works and now forwards here.
 </details>
 
 > **If a rebuild seems to change nothing**, an older copy in Slicer's
-> `site-packages` is shadowing yours. The script replaces that directory
-> wholesale for exactly this reason.
+> `site-packages` is shadowing yours. An install made by copying files there by
+> hand has no metadata for pip to find, so the installer removes such a copy
+> before installing over it.
 
-Then, in your Slicer module:
+### The shape a Slicer module wants
 
 ```python
 import collections, qt, uninet
@@ -983,8 +1095,10 @@ tests/            test_roundtrip (codec) · test_network · test_cabi (C)
                   docker/ : Linux and Windows-cross test images
 tools/            uninet_discover.cpp
 scripts/          test-all.sh · test-interop.sh · demo.sh · bootstrap.{sh,ps1}
-                  build-for-android.sh · build-for-slicer.sh
+                  UniNetSlicer.py: install UniNet into 3D Slicer, from anywhere
+                  build-for-android.sh · build-for-slicer.sh (-> UniNetSlicer.py)
                   test-on-android.sh · test-on-emulator.sh · check-il2cpp.sh
+                  test-slicer-setup.sh
 docs/             PROTOCOL.md · unity/UniNetMulticastLock.cs
 ```
 
@@ -1058,6 +1172,8 @@ PYTHONPATH=python pytest python/tests -v       # Python
 | `test_network` | real discovery, departure, broadcast, unicast, realm isolation, concurrent publish/subscribe, large-payload transfer |
 | `test_cabi` | the C ABI compiled **as C**: the exact path C#/Unity takes, including UTF-8, null-safety and pointer lifetimes |
 | `python/tests` | dict round-trips, numpy volumes, discovery, wildcards, threading, error handling |
+| `python/tests/test_slicer_setup.py` | every decision the Slicer installer makes - which Slicer, which interpreter, which wheel, what goes into `.slicerrc.py`, what the build environment ends up being - against a directory shaped like a Slicer install. Needs no Slicer, no compiler and no network |
+| `scripts/test-slicer-setup.sh` | the same installer against a **real Slicer**: install from nothing, import, two Slicer interpreters exchanging a message, the cached-wheel reinstall, the startup hook surviving a real Slicer start, and that the extension needs no system ZeroMQ |
 | `scripts/test-interop.sh` | a C++, a Python and a C# node in one realm, each verifying the others' payloads field by field |
 | `scripts/test-on-android.sh` | the codec, the C ABI and discovery running **on a connected Android device**, plus two nodes finding each other across the USB cable with no network |
 | `scripts/test-on-emulator.sh` | the same suite on an **emulator**, so it runs with no hardware attached. Downloads the emulator and a system image once (~6 GB) into a scratch directory, boots headless, tests, shuts down. It is real Android userspace, but x86_64 and with emulated Wi-Fi, so it cannot answer questions about the multicast filtering that needs a `MulticastLock`: use a physical device for those |

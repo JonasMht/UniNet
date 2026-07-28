@@ -33,9 +33,68 @@ if(UNINET_WERROR)
     endif()
 endif()
 
+# ── Dependencies. Everything below is found when the machine has it and built
+# from source when it does not, so that a machine with a compiler and nothing
+# else can build UniNet. That is not a theoretical machine: it is what a 3D
+# Slicer user's computer looks like.
+
+include(FetchContent)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+    set(UNINET_FC_EXCLUDE EXCLUDE_FROM_ALL)
+else()
+    set(UNINET_FC_EXCLUDE "")
+endif()
+# Add a fetched dependency WITHOUT building anything we do not link against.
+#
+# czmq and zyre ship auxiliary executables (czmq_selftest, zsp, zmakecert,
+# test_randof, zyre_selftest, zpinger, perf_local, perf_remote). UniNet uses
+# none of them, but a plain FetchContent_MakeAvailable builds them all, and they
+# link against whatever their own build happened to detect: curl's transitive
+# dependencies, OpenLDAP, and so on. On a machine missing any of those, the
+# build fails on a tool nobody asked for.
+#
+# EXCLUDE_FROM_ALL makes every target in the subdirectory build only if
+# something actually depends on it. We link zyre-static, which pulls
+# czmq-static and libzmq-static; nothing else is ever compiled.
+macro(uninet_add_dependency name)
+    FetchContent_Declare(${name} ${ARGN})
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+        FetchContent_MakeAvailable(${name})
+    else()
+        # EXCLUDE_FROM_ALL only became a FetchContent_Declare option in 3.28.
+        FetchContent_GetProperties(${name})
+        if(NOT ${name}_POPULATED)
+            FetchContent_Populate(${name})
+            add_subdirectory(${${name}_SOURCE_DIR} ${${name}_BINARY_DIR} EXCLUDE_FROM_ALL)
+        endif()
+    endif()
+endmacro()
+
 # ── Compression tiers. zlib is the always-available baseline; liblz4 is the
 # faster tier and is auto-detected. Neither is required to use the network.
-find_package(ZLIB REQUIRED)
+find_package(ZLIB QUIET)
+if(NOT ZLIB_FOUND)
+    # Was REQUIRED, which made this the one dependency that could still stop a
+    # build dead. Every desktop has libz; almost none has its headers, because
+    # they are a separate package (zlib1g-dev) that nothing pulls in. So the
+    # first thing a clean machine hit was "Could NOT find ZLIB", for the tier
+    # that is meant to be the one that is always there.
+    message(STATUS "UniNet: zlib headers not found, building zlib from source.")
+    uninet_add_dependency(zlib
+        GIT_REPOSITORY https://github.com/madler/zlib.git
+        GIT_TAG v1.3.1
+        GIT_SHALLOW TRUE
+        ${UNINET_FC_EXCLUDE})
+    # zlib sets its include directories with include_directories(), which is
+    # directory-scoped and therefore invisible to anything linking the target.
+    # Without these two lines the build fails on "zlib.h: No such file or
+    # directory" in UniNet's own sources. The binary directory comes first: the
+    # zlib build generates zconf.h there and renames the source-tree copy out of
+    # the way.
+    target_include_directories(zlibstatic INTERFACE
+        "${zlib_BINARY_DIR}" "${zlib_SOURCE_DIR}")
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+endif()
 
 option(UNINET_LZ4 "Use liblz4 (faster compression tier)" ON)
 if(UNINET_LZ4)
@@ -114,42 +173,11 @@ if(UNINET_SYSTEM_ZYRE)
         message(STATUS "UniNet: using system zyre ${ZYRE_VERSION}.")
     endif()
 endif()
-# Add a fetched dependency WITHOUT building anything we do not link against.
-#
-# czmq and zyre ship auxiliary executables (czmq_selftest, zsp, zmakecert,
-# test_randof, zyre_selftest, zpinger, perf_local, perf_remote). UniNet uses
-# none of them, but a plain FetchContent_MakeAvailable builds them all, and they
-# link against whatever their own build happened to detect: curl's transitive
-# dependencies, OpenLDAP, and so on. On a machine missing any of those, the
-# build fails on a tool nobody asked for.
-#
-# EXCLUDE_FROM_ALL makes every target in the subdirectory build only if
-# something actually depends on it. We link zyre-static, which pulls
-# czmq-static and libzmq-static; nothing else is ever compiled.
-macro(uninet_add_dependency name)
-    FetchContent_Declare(${name} ${ARGN})
-    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
-        FetchContent_MakeAvailable(${name})
-    else()
-        # EXCLUDE_FROM_ALL only became a FetchContent_Declare option in 3.28.
-        FetchContent_GetProperties(${name})
-        if(NOT ${name}_POPULATED)
-            FetchContent_Populate(${name})
-            add_subdirectory(${${name}_SOURCE_DIR} ${${name}_BINARY_DIR} EXCLUDE_FROM_ALL)
-        endif()
-    endif()
-endmacro()
 
 if(NOT UNINET_ZYRE_TARGET)
     # Ubuntu and Debian do not package Zyre, so this is the normal path there.
     # libzmq and czmq usually ARE packaged; use them when present and fetch only
     # what is missing, which is both faster and far less fragile.
-    include(FetchContent)
-    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
-        set(UNINET_FC_EXCLUDE EXCLUDE_FROM_ALL)
-    else()
-        set(UNINET_FC_EXCLUDE "")
-    endif()
     # Belt and braces alongside EXCLUDE_FROM_ALL: these stop the dependencies
     # registering their own ctest entries, so `ctest` shows UniNet's tests only.
     set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
