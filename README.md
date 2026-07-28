@@ -76,6 +76,7 @@ One codec, one wire format, three languages. See [Data](#data-json-in-cbor-on-th
 - [Command-line tools](#command-line-tools)
 - [Performance](#performance)
 - [How it works](#how-it-works)
+- [Who uses it](#who-uses-it)
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 
@@ -1006,6 +1007,33 @@ so a receiver can filter without decompressing. See
 file-level copyleft: you can link them into a proprietary application and ship
 it; only modifications to *their* source files must be published. UniNet itself
 is MIT.
+
+---
+
+## Who uses it
+
+Three applications, and what each one uses. The table is here because "we
+migrated to UniNet" and "we use UniNet" are different claims, and the gap
+between them is where the surprises live.
+
+| | ThermoNav Server (C++) | ThermoNav Slicer (Python) | ThermoNav MR (C#/Quest) |
+|---|---|---|---|
+| join / publish / subscribe | yes | yes | yes |
+| presence callbacks | yes | yes | yes |
+| peer list | yes | yes | yes |
+| `describe()` | yes | yes | yes |
+| `last_error()` | yes | yes | yes |
+| `diagnostics()` | yes | yes | yes |
+| crash log | yes | yes | yes |
+| network list | yes | yes | yes |
+| dropped-event warning | n/a | yes | yes |
+| `Blob` for large payloads | no | no | no |
+
+The one real gap is `Blob`. Volumes and meshes still travel through
+`publish()` as one large message, which works and is what the applications
+did before. Moving them to `Blob` would give progress reporting and chunking,
+but it changes the bytes on the wire between two applications at once, so it
+is a coordinated change rather than a local one.
 
 ---
 
