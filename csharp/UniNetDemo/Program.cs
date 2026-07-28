@@ -49,7 +49,7 @@ class Program
 
         Console.WriteLine($"\n{server.Describe()}");
         foreach (var p in server.Peers())
-            Console.WriteLine($"  · {p.Name}  {p.Host}  {p.Role}");
+            Console.WriteLine($"  · {p.Name}  {p.Endpoint}  {p.Role}");
 
         // Broadcast, then a private message to one device.
         Console.WriteLine();

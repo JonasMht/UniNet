@@ -2,7 +2,7 @@
 # Prove the C# binding survives IL2CPP, which is what Unity uses for Android and
 # iOS. Run it after touching anything in csharp/UniNet/.
 #
-#     ./scripts/check-il2cpp.sh [/path/to/Unity/Editor/version]
+#     ./scripts/check-il2cpp.sh [/path/to/Unity/Hub/Editor/<version>]
 #
 # WHAT THIS CATCHES. IL2CPP is ahead-of-time: no JIT, so a managed method that
 # native code calls back into must exist as a real function at compile time. Only

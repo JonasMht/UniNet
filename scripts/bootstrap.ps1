@@ -1,7 +1,13 @@
 # UniNet: one-command bootstrap for Windows (PowerShell).
 #
-# Installs vcpkg (if absent), uses it for zlib + lz4, then configures, builds,
-# and tests UniNet with Visual Studio's CMake. Safe to re-run.
+# Installs vcpkg (if absent) and uses it for zlib, lz4, ZeroMQ, czmq and zyre,
+# then configures, builds and tests UniNet with Visual Studio's CMake. Safe to
+# re-run.
+#
+# CMake finds zlib and lz4 through vcpkg's CMake config files. It looks for
+# ZeroMQ, czmq and zyre through pkg-config, which Windows does not have, so
+# those three are built from source on the first configure even though vcpkg
+# installed them - a few minutes once, then cached in the build tree.
 #
 #   .\scripts\bootstrap.ps1                # C++ lib + tests + C ABI
 #   .\scripts\bootstrap.ps1 -BuildPython   # also build the Python extension

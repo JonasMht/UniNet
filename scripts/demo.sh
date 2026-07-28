@@ -15,8 +15,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Find the built demo, wherever the user configured their build directory.
 DEMO=""
+# "$HERE"/build*/ used to be in this list, which picked up whatever old binary
+# happened to be in a build2/ or build-android/ tree next door - an odd failure
+# to debug, because the demo that ran was not the code you just changed.
 for candidate in "$HERE/build/uninet-demo" "$HERE/build/uninet_demo" \
-                 "$HERE"/build*/uninet-demo; do
+                 "$HERE/build/Release/uninet-demo.exe" "$HERE/build-native/uninet-demo"; do
     [ -x "$candidate" ] && { DEMO="$candidate"; break; }
 done
 if [ -z "$DEMO" ]; then

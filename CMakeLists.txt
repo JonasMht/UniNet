@@ -37,6 +37,19 @@ endif()
 # from source when it does not, so that a machine with a compiler and nothing
 # else can build UniNet. That is not a theoretical machine: it is what a 3D
 # Slicer user's computer looks like.
+#
+# UNINET_SELF_CONTAINED goes one step further and ignores what the machine has,
+# building every dependency from source. That is what you want for a library you
+# are going to COPY somewhere else - a Unity plugin, a wheel for a colleague, a
+# .dll next to a C# application. Linked against the build machine's ZeroMQ, the
+# result loads only on machines that have the same one, and the failure lands on
+# the person you gave it to, at startup, naming a library they never installed.
+# scripts/build-native.sh and the 3D Slicer installer both use it.
+option(UNINET_SELF_CONTAINED
+       "Build every dependency from source, so the result can be copied to another machine" OFF)
+if(UNINET_SELF_CONTAINED)
+    set(UNINET_SYSTEM_ZYRE OFF CACHE BOOL "" FORCE)
+endif()
 
 include(FetchContent)
 if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
@@ -72,7 +85,9 @@ endmacro()
 
 # ── Compression tiers. zlib is the always-available baseline; liblz4 is the
 # faster tier and is auto-detected. Neither is required to use the network.
-find_package(ZLIB QUIET)
+if(NOT UNINET_SELF_CONTAINED)
+    find_package(ZLIB QUIET)
+endif()
 if(NOT ZLIB_FOUND)
     # Was REQUIRED, which made this the one dependency that could still stop a
     # build dead. Every desktop has libz; almost none has its headers, because
@@ -97,7 +112,7 @@ if(NOT ZLIB_FOUND)
 endif()
 
 option(UNINET_LZ4 "Use liblz4 (faster compression tier)" ON)
-if(UNINET_LZ4)
+if(UNINET_LZ4 AND NOT UNINET_SELF_CONTAINED)
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(LZ4 IMPORTED_TARGET liblz4)
@@ -113,6 +128,8 @@ if(UNINET_LZ4)
     else()
         set(UNINET_LZ4_TARGET PkgConfig::LZ4)
     endif()
+endif()
+if(UNINET_LZ4)
     if(NOT LZ4_FOUND)
         # Built from source rather than "falling back to zlib", because the tier
         # is not a local choice: it is on the wire. A sender uses the best tier
@@ -197,6 +214,21 @@ if(NOT UNINET_ZYRE_TARGET)
     set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(WITH_PERF_TOOL  OFF CACHE BOOL "" FORCE)
     set(WITH_LIBBSD     OFF CACHE BOOL "" FORCE)
+    # czmq and libzmq enable each optional system integration they can FIND, so
+    # what a from-source build links against depends on what happens to be
+    # installed on the machine doing the building. On a developer box that added
+    # libsystemd (and with it libgcrypt, liblzma, libzstd, libgpg-error),
+    # libuuid and GnuTLS to a library whose whole purpose is to be copied
+    # elsewhere. UniNet uses none of them: no journald logging, no libuuid UUIDs,
+    # no WSS, no curl.
+    set(CZMQ_WITH_SYSTEMD       OFF CACHE BOOL "" FORCE)
+    set(CZMQ_WITH_UUID          OFF CACHE BOOL "" FORCE)
+    set(CZMQ_WITH_LIBCURL       OFF CACHE BOOL "" FORCE)
+    set(CZMQ_WITH_NSS           OFF CACHE BOOL "" FORCE)
+    set(CZMQ_WITH_LIBMICROHTTPD OFF CACHE BOOL "" FORCE)
+    set(CZMQ_WITH_LZ4           OFF CACHE BOOL "" FORCE)
+    set(WITH_TLS                OFF CACHE BOOL "" FORCE)
+    set(WITH_LIBSODIUM          OFF CACHE BOOL "" FORCE)
     set(CZMQ_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(CZMQ_BUILD_STATIC ON  CACHE BOOL "" FORCE)
     set(ZYRE_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -373,7 +405,21 @@ if(UNINET_BUILD_CABI)
     target_link_libraries(uninet_c PRIVATE uninet_warnings)
     set_target_properties(uninet_c PROPERTIES
         POSITION_INDEPENDENT_CODE ON
-        OUTPUT_NAME uninet_c)
+        OUTPUT_NAME uninet_c
+        # MSVC exports nothing from a DLL unless each symbol is marked or this is
+        # set, so an MSVC build produced a uninet_c.dll with an empty export
+        # table: every [DllImport] in the C# binding fails on Windows, and
+        # test_cabi cannot even link (no import library is generated). ELF and
+        # Mach-O export by default, which is why it was never seen on Linux.
+        WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    if(WIN32)
+        # Without this, MinGW names the file libuninet_c.dll. .NET's DllImport
+        # adds the "lib" prefix when probing on Unix but NOT on Windows, and
+        # Unity matches the plugin file name exactly, so libuninet_c.dll is a
+        # library nothing can load. MSVC already uses no prefix; this makes both
+        # toolchains produce the uninet_c.dll that Native.cs asks for.
+        set_target_properties(uninet_c PROPERTIES PREFIX "")
+    endif()
 
     # Compiled as C, so it proves the header really is C-consumable and the
     # extern "C" surface links the way P/Invoke will call it.

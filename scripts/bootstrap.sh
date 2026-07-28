@@ -8,8 +8,9 @@
 #   ./scripts/bootstrap.sh --python  # also build the Python extension (needs pip)
 #
 # Overrides (env):
-#   UNINET_SKIP_DEPS=1   don't touch the system package manager
-#   UNINET_NO_PYTHON=1   never build the Python extension
+#   UNINET_SKIP_DEPS=1     don't touch the system package manager
+#   UNINET_NO_PYTHON=1     never build the Python extension
+#   UNINET_BUILD_PYTHON=1  same as passing --python
 set -euo pipefail
 
 usage() {
@@ -24,9 +25,14 @@ Zyre is not packaged by Ubuntu, Debian or Fedora, so CMake fetches and builds it
 on the first configure. Nothing else is needed from you.
 USAGE
 }
+BUILD_PYTHON="${UNINET_BUILD_PYTHON:-0}"
 for arg in "$@"; do
     case "$arg" in
         -h|--help) usage; exit 0 ;;
+        --python)  BUILD_PYTHON=1 ;;
+        # An unknown flag used to be ignored in silence, so a typo like
+        # --with-python built without the extension and said nothing.
+        *) echo "unknown option: $arg" >&2; echo; usage; exit 2 ;;
     esac
 done
 
@@ -34,8 +40,6 @@ done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-BUILD_PYTHON=0
-[[ "${1:-}" == "--python" || "${UNINET_BUILD_PYTHON:-0}" == "1" ]] && BUILD_PYTHON=1
 
 say() { printf '\033[1;34m▶ %s\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m✓ %s\033[0m\n' "$*"; }

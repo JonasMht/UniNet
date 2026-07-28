@@ -24,6 +24,13 @@ import UniNetSlicer as setup                                # noqa: E402
 
 WINDOWS = sys.platform == "win32"
 
+# This file promises to need no compiler. Four tests do need one - they ask the
+# installer which compiler it would use - so they say so rather than failing on
+# a machine that has none.
+import shutil                                              # noqa: E402
+NO_COMPILER = not any(shutil.which(name) for name in ("cc", "gcc", "clang", "cl.exe"))
+needs_compiler = pytest.mark.skipif(NO_COMPILER, reason="no C compiler on this machine")
+
 
 # ── a Slicer that is not Slicer ──────────────────────────────────────────────
 
@@ -265,6 +272,7 @@ def test_the_parent_interpreters_environment_does_not_leak(monkeypatch):
     assert "LD_LIBRARY_PATH" not in env
 
 
+@needs_compiler
 @pytest.mark.skipif(WINDOWS, reason="MSVC is found by cmake, not by CC")
 def test_the_compiler_is_named_explicitly(monkeypatch):
     """Slicer's Python remembers being built by devtoolset-7 and exports that
@@ -275,6 +283,7 @@ def test_the_compiler_is_named_explicitly(monkeypatch):
     assert Path(chosen["CXX"]).exists()
 
 
+@needs_compiler
 @pytest.mark.skipif(WINDOWS, reason="MSVC is found by cmake, not by CC")
 def test_the_compiler_can_be_chosen(monkeypatch):
     monkeypatch.setenv("UNINET_CC", "/usr/bin/clang")
@@ -289,6 +298,7 @@ def test_headers_shipped_by_slicer_are_used_unchanged(tmp_path):
     assert setup.ensure_headers({"include": str(include), "version": "3.9.10"}) is None
 
 
+@needs_compiler
 def test_the_header_shim_reaches_every_variable_cmake_might_read(tmp_path, monkeypatch, fake_slicer):
     """pybind11 reads Python3_INCLUDE_DIR, scikit-build-core sets
     Python_INCLUDE_DIR from sysconfig (which is the directory that is missing
@@ -305,6 +315,7 @@ def test_the_header_shim_reaches_every_variable_cmake_might_read(tmp_path, monke
     assert str(setup.cache_dir()) in env["SKBUILD_BUILD_DIR"]
 
 
+@needs_compiler
 def test_the_wheel_is_built_to_be_portable(monkeypatch, fake_slicer):
     """A wheel linked against a system libzyre imports only on machines that
     also have it, and the error arrives on the colleague's machine, naming a
@@ -312,10 +323,11 @@ def test_the_wheel_is_built_to_be_portable(monkeypatch, fake_slicer):
     ZeroMQ, czmq and zyre, which still ask for compatibility with CMake 2.8."""
     monkeypatch.setattr(setup, "ensure_headers", lambda info: None)
     env = setup._build_env(fake_slicer / "bin" / "PythonSlicer", {"xy": "3.9"})
-    assert "-DUNINET_SYSTEM_ZYRE=OFF" in env["CMAKE_ARGS"]
+    assert "-DUNINET_SELF_CONTAINED=ON" in env["CMAKE_ARGS"]
     assert env["SKBUILD_CMAKE_VERSION"] == ">=3.15,<4"
 
 
+@needs_compiler
 def test_an_existing_cmake_args_is_added_to_not_replaced(tmp_path, monkeypatch, fake_slicer):
     shim = tmp_path / "shim"
     shim.mkdir()

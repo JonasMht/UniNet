@@ -4,8 +4,8 @@
 // before they ever reach userspace, to save power. An app only sees them while it
 // holds a WifiManager.MulticastLock (which in turn needs the manifest permission
 // android.permission.CHANGE_WIFI_MULTICAST_STATE: see
-// Assets/Plugins/Android/AndroidManifest.xml). Unicast is unaffected, so the NATS
-// connection to the broker works with or without this.
+// Assets/Plugins/Android/AndroidManifest.xml). Unicast is unaffected, so messages
+// between two peers that have already found each other flow with or without this.
 //
 // WHAT BREAKS WITHOUT IT: UniNet's Zyre/ZRE discovery beacon is a UDP broadcast on
 // port 5670. On the headset the beacons are silently dropped on the way in, so the
@@ -15,6 +15,17 @@
 // below: if the lock cannot be taken we want it in the log, not in silence.
 //
 // This is a no-op in the Editor and on desktop, where the OS does no such filtering.
+//
+// WHERE THIS FILE GOES: it is part of the C# binding, but it is Unity-only - it
+// uses UnityEngine and AndroidJavaObject, so it cannot be compiled by
+// UniNet.csproj (which is a plain netstandard2.1 library and is what `dotnet
+// build` compiles). It therefore lives in this Unity/ subdirectory, which the
+// csproj excludes and a Unity project picks up: copying csharp/UniNet/ into
+// Assets/Plugins/UniNet/ brings it along with everything else.
+// It stays in the global namespace on purpose, not in `namespace UniNet`: it is
+// called as UniNetMulticastLock.Acquire() from MonoBehaviours that may not have
+// `using UniNet;`, and moving it would break every existing call site for a
+// cosmetic gain.
 using UnityEngine;
 using System;
 

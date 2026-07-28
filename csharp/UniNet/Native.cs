@@ -46,10 +46,69 @@ namespace UniNet
 
     internal static class Native
     {
-        // The library name without prefix or extension: .NET appends
-        // "lib"/".so"/".dll"/".dylib" per platform. In Unity, put the built
-        // library in Assets/Plugins/<platform>/.
+        // The library name without prefix or extension. .NET probes several
+        // spellings around it, and they are NOT symmetrical: on Linux and macOS
+        // it tries both uninet_c.so and libuninet_c.so, but on Windows only
+        // uninet_c.dll - it never prepends "lib" there. A MinGW build, which
+        // names its output libuninet_c.dll by default, is therefore a library
+        // Windows .NET cannot find; CMakeLists.txt sets PREFIX "" so that both
+        // MSVC and MinGW produce the name written here.
+        //
+        // Where the file has to be: see the "Native library" section of the
+        // README. In short - next to the executable for .NET (the csproj copies
+        // it there from a CMake build tree), Assets/Plugins/x86_64/ for a Unity
+        // desktop build, Assets/Plugins/Android/libs/arm64-v8a/ for Quest.
         internal const string Lib = "uninet_c";
+
+        // ── the first call, and the error it gives when the library is absent ──
+        //
+        // Without this, the first thing a C# user sees is .NET's own
+        // DllNotFoundException: twelve probe paths and no indication that
+        // UniNet is a C++ library that has to be built, or where to put it.
+        private static int _probed;
+
+        internal static void EnsureLoadable()
+        {
+            if (System.Threading.Volatile.Read(ref _probed) != 0) return;
+            try
+            {
+                uninet_protocol_version();
+            }
+            catch (DllNotFoundException inner)
+            {
+                throw new DllNotFoundException(NotFoundMessage(), inner);
+            }
+            catch (EntryPointNotFoundException inner)
+            {
+                // An MSVC DLL built before WINDOWS_EXPORT_ALL_SYMBOLS loads and
+                // then has no symbols in it, which reads as a different failure.
+                throw new EntryPointNotFoundException(
+                    "UniNet: uninet_c was found but exports nothing. It was built without "
+                    + "exported symbols - rebuild it from this version of the sources.", inner);
+            }
+            System.Threading.Volatile.Write(ref _probed, 1);
+        }
+
+        private static string NotFoundMessage()
+        {
+            bool windows = Environment.OSVersion.Platform != PlatformID.Unix
+                        && Environment.OSVersion.Platform != PlatformID.MacOSX;
+            string file = windows ? "uninet_c.dll" : "libuninet_c.so (libuninet_c.dylib on macOS)";
+            string built = windows ? @"build\Release\uninet_c.dll" : "build/libuninet_c.so";
+            string pathVar = windows ? "PATH" : "LD_LIBRARY_PATH";
+            return
+                "UniNet's native library (" + file + ") was not found.\n\n"
+                + "UniNet is a C++ library with a C# binding on top, so that file has to be\n"
+                + "built and put where the runtime looks:\n\n"
+                + "  1. Build it:   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
+                + "                 cmake --build build -j\n"
+                + "                 (it lands in " + built + ")\n"
+                + "  2. Put it next to your executable - referencing csharp/UniNet/UniNet.csproj\n"
+                + "     does that for you - or set " + pathVar + " to the directory holding it.\n"
+                + "     In Unity it belongs in Assets/Plugins/x86_64/ (desktop) or\n"
+                + "     Assets/Plugins/Android/libs/arm64-v8a/ (Quest).\n\n"
+                + "The README's \"Native library\" section has the full table.";
+        }
 
         // ── callbacks ──
         // Invoked from UniNet's network thread. See Session for the main-thread
@@ -172,6 +231,16 @@ namespace UniNet
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uninet_peers_has_header(IntPtr peers, int index,
             [MarshalAs(UnmanagedType.LPUTF8Str)] string key);
+
+        // Walking the headers, rather than asking for keys you already knew:
+        // without these two, a C# consumer could publish a custom header and
+        // never read one back.
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_peers_header_count(IntPtr peers, int index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr uninet_peers_header_key(IntPtr peers, int index,
+                                                              int headerIndex);
 
         // ── session lifetime ──
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

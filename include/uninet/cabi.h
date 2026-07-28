@@ -201,6 +201,12 @@ const char*     uninet_peers_header(uninet_peers_t* peers, int index, const char
 // 1 when the peer advertised `key` at all. Without this an absent header and an
 // empty one both read as "".
 int             uninet_peers_has_header(uninet_peers_t* peers, int index, const char* key);
+// Every header the peer advertised, by position. Reading a header needed its
+// key, and there was no way to learn a key you had not agreed on beforehand:
+// a C# or Unity consumer could publish custom headers and never read one back,
+// while C++ and Python walk peer.headers directly. This is that walk.
+int             uninet_peers_header_count(uninet_peers_t* peers, int index);
+const char*     uninet_peers_header_key(uninet_peers_t* peers, int index, int header_index);
 void            uninet_peers_free(uninet_peers_t* peers);
 
 // ── data conversion ───────────────────────────────────────────────────────

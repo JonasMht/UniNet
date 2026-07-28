@@ -152,7 +152,10 @@ print(UniNetSlicer.slicerrc_path(pathlib.Path(sys.argv[2])))
 PY
 )"
 # What the file looks like with no hook in it. Taken with the hook stripped, so
-# that running this twice compares against the same thing both times.
+# that running this twice compares against the same thing both times - and
+# remembered, so a hook that was already there is put back at the end.
+HAD_HOOK=no
+[ -f "$RCFILE" ] && grep -q "UniNet (managed by" "$RCFILE" && HAD_HOOK=yes
 "$PYTHON" "$SETUP" unhook --slicer "$SLICER" >/dev/null 2>&1
 BEFORE=""
 [ -f "$RCFILE" ] && BEFORE="$(cat "$RCFILE")"
@@ -200,6 +203,13 @@ if [ -z "$BEFORE" ]; then
 else
     [ "$(cat "$RCFILE")" = "$BEFORE" ] && pass "unhook leaves the rc file as it was" \
         || fail "unhook changed something else in $RCFILE"
+fi
+
+# Put back the hook if the developer running this had one. Testing something
+# should not quietly turn off the thing being tested.
+if [ "$HAD_HOOK" = yes ]; then
+    "$PYTHON" "$SETUP" hook --slicer "$SLICER" >/dev/null 2>&1
+    printf '  (restored the startup hook you already had)\n'
 fi
 
 # ── 6. the wheel, the thing you hand to a colleague ──────────────────────────

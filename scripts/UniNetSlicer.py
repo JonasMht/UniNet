@@ -52,6 +52,7 @@ Environment overrides, all optional:
   UNINET_WHEEL    a .whl file, or a directory to search for one
   UNINET_CACHE    where headers, wheels and build trees are kept
   UNINET_CC       the C compiler to build with (UNINET_CXX for C++)
+  UNINET_GIT_URL  where to clone UniNet from, when there is no checkout
 """
 from __future__ import annotations
 
@@ -83,7 +84,10 @@ __all__ = [
 #: Bump together with pyproject.toml.
 REQUIRED_VERSION = "0.2.0"
 
-GIT_URL = "https://github.com/JonasMht/UniNet.git"
+#: Where to clone from when no checkout is on the machine. UniNet may well live
+#: somewhere else - an internal forge, a fork - and nothing else in this file
+#: assumes GitHub, so this is a setting rather than a constant.
+GIT_URL = os.environ.get("UNINET_GIT_URL") or "https://github.com/JonasMht/UniNet.git"
 CPYTHON_SOURCE = "https://www.python.org/ftp/python/{v}/Python-{v}.tgz"
 
 # The marker pair that delimits our block in .slicerrc.py. Everything between
@@ -363,12 +367,19 @@ def child_env(extra: dict | None = None) -> dict:
     return env
 
 
-def installed(pyslicer: Path) -> tuple[str | None, str | None]:
+def installed(pyslicer: Path, load: bool = False) -> tuple[str | None, str | None]:
     """The UniNet already visible to Slicer: its version and where it is.
 
     Checked in a subprocess rather than by importing here, because "here" may
-    be a completely different interpreter, and because importing uninet starts
-    nothing but still loads a shared library we may be about to replace."""
+    be a completely different interpreter, and because importing uninet loads a
+    shared library we may be about to replace.
+
+    `load` decides how hard the check is. Finding the module is enough to answer
+    "is something installed"; it is NOT enough to answer "does it work", because
+    an extension built against the wrong Python, or missing a library it needs,
+    is found and then fails on import. After installing, ask the harder
+    question - otherwise a broken install reports success and the startup hook
+    stays quiet about it for ever."""
     code = (
         "import importlib.util, sys\n"
         "for extra in sys.argv[1:]:\n"
@@ -376,6 +387,8 @@ def installed(pyslicer: Path) -> tuple[str | None, str | None]:
         "spec = importlib.util.find_spec('uninet')\n"
         "if spec is None:\n"
         "    raise SystemExit\n"
+        + ("import uninet\n" if load else "")
+        +
         "try:\n"
         "    import importlib.metadata as m; version = m.version('uninet')\n"
         "except Exception:\n"
@@ -394,12 +407,19 @@ def installed(pyslicer: Path) -> tuple[str | None, str | None]:
     )
     lines = result.stdout.strip().splitlines()
     if result.returncode != 0 or not lines:
+        if load and result.returncode != 0 and result.stderr.strip():
+            # The import failed rather than the module being absent. That is a
+            # different problem and the message says which.
+            raise SetupError(
+                "UniNet is installed in this Slicer but cannot be imported:\n"
+                + result.stderr.strip().splitlines()[-1]
+            )
         return None, None
     return lines[0], (lines[1] if len(lines) > 1 else None)
 
 
-def installed_version(pyslicer: Path) -> str | None:
-    return installed(pyslicer)[0]
+def installed_version(pyslicer: Path, load: bool = False) -> str | None:
+    return installed(pyslicer, load)[0]
 
 
 def _version_tuple(version: str) -> tuple:
@@ -623,13 +643,14 @@ def _build_env(pyslicer: Path, info: dict) -> dict:
     # machine with no cmake installed was the one that failed. Pin it.
     extra["SKBUILD_CMAKE_VERSION"] = ">=3.15,<4"
 
-    # Build ZeroMQ, czmq and zyre from source even when the machine has them
+    # Build every dependency from source even when the machine has it
     # installed. It costs a few minutes once, and it is what makes the wheel
     # worth passing around: linked against a system libzyre it loads only on
     # machines that also have that library, and the failure lands on the
     # colleague, at import time, reading "libzyre.so.2: cannot open shared
-    # object file" about a library they never heard of.
-    cmake_args = ["-DUNINET_SYSTEM_ZYRE=OFF"]
+    # object file" about a library they never heard of. The same goes for the
+    # optional libraries czmq links when it finds them - libsystemd and friends.
+    cmake_args = ["-DUNINET_SELF_CONTAINED=ON"]
     if shim:
         # Both spellings on purpose: scikit-build-core passes Python_INCLUDE_DIR
         # from sysconfig (which points at the directory with only pyconfig.h in
@@ -655,7 +676,7 @@ def make_wheel(slicer: Path | str | None = None, source: Path | str | None = Non
     The wheel lands in the cache and is picked up automatically by any later
     install on this machine; copy it next to this file to make installs on
     other machines instant."""
-    home = Path(slicer) if slicer else find_slicer()
+    home = find_slicer(str(slicer) if slicer else None)
     pyslicer = _python_slicer(home)
     if pyslicer is None:
         raise SetupError(f"{home} has no bin/PythonSlicer")
@@ -759,7 +780,9 @@ def install(slicer: Path | str | None = None, source: Path | str | None = None,
 
     Order of preference: already installed, then a prebuilt wheel, then a build
     from source. Nothing is compiled that does not have to be."""
-    home = Path(slicer) if slicer else find_slicer()
+    # find_slicer even when given a path: it is what turns "that is not a Slicer"
+    # into a message that says what was looked for and how to say it properly.
+    home = find_slicer(str(slicer) if slicer else None)
     pyslicer = _python_slicer(home)
     if pyslicer is None:
         raise SetupError(f"{home} has no bin/PythonSlicer")
@@ -781,7 +804,7 @@ def install(slicer: Path | str | None = None, source: Path | str | None = None,
         say(f"installing {wheel.name}")
         if _install_wheel(pyslicer, info, wheel, on_line) == 0:
             result.update(action="installed from wheel", wheel=str(wheel))
-            result["version"] = installed_version(pyslicer)
+            result["version"] = installed_version(pyslicer, load=True)
             return result
         warn("that wheel does not fit this Slicer's Python; building from source")
 
@@ -792,7 +815,7 @@ def install(slicer: Path | str | None = None, source: Path | str | None = None,
     if _install_wheel(pyslicer, info, wheel, on_line) != 0:
         raise SetupError("the freshly built wheel could not be installed")
     result.update(action="built and installed", wheel=str(wheel))
-    result["version"] = installed_version(pyslicer)
+    result["version"] = installed_version(pyslicer, load=True)
     return result
 
 
@@ -813,7 +836,7 @@ def _install_wheel(pyslicer: Path, info: dict, wheel: Path, on_line=None) -> int
 
 
 def uninstall(slicer: Path | str | None = None) -> None:
-    home = Path(slicer) if slicer else find_slicer()
+    home = find_slicer(str(slicer) if slicer else None)
     pyslicer = _python_slicer(home)
     if pyslicer is None:
         raise SetupError(f"{home} has no bin/PythonSlicer")
@@ -879,7 +902,7 @@ def _strip_hook(text: str) -> str:
 
 def install_startup_hook(slicer: Path | str | None = None) -> Path:
     """Run the check every time Slicer starts. Idempotent."""
-    home = Path(slicer) if slicer else find_slicer()
+    home = find_slicer(str(slicer) if slicer else None)
     pyslicer = _python_slicer(home)
     if pyslicer is None:
         raise SetupError(f"{home} has no bin/PythonSlicer")
@@ -910,7 +933,7 @@ def install_startup_hook(slicer: Path | str | None = None) -> Path:
 
 
 def remove_startup_hook(slicer: Path | str | None = None) -> None:
-    home = Path(slicer) if slicer else find_slicer()
+    home = find_slicer(str(slicer) if slicer else None)
     rcfile = slicerrc_path(home)
     if not rcfile.is_file():
         say("nothing to remove")
@@ -1084,7 +1107,7 @@ def ensure_at_startup() -> None:
 def status(slicer: Path | str | None = None) -> dict:
     """Everything worth knowing, in one place, for when something is wrong."""
     report: dict = {}
-    home = Path(slicer) if slicer else find_slicer()
+    home = find_slicer(str(slicer) if slicer else None)
     report["slicer"] = str(home)
     pyslicer = _python_slicer(home)
     if pyslicer is None:
@@ -1218,7 +1241,10 @@ def _console_entry() -> None:
         warn(str(exc))
         return
     say(f"uninet {module.__version__} is ready in this Slicer")
-    say("for a check at every start, run:  UniNetSlicer.install_startup_hook()")
+    # NOT "UniNetSlicer.install_startup_hook()": exec() puts these functions
+    # straight into the console's namespace, there is no module object of that
+    # name, and the qualified call raises NameError.
+    say("for a check at every start, run:  install_startup_hook()")
 
 
 if __name__ == "__main__":

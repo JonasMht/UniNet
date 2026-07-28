@@ -591,6 +591,13 @@ PYBIND11_MODULE(_uninet, m) {
         .def_readwrite("endpoint", &SessionConfig::endpoint)
         .def_readwrite("advertised_endpoint", &SessionConfig::advertised_endpoint)
         .def_readwrite("compression", &SessionConfig::compression)
+        // Bound because the README presents reconnect-after-a-network-change as
+        // how UniNet behaves generally, and Python could neither turn it off nor
+        // change how often it looks.
+        .def_readwrite("auto_reconnect", &SessionConfig::auto_reconnect,
+                       "Rejoin by itself after the network changes (default true).")
+        .def_readwrite("reconnect_poll_ms", &SessionConfig::reconnect_poll_ms,
+                       "How often to check the interfaces, in ms (default 2000).")
         .def_readwrite("headers", &SessionConfig::headers);
 
     py::class_<Session>(m, "Session", "A device on the network. Created by uninet.join().")

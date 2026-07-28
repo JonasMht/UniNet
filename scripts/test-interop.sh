@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # UniNet cross-language interop test.
 #
-#     ./scripts/test-interop.sh
+#     ./scripts/test-interop.sh [seconds]      # how long to run, default 25
 #
 # Starts a C++, a Python and a C# node in one private realm. Each publishes an
 # identical payload and verifies what the others send. It passes only if every

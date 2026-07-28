@@ -99,6 +99,8 @@ def join(
     advertised_endpoint: str = "",
     headers: Optional[Dict[str, str]] = None,
     compression: Optional[Compression] = None,
+    auto_reconnect: bool = True,
+    reconnect_poll_ms: int = 2000,
 ) -> Session:
     """Join the network under ``name`` and return a :class:`Session`.
 
@@ -128,6 +130,10 @@ def join(
             returns a fresh dict on every access.
         compression: wire compression. The default is the fastest tier the build
             has.
+        auto_reconnect: rejoin by itself when the network changes underneath a
+            running session (a cable, a new Wi-Fi, a VPN coming up). On by
+            default; pass False to handle it yourself.
+        reconnect_poll_ms: how often to look at the interfaces, in milliseconds.
 
     The returned session is also a context manager::
 
@@ -146,6 +152,8 @@ def join(
     cfg.advertised_endpoint = advertised_endpoint
     if headers:
         cfg.headers = dict(headers)
+    cfg.auto_reconnect = auto_reconnect
+    cfg.reconnect_poll_ms = reconnect_poll_ms
     if compression is not None:
         cfg.compression = compression   # bound now; this used to raise
     session = _join(name, cfg)

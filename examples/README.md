@@ -4,14 +4,19 @@ Every example runs on **two terminals on one machine, or two machines on the
 same network**: the commands are identical either way, because nothing is
 configured. Start them in any order.
 
+**Every command on this page is run from the repository root**, so paths like
+`build/uninet-demo` and `examples/python/basic.py` work as written.
+
 Build the C++ ones first:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ```
 
-For the Python ones: `pip install .` (or `export PYTHONPATH=python` after a
-`-DUNINET_BUILD_PYTHON=ON` build).
+For the Python ones: `pip install .`, or `export PYTHONPATH=$PWD/python` after
+that build - the extension is built by default whenever pybind11 is present.
+The mesh and volume examples also need numpy (`pip install numpy`); UniNet
+itself does not.
 
 ---
 
@@ -20,8 +25,7 @@ For the Python ones: `pip install .` (or `export PYTHONPATH=python` after a
 | | |
 |---|---|
 | **C++** | [`demo.cpp`](demo.cpp) → `build/uninet-demo "Laptop"` |
-| **Python** | [`python/basic.py`](python/basic.py) → `python3 basic.py alice` |
-| **C#** | [`../csharp/UniNetDemo`](../csharp/UniNetDemo) → `dotnet run` |
+| **Python** | [`python/basic.py`](python/basic.py) → `python3 examples/python/basic.py alice` |
 
 ```bash
 # terminal 1                      # terminal 2
@@ -29,7 +33,19 @@ build/uninet-demo "Laptop"        build/uninet-demo "Headset" --role headset
 ```
 
 Each prints the other arriving, then they exchange messages. Nobody types an
-address. `../scripts/demo.sh` runs three at once.
+address. `./scripts/demo.sh` runs three at once.
+
+The **C# demo** ([`../csharp/UniNetDemo`](../csharp/UniNetDemo)) is one process
+rather than two: it joins twice, in a realm private to that run, exchanges
+messages between the two and exits. One terminal is all it needs:
+
+```bash
+dotnet run --project csharp/UniNetDemo
+```
+
+It needs the native library, which the project copies out of `build/` for you -
+so build first. If you moved the build elsewhere, say where:
+`dotnet run --project csharp/UniNetDemo -p:UniNetNativeDir=/path/to/it`.
 
 ---
 
@@ -64,7 +80,7 @@ the same and verifies a SHA-256 that travels as metadata.
 
 ```bash
 # terminal 1                                     # terminal 2
-python3 python/volume_transfer.py receive        python3 python/volume_transfer.py send
+python3 examples/python/volume_transfer.py receive   python3 examples/python/volume_transfer.py send
 ```
 
 A 256×256×256 float32 volume: 67 MB, with its shape, dtype and voxel spacing
@@ -93,7 +109,7 @@ of the transfer.
 
 ```bash
 # terminal 1                                   # terminal 2
-python3 python/mesh_transfer.py receive        python3 python/mesh_transfer.py send
+python3 examples/python/mesh_transfer.py receive   python3 examples/python/mesh_transfer.py send
 ```
 
 Streams a 4096-vertex surface at 20 Hz. Vertices are floats and take the
@@ -131,8 +147,27 @@ build/uninet-discover --once
 It lists what it can see and, when it sees nothing, says what to check. The
 common causes are guest Wi-Fi with client isolation, a firewall blocking UDP
 5670, and a machine with several networks where discovery picked the wrong one
-(pass `iface=`).
+(pass `--iface` to the C++ examples, `interface=` to `uninet.join()` in Python).
 
 Examples use their own subjects and the default realm. If a real session is
 running on the same network and you want the examples kept apart from it, pass
 `--realm` (C++) or `realm=` (Python).
+
+---
+
+## Android / Meta Quest
+
+[`android/`](android) is a complete demo app - a UniNet node running on the
+device, discovering desktop peers over Wi-Fi or a USB cable. It is built in
+three steps, from the repository root:
+
+```bash
+./scripts/build-for-android.sh          # the native library, arm64-v8a
+./examples/android/build.sh --install   # the APK, installed on a connected device
+./examples/android/usb-peer.sh          # a desktop peer reachable over USB
+```
+
+[`jni/uninet_jni.cpp`](android/jni/uninet_jni.cpp) is the JNI bridge, and
+[`AndroidManifest.xml`](android/AndroidManifest.xml) shows the multicast
+permission that Wi-Fi discovery needs on Android. See the README's
+"Unity / Meta Quest" section for the same thing inside Unity.
