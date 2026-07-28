@@ -56,7 +56,11 @@ public:
     // Returns false when the message could not be handed to the transport -
     // not connected, or the transport refused it. A void return made a publish
     // during a network outage indistinguishable from a successful one.
-    bool publish(const std::string& subject, Cbor data, const std::string& dst_uuid = "");
+    /// @param mid  a message id to carry, so a relay can recognise this exact
+    ///             message coming back around. Empty mints a fresh one.
+    ///             Preserving it across a hop is what makes bridging loop-free.
+    bool publish(const std::string& subject, Cbor data, const std::string& dst_uuid = "",
+                 const std::string& mid = "");
 
     // Subscribe to a subject (exact or wildcard). The handler receives accepted
     // envelopes only (own echoes and non-matching dst_uuids are filtered).
@@ -83,7 +87,10 @@ private:
     std::mutex handlers_mu_;
     std::vector<std::pair<std::string, DataHandler>> handlers_;
 
-    void ensure_watching_();   // create the internal ">" subscription once the transport is up
+    // Create the internal ">" subscription once the transport is up.
+    void ensure_watching_();
+    // A fresh message id, unique among messages in flight.
+    static std::string next_mid_();
     void on_raw_(const std::string& subject, const Bytes& payload);
 };
 

@@ -96,6 +96,17 @@ bool Node::retry_connect(int attempts, double base_sleep_s) {
     return false;
 }
 
+// Short and unique enough: 8 random bytes as hex, from a generator seeded once
+// per thread. It only has to be unique among messages in flight, not globally.
+std::string Node::next_mid_() {
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    const uint64_t v = rng();
+    static const char* hex = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int i = 0; i < 16; ++i) out[size_t(i)] = hex[(v >> (i * 4)) & 0xF];
+    return out;
+}
+
 std::string Node::uuid() const {
     std::lock_guard<std::mutex> lk(uuid_mu_);
     return uuid_;
@@ -107,11 +118,17 @@ void Node::set_uuid(std::string uuid) {
     uuid_ = std::move(uuid);
 }
 
-bool Node::publish(const std::string& subject, Cbor data, const std::string& dst_uuid) {
+bool Node::publish(const std::string& subject, Cbor data, const std::string& dst_uuid,
+                   const std::string& mid) {
     if (!transport_ || !transport_->connected()) return false;
     Envelope env;
     env.compression = compress_;
     env.src_uuid = uuid();
+    // Every message carries one. It costs about fourteen bytes and it is what
+    // lets a bridge tell "this is the message I already relayed" from "this is
+    // an identical message sent twice", which is not decidable from the bytes:
+    // two identical publishes frame to identical bytes.
+    env.mid = mid.empty() ? next_mid_() : mid;
     env.dst_uuid = dst_uuid;
     env.subject = subject;
     env.data = std::move(data);

@@ -346,6 +346,21 @@ add_test(NAME network COMMAND test_network)
 # loaded CI box before calling it a failure.
 set_tests_properties(network PROPERTIES TIMEOUT 90 LABELS uninet)
 
+# Bridging two networks that cannot see each other. Needs the helper binary, so
+# it is passed the one just built rather than whatever is on PATH.
+add_executable(test_bridge tests/test_bridge.cpp)
+target_link_libraries(test_bridge PRIVATE uninet uninet_warnings)
+add_test(NAME bridge COMMAND test_bridge $<TARGET_FILE:uninet_bridge>)
+set_tests_properties(bridge PROPERTIES TIMEOUT 180 LABELS uninet)
+
+# Leaks and scale: the two failures a few seconds of testing cannot see. Longer
+# than the others by design, so it carries its own label as well and can be run
+# on its own with `ctest -L soak`.
+add_executable(test_soak tests/test_soak.cpp)
+target_link_libraries(test_soak PRIVATE uninet uninet_warnings)
+add_test(NAME soak COMMAND test_soak)
+set_tests_properties(soak PROPERTIES TIMEOUT 600 LABELS "uninet;soak")
+
 # Diagnostics and crash reporting. The crash test really does crash a child
 # process, because a crash handler tested any other way is a crash handler
 # nobody has run.
@@ -382,6 +397,13 @@ set_target_properties(benchmark_network PROPERTIES OUTPUT_NAME uninet-benchmark)
 # ── The CLI and the demo ──
 # uninet-discover answers "what is on my network?"; uninet-demo is two or more
 # devices talking with nothing configured. See scripts/demo.sh.
+# The bridge helper. A separate process because czmq's interface selection is
+# process-global, so one node per network means one process per network. See the
+# header of the source for the measurement behind that.
+add_executable(uninet_bridge tools/uninet_bridge.cpp)
+target_link_libraries(uninet_bridge PRIVATE uninet uninet_warnings ${UNINET_ZYRE_TARGET})
+set_target_properties(uninet_bridge PROPERTIES OUTPUT_NAME uninet-bridge)
+
 add_executable(uninet_discover tools/uninet_discover.cpp)
 target_link_libraries(uninet_discover PRIVATE uninet uninet_warnings)
 set_target_properties(uninet_discover PROPERTIES OUTPUT_NAME uninet-discover)

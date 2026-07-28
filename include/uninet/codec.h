@@ -30,6 +30,16 @@ struct Envelope {
     std::string dst_uuid;          // "" = broadcast; else targeted unicast (wire: header)
     std::string subject;           // e.g. "domain.D1" (wire: core)
     Cbor data;                     // arbitrary message payload (wire: core)
+
+    // A unique id for this message, used to recognise one that has come back
+    // around. Empty on a message that was never given one.
+    //
+    // It rides in the CBOR core rather than the binary header on purpose. The
+    // header's layout is positional, so inserting a field would make every
+    // older reader mis-parse the payload; a CBOR map simply ignores a key it
+    // does not know, which from_cbor already does. So a peer built before this
+    // existed reads these messages correctly and just cannot deduplicate.
+    std::string mid;               // (wire: core, optional)
 };
 
 // Core (subject + data + version) <-> Cbor. Routing (src/dst/compression) is NOT

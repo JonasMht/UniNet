@@ -60,6 +60,36 @@ struct SessionConfig {
     bool auto_reconnect = true;
     int  reconnect_poll_ms = 2000;
 
+    // ── bridging separate networks ──
+    // A machine with more than one network can put a node on each and pass
+    // messages between them, so devices that cannot see each other still talk:
+    // a phone on Wi-Fi and a headset on a USB tether, a laptop straddling a lab
+    // switch and a hotspot.
+    //
+    // ON by default. Be aware of what that means: it JOINS networks that were
+    // separate. Traffic from one becomes visible on the other, for every device
+    // in the same realm. On a machine that sits between a hospital network and
+    // a private one, that may not be what you want, and allow_bridging(false)
+    // is a single setting.
+    //
+    // Only networks that discovery would use are bridged: never a container
+    // bridge, a VPN tunnel or loopback. A realm still isolates completely, so
+    // two setups sharing a bridged machine remain invisible to each other.
+    bool allow_bridging = true;
+
+    // Include a USB-tethered phone or headset among the networks bridged.
+    // Separate from allow_bridging because a tether is the case people most
+    // want and the least likely to be sensitive: it is a cable someone plugged
+    // in deliberately, not a network the machine happens to be on.
+    bool allow_usb = true;
+
+    // Where the helper lives. Empty looks next to the running executable and
+    // then on PATH. One process per extra network is not an implementation
+    // detail that could be avoided: czmq's interface selection is a
+    // process-global, so a second node in this process cannot be put on a
+    // different network. See tools/uninet_bridge.cpp.
+    std::string bridge_helper;
+
     // Extra key/value advertised to every peer, readable via Peer::header().
     std::map<std::string, std::string> headers;
 };
@@ -93,7 +123,13 @@ public:
     // False when the message could not be sent (not on the network). Ignoring
     // the result is fine for fire-and-forget telemetry; check it when the
     // message matters.
-    bool publish(const std::string& subject, Cbor data, const std::string& dst = "");
+    /// @param mid  carry an existing message id instead of minting one. Only a
+    ///             relay needs this: preserving the id across a hop is what
+    ///             lets the far side recognise a message that has come back
+    ///             around, and two identical publishes are otherwise
+    ///             indistinguishable from one that looped.
+    bool publish(const std::string& subject, Cbor data, const std::string& dst = "",
+                 const std::string& mid = "");
     // Same, from JSON text: the identical bytes reach the wire either way.
     bool publish_json(const std::string& subject, const std::string& json,
                       const std::string& dst = "");
@@ -140,8 +176,28 @@ public:
     Node& node();
     ZyreTransport& transport();
 
+    /// Number of extra networks this session is bridging onto. Zero when
+    /// bridging is off, when there is only one usable network, or in gossip
+    /// mode. Worth showing: it is the difference between "the other device is
+    /// not there" and "it is there, on a network nothing is carrying".
+    size_t bridge_count() const;
+
+    /// Adopt a bridge this process did not start.
+    ///
+    /// Session starts a helper per extra INTERFACE by itself. This is for the
+    /// cases that enumeration cannot cover: a second network identified by
+    /// beacon port rather than interface, a helper started under a debugger, or
+    /// one running on another machine and reached over tcp. `endpoint` is a
+    /// ZeroMQ endpoint this session will BIND as a PAIR; the helper connects to
+    /// it with --link.
+    ///
+    /// Returns false if the endpoint could not be bound.
+    bool adopt_bridge(const std::string& label, const std::string& endpoint);
+
 private:
     Session();
+    void stop_bridges();
+    void start_relay();
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

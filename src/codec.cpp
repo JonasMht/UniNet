@@ -45,10 +45,14 @@ void set_compression_level(int level) {
 
 // ── envelope core <-> cbor (subject/data/version only; routing is in the header) ──
 Cbor to_cbor(const Envelope& e) {
-    return Cbor::map()
+    Cbor m = Cbor::map()
         .set("pv", Cbor::uint(e.protocol_version))
         .set("sub", Cbor::text(e.subject))
         .set("data", e.data);
+    // Only when there is one, so a message that needs no deduplication costs
+    // no extra bytes.
+    if (!e.mid.empty()) m.set("mid", Cbor::text(e.mid));
+    return m;
 }
 
 std::optional<Envelope> from_cbor(const Cbor& c) {
@@ -58,6 +62,7 @@ std::optional<Envelope> from_cbor(const Cbor& c) {
     e.protocol_version = c.has("pv") ? uint16_t(c["pv"].as_uint()) : 1;
     e.subject  = c["sub"].as_text();
     e.data     = c["data"];
+    if (c.has("mid")) e.mid = c["mid"].as_text();
     // src_uuid / dst_uuid / compression are filled by unframe() from the header.
     return e;
 }
