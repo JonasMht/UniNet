@@ -65,6 +65,7 @@ One codec, one wire format, three languages. See [Data](#data-json-in-cbor-on-th
 - [Why it exists](#why-it-exists)
 - [Install](#install)
 - [Quick start: C++](#quick-start-c) · [Python](#quick-start-python) · [C#](#quick-start-c-1)
+- [Native library: where the .so / .dll / .dylib goes](#native-library-where-the-so--dll--dylib-goes)
 - [Data: JSON in, CBOR on the wire, JSON out](#data-json-in-cbor-on-the-wire-json-out)
 - [Large payloads: files, volumes, meshes](#large-payloads-files-volumes-meshes)
 - [What each language can do](#what-each-language-can-do)
@@ -150,7 +151,19 @@ What CMake reports tells you which path it took:
 > used to be the first thing a clean machine saw — for the compression tier that
 > is meant to be the one that is always available. It is fetched now too.
 
-To force a source build of everything, pass `-DUNINET_SYSTEM_ZYRE=OFF`.
+To force a source build of everything, pass `-DUNINET_SELF_CONTAINED=ON`. Do
+that for anything you are going to copy to another machine - see
+[Native library](#native-library-where-the-so--dll--dylib-goes).
+
+**One command instead of all of the above**, on Linux and macOS:
+
+```bash
+./scripts/bootstrap.sh            # prerequisites, build, tests
+./scripts/bootstrap.sh --python   # ...and the Python extension
+```
+
+and `.\scripts\bootstrap.ps1` on Windows, which clones vcpkg for the
+dependencies.
 
 ### Build
 
@@ -172,11 +185,16 @@ That produces:
 | artifact | what it is |
 |---|---|
 | `build/libuninet.a` | the C++ library |
-| `build/libuninet_c.so` | the C ABI, for C# / Unity / any FFI |
+| `build/libuninet_c.so` · `.dylib` · `build\Release\uninet_c.dll` | the C ABI, for C# / Unity / any FFI. See [Native library](#native-library-where-the-so--dll--dylib-goes) |
 | `python/uninet/_uninet*.so` | the Python extension, importable with `PYTHONPATH=python` |
 | `build/uninet-discover` | CLI: what is on my network? |
 | `build/uninet-demo` | the demo (see [Command-line tools](#command-line-tools)) |
+| `build/uninet-file-transfer` | send a file, no address needed |
 | `build/uninet-benchmark` | end-to-end network benchmark |
+| `build/uninet-benchmark-codec` | codec-only benchmark |
+
+On Windows with MSVC every one of those lives under `build\Release\` and the
+executables end in `.exe`: MSVC is a multi-config generator.
 
 **Python:**
 
@@ -192,6 +210,8 @@ pip install .
 | `UNINET_BUILD_PYTHON` | ON | build the Python extension; skipped with a note if pybind11 is absent |
 | `UNINET_LZ4` | ON | LZ4 compression tier, auto-detected |
 | `UNINET_SYSTEM_ZYRE` | ON | use an installed zyre; OFF forces a source build |
+| `UNINET_SELF_CONTAINED` | OFF | build **every** dependency from source, so the result can be copied to another machine |
+| `UNINET_WERROR` | OFF | warnings are errors (what CI uses) |
 
 ---
 
@@ -324,7 +344,7 @@ net.Subscribe("domain.>", msg => Console.WriteLine($"{msg.Subject}: {msg.Json}")
 net.Publish("domain.D1", "{\"code\":\"update\",\"n\":42}");
 
 foreach (var p in net.Peers())
-    Console.WriteLine($"{p.Name}  {p.Host}  {p.Role}");
+    Console.WriteLine($"{p.Name}  {p.Endpoint}  {p.Role}");
 ```
 
 **In Unity, one extra line is required.** Messages arrive on a background
@@ -336,10 +356,85 @@ void Update() => net.Update();     // delivers callbacks on the main thread
 ```
 
 Outside Unity (a console app or service) pass `marshalToCaller: false` to get
-events immediately on the network thread instead.
+events immediately on the network thread instead. The example above, run in a
+console app without either of those, receives nothing at all: the events are
+sitting in a queue nobody drains.
 
-Place the native library where .NET can find it: next to the executable, or in
-`Assets/Plugins/<platform>/` for Unity.
+> The queue is bounded at 100,000 pending events. A consumer that never calls
+> `Update()` does not grow without limit; the oldest events are dropped.
+
+**Run the demo**, which is that code with two sessions in one process:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+dotnet run --project csharp/UniNetDemo
+```
+
+The project copies the native library out of `build/` for you. Where that file
+goes for your own application, and for Unity, is the next section.
+
+---
+
+## Native library: where the .so / .dll / .dylib goes
+
+C# does not talk to the network itself. It calls a small C library compiled from
+the C++ core - `libuninet_c.so`, `uninet_c.dll` or `libuninet_c.dylib` - and that
+file has to exist somewhere the runtime looks. This is the one part of using
+UniNet from C# that is not automatic, so here is all of it.
+
+**What a build produces**, from `cmake -S . -B build && cmake --build build -j`:
+
+| platform | file | where the build puts it |
+|---|---|---|
+| Linux | `libuninet_c.so` | `build/` |
+| macOS | `libuninet_c.dylib` | `build/` |
+| Windows (MSVC) | `uninet_c.dll` | `build\Release\` (MSVC is multi-config) |
+| Android/Quest | `libuninet_c.so` | `build-android/`, via `./scripts/build-for-android.sh` |
+
+`./scripts/build-native.sh` builds just that library, with every dependency
+compiled in so it can be copied to another machine, and prints the table below
+filled in for what it built.
+
+**Where to put it:**
+
+| consumer | where it goes |
+|---|---|
+| A .NET project referencing `csharp/UniNet/UniNet.csproj` | **nothing to do** - the project copies it next to your executable. Point it elsewhere with `-p:UniNetNativeDir=/path/to/it` |
+| A published .NET app (`dotnet publish`) | next to the `.exe` / app `.dll` |
+| Any other .NET app | the output directory (`bin/Debug/net8.0/`), or a directory on `LD_LIBRARY_PATH` (Linux), `DYLD_LIBRARY_PATH` (macOS), `PATH` (Windows) |
+| **Unity, desktop** (Editor and standalone player) | `Assets/Plugins/x86_64/libuninet_c.so` · `Assets/Plugins/x86_64/uninet_c.dll` · `Assets/Plugins/x86_64/libuninet_c.dylib`. In the Inspector set the platform to Standalone and the CPU to x86_64 |
+| **Unity, Quest / Android** | `Assets/Plugins/Android/libs/arm64-v8a/libuninet_c.so` |
+| Python | not applicable - the Python package contains its own extension |
+
+Three things about this that cost people an afternoon:
+
+1. **The file name matters, exactly.** `[DllImport("uninet_c")]` makes .NET look
+   for `libuninet_c.so` on Linux, `libuninet_c.dylib` on macOS and
+   `uninet_c.dll` on Windows - note that it does **not** add the `lib` prefix on
+   Windows. A MinGW build calls its output `libuninet_c.dll` by default, which
+   nothing can then load; UniNet's CMake sets the prefix to empty on Windows so
+   both MSVC and MinGW produce the right name. Unity matches file names the same
+   way.
+2. **The Unity Editor loads a native plugin once per session.** Replacing the
+   file while the Editor is open changes nothing until you restart it. This is
+   the "my rebuild did nothing" of Unity plugins.
+3. **A library built here is not automatically portable there.** A normal build
+   links whatever the build machine has - the ZeroMQ stack, and whatever else
+   czmq found. Copy that file to a machine without them and it fails to load,
+   naming a library the user never installed. `./scripts/build-native.sh`
+   (or `-DUNINET_SELF_CONTAINED=ON`) compiles ZeroMQ, czmq, zyre, lz4 and zlib
+   into the library so nothing but the C++ runtime has to travel with it, and
+   it runs `ldd` afterwards to tell you if anything else still does. Verified by
+   loading such a build on a machine with no ZeroMQ installed at all.
+
+   The C++ runtime is the remaining constraint, and it is a one-way one: a
+   library built against glibc 2.39 loads on 2.39 and newer, not on 2.35. If you
+   hand out binaries, build them on the oldest system you support (a container is
+   the easy way), not on the newest.
+
+If it is still not found, the error says what to do: UniNet catches .NET's
+`DllNotFoundException` and replaces the list of probe paths with the build
+command and this table.
 
 ---
 
@@ -469,9 +564,25 @@ same way, over the same wire bytes, in all three.
 | compression choice | ● | ● | ● |
 | gossip / non-multicast links | ● | ● | ● |
 | realm isolation | ● | ● | ● |
+| tuning `Blob` (chunk size, limits) | ● | ● | |
+| listing this machine's interfaces | ● | ● | |
+| turning auto-reconnect off / tuning it | ● | ● | |
 
-`publish` reports whether the message could be sent in all three. A transfer
+The last three rows are the honest edges of "at parity": C# gets UniNet's
+defaults for them and cannot change them, because the C ABI it goes through does
+not carry those settings yet. Everything above the line is genuinely the same in
+all three.
+
+`publish` tells you when a message could not be sent: C++ and Python return
+false, C# throws. A transfer
 that cannot start says so rather than returning a plausible-looking id.
+
+**Names that are the same thing in each language**, since they are the ones
+people mix up: `peer.host()` / `peer.host` / `Peer.Host` is the machine's
+hostname, and `peer.endpoint()` / `peer.endpoint` / `Peer.Endpoint` is its IP
+address without the port. (Before 0.2.1 the C# `Peer.Host` returned the address,
+so the same name meant two different things - if you print an address from C#,
+it is `Endpoint`.)
 
 ---
 
@@ -653,11 +764,30 @@ congested Wi-Fi, which can matter for large transfers.
 
 ## Unity / Meta Quest
 
+**Desktop first** (the Editor, and Windows/Linux/macOS players): build the
+native library and copy it into `Assets/Plugins/x86_64/`.
+
+```bash
+./scripts/build-native.sh --into /path/to/UnityProject/Assets/Plugins/x86_64
+```
+
+In the Inspector set the platform to Standalone and the CPU to x86_64. The
+Editor loads a native plugin once per session, so restart it after replacing the
+file. Full table: [Native library](#native-library-where-the-so--dll--dylib-goes).
+
+**Then Android**, which is a different library for a different CPU - a Quest
+build needs both if you also run in the Editor.
+
 **1. Build the native library for Android ARM64:**
 
 ```bash
-./scripts/build-for-android.sh          # uses the NDK bundled with Unity
+./scripts/build-for-android.sh                      # finds Unity's own NDK
+./scripts/build-for-android.sh /path/to/android-ndk # or say where it is
 ```
+
+The no-argument form looks in `~/Unity/Hub/Editor/*/Editor/Data/PlaybackEngines/AndroidPlayer/NDK`,
+which is where the Linux Unity Hub puts it. Anywhere else - macOS, Windows, a
+standalone NDK - pass the path; the script says so if it finds nothing.
 
 It cross-compiles zlib, libzmq, czmq, zyre and UniNet for `arm64-v8a` (API 24)
 and prints where to copy the result:
@@ -671,9 +801,19 @@ is all that ships: `libz`, `liblog`, `libm`, `libdl`, `libc` and nothing else. I
 the Unity inspector leave the platform set to Android / ARM64, which the
 `arm64-v8a` directory name already implies.
 
-**2. Add the C# sources.** Copy `csharp/UniNet/*.cs` into `Assets/Plugins/UniNet/`,
-or reference the built assembly. They compile unchanged under both scripting
+**2. Add the C# sources.** Copy the whole of `csharp/UniNet/` into
+`Assets/Plugins/UniNet/` - the `.cs` files and the `Unity/` subdirectory with
+the Android multicast lock in it. They compile unchanged under both scripting
 backends and both API compatibility levels; nothing needs to be edited for Unity.
+
+If you would rather reference a built assembly than the sources, build it with
+
+```bash
+dotnet build csharp/UniNet -c Release      # bin/Release/netstandard2.1/UniNet.dll
+```
+
+and drop that DLL in `Assets/Plugins/`. The sources are the simpler route in a
+Unity project, and the only one that gives you the multicast lock.
 
 > **IL2CPP is supported, and that is not automatic.** Android and iOS players are
 > always IL2CPP, which is ahead-of-time: it has no JIT, so a method that native
@@ -707,7 +847,8 @@ In `Assets/Plugins/Android/AndroidManifest.xml`:
 It is a normal install-time permission, no runtime request needed.
 
 **4. Acquire the lock before joining, release it on teardown.** A ready-made
-helper lives at `docs/unity/UniNetMulticastLock.cs`; copy it into your project.
+helper lives at `csharp/UniNet/Unity/UniNetMulticastLock.cs`, which is inside the
+directory you copy anyway (step 2), so there is nothing extra to fetch.
 
 **5. Wire it into a MonoBehaviour:**
 
@@ -771,7 +912,7 @@ exec(open("/path/to/UniNet/scripts/UniNetSlicer.py").read())
 ```
 [uninet] UniNet is not installed for this Slicer; installing it now
 [uninet] uninet 0.2.0 is ready in this Slicer
-[uninet] for a check at every start, run:  UniNetSlicer.install_startup_hook()
+[uninet] for a check at every start, run:  install_startup_hook()
 ```
 
 **Or from a terminal**, with any Python (it drives Slicer's for you):
@@ -782,12 +923,18 @@ python3 scripts/UniNetSlicer.py status       # what is installed, and where
 python3 scripts/UniNetSlicer.py hook         # check at every Slicer start
 ```
 
-**Or with no checkout at all**, pasted into Slicer's Python console:
+**Or with no checkout at all**, pasted into Slicer's Python console — this one
+needs the repository to be reachable over HTTPS from that machine, so it works
+once UniNet is published (or against an internal URL: set `UNINET_GIT_URL`, and
+fetch the file from wherever you host it):
 
 ```python
 import urllib.request as u; exec(u.urlopen("https://raw.githubusercontent.com/"
     "JonasMht/UniNet/main/scripts/UniNetSlicer.py").read().decode())
 ```
+
+If the repository is private, copy `scripts/UniNetSlicer.py` to the machine (it
+is one dependency-free file) and use the first form instead.
 
 Afterwards `import uninet` works in any Slicer module. The first install builds
 from source and takes a few minutes; every one after that is a second, because
@@ -826,11 +973,36 @@ At every start it checks that UniNet is importable, which costs a few
 milliseconds when it is. When it is not — a fresh machine, or a Slicer that was
 just updated to a new version with an empty `site-packages` — it asks whether to
 install it, shows the build as it happens, and never blocks startup on its own.
-"Don't ask again" is remembered in Slicer's settings.
+The dialog's three buttons are **Yes**, **No** (ask again next time) and
+**Ignore** (never ask again for this Slicer). To undo that last one, from
+Slicer's Python console:
+
+```python
+slicer.app.settings().setValue("UniNet/skipStartupInstall", "false")
+```
 
 The block is written where Slicer will actually read it: Slicer prefers
 `.slicerrc.py` in its own directory over the one in your home directory, and a
 hook written to the wrong one never runs and never says so.
+
+### Undoing it, and other Slicers
+
+```bash
+python3 scripts/UniNetSlicer.py uninstall            # remove UniNet from Slicer
+python3 scripts/UniNetSlicer.py unhook               # stop checking at startup
+```
+
+With more than one Slicer installed, every command takes `--slicer`, and
+`status` says which one it picked:
+
+```bash
+python3 scripts/UniNetSlicer.py status --slicer ~/Documents/Slicer-5.6.2-linux-amd64
+python3 scripts/UniNetSlicer.py install --slicer ~/Documents/Slicer-5.8.1-linux-amd64
+```
+
+Without it, the newest installation found is used and the others are listed, so
+you can see that a choice was made. `UNINET_SLICER` does the same thing as
+`--slicer` for every command at once.
 
 ### From your own module
 
@@ -971,6 +1143,15 @@ def refresh_device_list(self):
 
 ## Command-line tools
 
+The build leaves these in `build/` (`build\Release\` on Windows). The commands
+below write them without a path, which works after
+
+```bash
+cmake --install build --prefix ~/.local     # or any prefix on your PATH
+```
+
+Otherwise put `./build/` in front: `./build/uninet-discover --once`.
+
 ### `uninet-discover`, what is on my network?
 
 The tool to run when someone says "the headset can't see the server".
@@ -997,6 +1178,7 @@ When it finds nothing, it says what to check, in order, in plain language.
 | `--timeout <s>` | how long `--once` listens (default 3) |
 | `--realm <name>` | only show devices in this realm |
 | `--interface <n>` | which network to look on (`eth0`, or an IP) |
+| `--interfaces` | list this machine's networks and what UniNet would pick |
 | `--version` | the ZeroMQ/Zyre versions in use |
 
 ### `uninet-demo`: two devices talking, with nothing configured
@@ -1085,21 +1267,28 @@ include/uninet/   session.h  ← start here
                   peer.h · zyre_transport.h · blob.h · json.h
                   node.h · transport.h · loopback.h
                   cbor.h · codec.h · types.h · profiler.h · cabi.h
+                  diagnostics.h (diagnostics(), enable_crash_log())
 src/              one .cpp per header
-python/           bindings.cpp (pybind11) · uninet/ (package) · tests/
-csharp/           UniNet/ (Session.cs, Native.cs) · UniNetDemo/
-examples/         demo.cpp · file_transfer.cpp · python/ (see examples/README.md)
+python/           bindings.cpp (pybind11) · uninet/ (package)
+                  tests/: test_uninet.py · test_slicer_setup.py
+csharp/           UniNet/ (Session.cs · Native.cs · Blob.cs ·
+                            Unity/UniNetMulticastLock.cs, Unity-only)
+                  UniNetDemo/ (dotnet run --project csharp/UniNetDemo)
+examples/         demo.cpp · file_transfer.cpp · python/ · android/ (Quest demo)
+                  see examples/README.md
 tests/            test_roundtrip (codec) · test_network · test_cabi (C)
+                  test_diagnostics · test_reconnect (Linux only)
                   benchmark_codec.cpp (codec) · benchmark_network.cpp (end-to-end)
                   interop/: the three-language interop participants
                   docker/ : Linux and Windows-cross test images
-tools/            uninet_discover.cpp
+tools/            uninet_discover.cpp · uninet_demo.cpp · uninet_file_transfer.cpp
 scripts/          test-all.sh · test-interop.sh · demo.sh · bootstrap.{sh,ps1}
+                  build-native.sh: the C ABI for C#/Unity, and where to put it
                   UniNetSlicer.py: install UniNet into 3D Slicer, from anywhere
                   build-for-android.sh · build-for-slicer.sh (-> UniNetSlicer.py)
                   test-on-android.sh · test-on-emulator.sh · check-il2cpp.sh
-                  test-slicer-setup.sh
-docs/             PROTOCOL.md · unity/UniNetMulticastLock.cs
+                  test-slicer-setup.sh · test-reconnect.sh (driven by ctest)
+docs/             PROTOCOL.md
 ```
 
 **Discovery** is ZRE's UDP beacon: each node broadcasts its presence on the
@@ -1119,8 +1308,10 @@ so a receiver can filter without decompressing. See
 
 **Licence note:** Zyre and czmq are MPL-2.0, libzmq is MPL-2.0. These are
 file-level copyleft: you can link them into a proprietary application and ship
-it; only modifications to *their* source files must be published. UniNet itself
-is MIT.
+it; only modifications to *their* source files must be published. The other two
+dependencies are permissive: zlib is under the zlib licence and LZ4 is BSD-2.
+All four end up inside a self-contained build, so all four are worth naming in
+whatever attribution your application ships. UniNet itself is MIT.
 
 ---
 
@@ -1161,9 +1352,12 @@ is a coordinated change rather than a local one.
 Or run a suite directly:
 
 ```bash
-ctest --test-dir build -L uninet --no-tests=error --output-on-failure   # C++ core, network, C ABI
-PYTHONPATH=python pytest python/tests -v       # Python
+ctest --test-dir build -L uninet --no-tests=error --output-on-failure
+#   five suites: roundtrip (codec) · network · diagnostics · cabi ·
+#   reconnect (Linux only: it needs a network namespace)
+PYTHONPATH=python pytest python/tests -v       # Python, and the Slicer installer
 ./scripts/test-interop.sh                      # C++ <-> Python <-> C#
+./scripts/test-slicer-setup.sh                 # the installer against a real Slicer
 ```
 
 | suite | what it covers |
@@ -1172,7 +1366,7 @@ PYTHONPATH=python pytest python/tests -v       # Python
 | `test_network` | real discovery, departure, broadcast, unicast, realm isolation, concurrent publish/subscribe, large-payload transfer |
 | `test_cabi` | the C ABI compiled **as C**: the exact path C#/Unity takes, including UTF-8, null-safety and pointer lifetimes |
 | `python/tests` | dict round-trips, numpy volumes, discovery, wildcards, threading, error handling |
-| `python/tests/test_slicer_setup.py` | every decision the Slicer installer makes - which Slicer, which interpreter, which wheel, what goes into `.slicerrc.py`, what the build environment ends up being - against a directory shaped like a Slicer install. Needs no Slicer, no compiler and no network |
+| `python/tests/test_slicer_setup.py` | every decision the Slicer installer makes - which Slicer, which interpreter, which wheel, what goes into `.slicerrc.py`, what the build environment ends up being - against a directory shaped like a Slicer install. Needs no Slicer and no network; the handful of cases that ask which compiler would be used skip themselves on a machine without one |
 | `scripts/test-slicer-setup.sh` | the same installer against a **real Slicer**: install from nothing, import, two Slicer interpreters exchanging a message, the cached-wheel reinstall, the startup hook surviving a real Slicer start, and that the extension needs no system ZeroMQ |
 | `scripts/test-interop.sh` | a C++, a Python and a C# node in one realm, each verifying the others' payloads field by field |
 | `scripts/test-on-android.sh` | the codec, the C ABI and discovery running **on a connected Android device**, plus two nodes finding each other across the USB cable with no network |
@@ -1200,22 +1394,28 @@ sections as genuine Windows code.
 What Wine **cannot** cover is discovery: czmq enumerates interfaces with
 `GetAdaptersAddresses` and asserts on `ERROR_BUFFER_OVERFLOW`, a buffer-sizing
 protocol Wine does not implement. The runner reports that as an *expected stop*,
-never as a pass. Closing it needs a real Windows machine: the `windows:msvc`
-job in `.gitlab-ci.yml` does exactly that once a Windows runner exists.
+never as a pass. Closing it needs a real Windows machine, and MSVC cannot run on
+Linux at all.
 
-MSVC itself cannot run on Linux at all, so that job is the only route to it.
+**Two pipelines, and they cover different things.**
 
-`.gitlab-ci.yml` runs the Linux suite, the sanitizers, both Windows jobs and the
-interop test on every push, plus MSVC and macOS jobs that activate once runners
-with those tags exist.
+| | what runs |
+|---|---|
+| `.github/workflows/ci.yml` (GitHub Actions) | Linux (`-DUNINET_WERROR=ON`, ctest, pytest), **macOS 14 on Apple silicon**, and **Windows with real MSVC** - the only place the MSVC compile, link and C ABI test actually happen |
+| `.gitlab-ci.yml` (the ICube forge) | the Linux suite, the sanitizers, both Windows-cross images and the interop test on every push, plus MSVC and macOS jobs that activate once runners with those tags exist |
 
 **Sanitizers**, when changing the transport:
 
 ```bash
 cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
-      -DCMAKE_CXX_FLAGS="-fsanitize=thread -g"
-cmake --build build-tsan -j && ./build-tsan/test_network
+      -DCMAKE_CXX_FLAGS="-fsanitize=thread -g" \
+      -DUNINET_SYSTEM_ZYRE=OFF     # zyre built with the sanitizer too, or its
+cmake --build build-tsan -j        # threads are invisible and races are missed
+./build-tsan/test_network
 ```
+
+`./scripts/test-all.sh --sanitizers` does the same for ThreadSanitizer and
+Address/UB together.
 
 ---
 
@@ -1228,6 +1428,7 @@ uninet-discover --interfaces      # from a terminal
 ```
 
 ```cpp
+#include "uninet/diagnostics.h"
 printf("%s", uninet::diagnostics().c_str());   // C++
 ```
 ```python
@@ -1247,6 +1448,7 @@ report.
 module - ask for a crash report:
 
 ```cpp
+#include "uninet/diagnostics.h"
 uninet::enable_crash_log("/sdcard/Android/data/com.you.app/files/uninet-crash.log");
 ```
 
@@ -1264,7 +1466,8 @@ already installed is chained to, so a host's own crash reporting keeps working.
    This is the single most common cause. A normal network, or a cable, works.
 3. Is UDP port 5670 open? A host firewall will block the beacon.
 4. On a machine with several networks, name the one you mean:
-   `cfg.iface = "eth0"` (C++), `iface="eth0"` (Python/C#): otherwise discovery
+   `cfg.iface = "eth0"` (C++), `interface="eth0"` (Python), `iface: "eth0"`
+   (C#, where `interface` is a keyword): otherwise discovery
    may pick the wrong one.
 5. On a Meta Quest / Android device, see [Unity / Meta Quest](#unity--meta-quest):
    without the multicast permission the headset receives nothing.
@@ -1366,7 +1569,11 @@ built normally. `uninet.HAS_LZ4` (Python), `Session.HasLz4` (C#) and
 
 **`libuninet_c.so: cannot open shared object file`.** Add its directory to
 `LD_LIBRARY_PATH`, or on Windows place `uninet_c.dll` next to the executable. In
-Unity it belongs in `Assets/Plugins/<platform>/`.
+Unity it belongs in `Assets/Plugins/x86_64/` (desktop) or
+`Assets/Plugins/Android/libs/arm64-v8a/` (Quest). The full table, including what
+each platform's file is called and why the name matters, is under
+[Native library](#native-library-where-the-so--dll--dylib-goes). A .NET project
+that references `csharp/UniNet/UniNet.csproj` gets the file copied for it.
 
 **The Python extension imports but `join()` fails.** Check
 `uninet.zyre_version()`, if that works the library is loaded correctly and the
@@ -1378,4 +1585,6 @@ problem is the network, not the build.
 
 MIT. See [`LICENSE`](LICENSE).
 
-Depends on ZeroMQ/czmq/Zyre (MPL-2.0), zlib, and optionally liblz4.
+Depends on ZeroMQ/czmq/Zyre (MPL-2.0), zlib (zlib licence) and, optionally,
+LZ4 (BSD-2-Clause). A `-DUNINET_SELF_CONTAINED=ON` build links all of them in,
+so an application shipping that binary is distributing them too.

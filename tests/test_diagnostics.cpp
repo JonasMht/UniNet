@@ -98,7 +98,12 @@ int main(int argc, char** argv) {
         const pid_t pid = fork();
         if (pid == 0) {
             // Quiet: the child is expected to die and its noise is not useful.
-            freopen("/dev/null", "w", stderr);
+            // The result is checked only to satisfy warn_unused_result: this is
+            // a child that is about to exec and then crash on purpose, and
+            // there is nothing useful to do if silencing it fails. Without the
+            // cast, every -DUNINET_WERROR=ON build fails here - which is what
+            // the Linux CI job uses.
+            (void)!freopen("/dev/null", "w", stderr);
             execl(argv[0], argv[0], how, (char*)nullptr);
             _exit(127);
         }

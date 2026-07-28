@@ -1,10 +1,10 @@
 *.a
 bin/
-build-*/
-build/
-build-asan/
-build-cache/          # Windows vcpkg clone (bootstrap.ps1)
-build-tsan/
+# Every build tree: build/, build-android/, build-slicer/, build2/ ... Git has no
+# trailing comments, so "build-cache/  # vcpkg clone" was a literal pattern that
+# matched nothing, and build2/ and build3/ matched none of the old rules at all
+# and ended up committed.
+build*/
 .cache/
 .cmake/
 compile_commands.json

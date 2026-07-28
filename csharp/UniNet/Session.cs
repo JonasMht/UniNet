@@ -58,8 +58,10 @@ namespace UniNet
         /// <summary>Every key/value this peer advertised.</summary>
         public IReadOnlyDictionary<string, string> Headers => _headers;
 
-        /// <summary>Just the host part of Address, for a device list.</summary>
-        public string Host
+        /// <summary>Just the address part of <see cref="Address"/>, without the
+        /// port: "tcp://192.168.1.31:35001" -> "192.168.1.31". What a device list
+        /// shows. Same as `peer.endpoint()` in C++ and `peer.endpoint` in Python.</summary>
+        public string Endpoint
         {
             get
             {
@@ -71,8 +73,16 @@ namespace UniNet
             }
         }
 
+        /// <summary>The machine's hostname, as the peer advertised it. Same as
+        /// `peer.host()` in C++ and `peer.host` in Python.</summary>
+        /// <remarks>Before 0.2.1 this property returned the IP address, which is
+        /// what <see cref="Endpoint"/> now returns - the same name meant two
+        /// different things in C# and in the other two languages. If you were
+        /// printing an address, that is <see cref="Endpoint"/>.</remarks>
+        public string Host => Header("host");
+
         public override string ToString() =>
-            string.IsNullOrEmpty(Role) ? $"{Name} ({Host})" : $"{Name} ({Host}): {Role}";
+            string.IsNullOrEmpty(Role) ? $"{Name} ({Endpoint})" : $"{Name} ({Endpoint}): {Role}";
     }
 
     /// <summary>One received message.</summary>
@@ -280,6 +290,10 @@ namespace UniNet
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException("a device name is required", nameof(name));
+
+            // Turns .NET's bare "DllNotFoundException: uninet_c" into a message
+            // that says what UniNet is and where the file goes.
+            Native.EnsureLoadable();
 
             IntPtr handle;
             if (headers != null || compression >= 0)
@@ -570,10 +584,17 @@ namespace UniNet
                 var list = new List<Peer>(n);
                 for (int i = 0; i < n; ++i)
                 {
+                    // Every header the peer advertised, not just the three
+                    // UniNet names itself: a consumer that publishes
+                    // headers: {"study": "..."} has to be able to read it back.
                     var headers = new Dictionary<string, string>();
-                    foreach (var key in new[] { "role", "app", "host" })
-                        if (Native.uninet_peers_has_header(snap, i, key) == 1)
+                    int headerCount = Native.uninet_peers_header_count(snap, i);
+                    for (int h = 0; h < headerCount; ++h)
+                    {
+                        string key = Native.Str(Native.uninet_peers_header_key(snap, i, h));
+                        if (key.Length > 0)
                             headers[key] = Native.Str(Native.uninet_peers_header(snap, i, key));
+                    }
                     list.Add(new Peer(
                         Native.Str(Native.uninet_peers_uuid(snap, i)),
                         Native.Str(Native.uninet_peers_name(snap, i)),
@@ -684,9 +705,23 @@ namespace UniNet
         public static void DisableCrashLog() => Native.uninet_disable_crash_log();
 
         // ── build info ──
-        public static ushort ProtocolVersion => Native.uninet_protocol_version();
-        public static bool   HasLz4 => Native.uninet_has_lz4() == 1;
-        public static string Version => Native.Str(Native.uninet_version());
+        // These three are usually the first thing an application calls - the demo
+        // prints them before joining - so they explain a missing native library
+        // too rather than letting the raw DllNotFoundException out.
+        public static ushort ProtocolVersion
+        {
+            get { Native.EnsureLoadable(); return Native.uninet_protocol_version(); }
+        }
+
+        public static bool HasLz4
+        {
+            get { Native.EnsureLoadable(); return Native.uninet_has_lz4() == 1; }
+        }
+
+        public static string Version
+        {
+            get { Native.EnsureLoadable(); return Native.Str(Native.uninet_version()); }
+        }
 
         private void ThrowIfDisposed()
         {

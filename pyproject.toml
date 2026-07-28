@@ -16,6 +16,11 @@ license = { text = "MIT" }
 authors = [{ name = "JonasMht" }]
 keywords = ["networking", "pubsub", "cbor", "json", "zeromq", "zyre", "discovery", "medical"]
 
+[project.urls]
+Homepage = "https://github.com/JonasMht/UniNet"
+Source = "https://github.com/JonasMht/UniNet"
+Issues = "https://github.com/JonasMht/UniNet/issues"
+
 [project.optional-dependencies]
 test = ["pytest"]
 

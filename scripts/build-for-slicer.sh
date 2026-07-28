@@ -14,8 +14,14 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SLICER="${1:-}"
 
-ARGS=(install)
-[ -n "$SLICER" ] && ARGS+=(--slicer "$SLICER")
+# A lone -h/--help is a request for help, not a Slicer directory: passing it on
+# as `--slicer --help` produced "--help does not look like a Slicer installation".
+case "$SLICER" in
+    -h|--help) SLICER=""; ARGS=(--help) ;;
+    -*)        echo "unknown option: $SLICER" >&2; exit 2 ;;
+    *)         ARGS=(install)
+               [ -n "$SLICER" ] && ARGS+=(--slicer "$SLICER") ;;
+esac
 
 PYTHON="$(command -v python3 || command -v python || true)"
 if [ -z "$PYTHON" ]; then

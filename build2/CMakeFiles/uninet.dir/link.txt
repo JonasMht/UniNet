@@ -1,2 +1,0 @@
-/usr/bin/ar qc libuninet.a CMakeFiles/uninet.dir/src/blob.cpp.o CMakeFiles/uninet.dir/src/cbor.cpp.o CMakeFiles/uninet.dir/src/codec.cpp.o CMakeFiles/uninet.dir/src/json.cpp.o CMakeFiles/uninet.dir/src/loopback.cpp.o CMakeFiles/uninet.dir/src/node.cpp.o CMakeFiles/uninet.dir/src/profiler.cpp.o CMakeFiles/uninet.dir/src/session.cpp.o CMakeFiles/uninet.dir/src/zyre_transport.cpp.o
-/usr/bin/ranlib libuninet.a

@@ -161,5 +161,5 @@ echo "Copy it into your Unity project:"
 echo "  cp $OUT <UnityProject>/Assets/Plugins/Android/libs/$ABI/"
 echo
 echo "Android also silently drops multicast unless the app holds a Wi-Fi"
-echo "MulticastLock. See docs/unity/UniNetMulticastLock.cs and the manifest"
+echo "MulticastLock. See csharp/UniNet/Unity/UniNetMulticastLock.cs and the manifest"
 echo "permission CHANGE_WIFI_MULTICAST_STATE, or discovery will find nothing."

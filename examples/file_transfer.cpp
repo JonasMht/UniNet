@@ -15,6 +15,7 @@
 #include <csignal>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -43,6 +44,17 @@ std::atomic<bool> g_stop{false};
 void on_signal(int) { g_stop.store(true); }
 
 int receive(const std::string& outdir) {
+    // Before joining, not when the first file lands: the directory defaults to
+    // ./received, nothing creates it, and ofstream on a path in a directory
+    // that does not exist simply fails - so a transfer that both ends reported
+    // as complete left no file anywhere.
+    std::error_code ec;
+    std::filesystem::create_directories(outdir, ec);
+    if (ec) {
+        std::printf("Cannot create %s: %s\n", outdir.c_str(), ec.message().c_str());
+        return 1;
+    }
+
     auto net = uninet::Session::join("File Receiver", [] {
         uninet::SessionConfig c;
         c.role = "viewer";

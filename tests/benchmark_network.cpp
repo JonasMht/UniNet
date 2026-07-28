@@ -1,6 +1,7 @@
 // UniNet: end-to-end network benchmark.
 //
-// tests/benchmark.cpp measures the codec in isolation (encode, compress, frame).
+// tests/benchmark_codec.cpp measures the codec in isolation (encode, compress,
+// frame).
 // This one measures what a user actually experiences: two real nodes on the real
 // network, one publishing and the other receiving, counting messages that
 // completed the whole trip: encode, compress, frame, TCP, unframe, decompress,

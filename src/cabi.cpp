@@ -560,6 +560,24 @@ extern "C" int uninet_peers_has_header(uninet_peers_t* peers, int index, const c
     return peers->items[size_t(index)].headers.count(key) ? 1 : 0;
 }
 
+extern "C" int uninet_peers_header_count(uninet_peers_t* peers, int index) {
+    if (!valid(peers, index)) return 0;
+    return int(peers->items[size_t(index)].headers.size());
+}
+
+extern "C" const char* uninet_peers_header_key(uninet_peers_t* peers, int index,
+                                               int header_index) {
+    if (!valid(peers, index) || header_index < 0) return "";
+    const auto& headers = peers->items[size_t(index)].headers;
+    if (size_t(header_index) >= headers.size()) return "";
+    // No scratch buffer, unlike header_of() above: the key lives in the map
+    // inside the snapshot, so it outlives the call by construction and two
+    // pointers from different indices can never alias.
+    auto it = headers.begin();
+    std::advance(it, header_index);
+    return it->first.c_str();
+}
+
 extern "C" void uninet_peers_free(uninet_peers_t* peers) {
     try { delete peers; } catch (...) {}
 }

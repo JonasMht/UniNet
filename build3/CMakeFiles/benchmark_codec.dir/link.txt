@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/benchmark_codec.dir/tests/benchmark_codec.cpp.o -o uninet-benchmark-codec  -Wl,-rpath,/usr/local/lib libuninet.a /usr/lib/x86_64-linux-gnu/libz.so /usr/local/lib/libzyre.so /usr/local/lib/libczmq.so /usr/lib/x86_64-linux-gnu/libzmq.so /usr/local/lib/liblz4.so 

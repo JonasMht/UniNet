@@ -15,4 +15,37 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!-- Unity/ holds UnityEngine code (the Android multicast lock). It is part of
+       what a Unity project copies, but it cannot be compiled here: this is a
+       plain netstandard2.1 library with no UnityEngine reference, and compiling
+       it would fail on "using UnityEngine". -->
+  <ItemGroup>
+    <Compile Remove="Unity/**" />
+    <None Include="Unity/**" />
+  </ItemGroup>
+
+  <!-- The native library, copied next to whatever executable references this
+       project. Without it a C# consumer builds cleanly and then throws
+       DllNotFoundException on the first call, having never been told that a C++
+       library had to be built at all.
+
+       UniNetNativeDir points at a normal CMake build tree and can be overridden:
+           dotnet build -p:UniNetNativeDir=/path/to/the/library
+       Every entry is conditional, so a tree built for one platform (the normal
+       case) copies that one file and says nothing about the others. MSVC is
+       multi-config, hence the Release/ variants. -->
+  <PropertyGroup>
+    <UniNetNativeDir Condition="'$(UniNetNativeDir)' == ''">$(MSBuildThisFileDirectory)../../build</UniNetNativeDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(UniNetNativeDir)/libuninet_c.so" Condition="Exists('$(UniNetNativeDir)/libuninet_c.so')"
+             Link="libuninet_c.so" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="runtimes/linux-x64/native/" />
+    <Content Include="$(UniNetNativeDir)/libuninet_c.dylib" Condition="Exists('$(UniNetNativeDir)/libuninet_c.dylib')"
+             Link="libuninet_c.dylib" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="runtimes/osx-x64/native/" />
+    <Content Include="$(UniNetNativeDir)/uninet_c.dll" Condition="Exists('$(UniNetNativeDir)/uninet_c.dll')"
+             Link="uninet_c.dll" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="runtimes/win-x64/native/" />
+    <Content Include="$(UniNetNativeDir)/Release/uninet_c.dll" Condition="Exists('$(UniNetNativeDir)/Release/uninet_c.dll')"
+             Link="uninet_c.dll" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="runtimes/win-x64/native/" />
+  </ItemGroup>
+
 </Project>
