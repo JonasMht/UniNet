@@ -615,6 +615,19 @@ namespace UniNet
         public bool IsOpen =>
             _handle != IntPtr.Zero && Native.uninet_session_open(_handle) == 1;
 
+        /// <summary>
+        /// Why the last UniNet call on this thread failed. Empty when healthy.
+        /// </summary>
+        /// <remarks>
+        /// Per thread, like the C ABI it reads: two threads failing at once do
+        /// not overwrite each other's explanation. Most calls throw on failure,
+        /// so this is mainly for the ones that return false rather than
+        /// throwing, and for logging a reason alongside a caught exception.
+        /// C++ and Python have had last_error() since v0.2; C# did not, which
+        /// left a binding unable to say why something had failed.
+        /// </remarks>
+        public static string LastError() => Native.LastError();
+
         /// <summary>One plain sentence about the connection, for a status bar.</summary>
         public string Describe() =>
             _handle == IntPtr.Zero

@@ -240,6 +240,10 @@ __all__ = [
     "profiler_reset",
     "zyre_version",
     "local_hostname",
+    "local_interfaces",
+    "diagnostics",
+    "enable_crash_log",
+    "disable_crash_log",
     "PROTOCOL_VERSION",
     "HAS_LZ4",
 ]
