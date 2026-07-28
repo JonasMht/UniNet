@@ -168,7 +168,7 @@ dependencies.
 ### Build
 
 ```bash
-git clone <this repo> && cd UniNet
+git clone https://github.com/JonasMht/UniNet.git && cd UniNet
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build -L uninet --no-tests=error --output-on-failure
@@ -923,18 +923,17 @@ python3 scripts/UniNetSlicer.py status       # what is installed, and where
 python3 scripts/UniNetSlicer.py hook         # check at every Slicer start
 ```
 
-**Or with no checkout at all**, pasted into Slicer's Python console — this one
-needs the repository to be reachable over HTTPS from that machine, so it works
-once UniNet is published (or against an internal URL: set `UNINET_GIT_URL`, and
-fetch the file from wherever you host it):
+**Or with no checkout at all**, pasted into Slicer's Python console:
 
 ```python
 import urllib.request as u; exec(u.urlopen("https://raw.githubusercontent.com/"
     "JonasMht/UniNet/main/scripts/UniNetSlicer.py").read().decode())
 ```
 
-If the repository is private, copy `scripts/UniNetSlicer.py` to the machine (it
-is one dependency-free file) and use the first form instead.
+That works on any machine that can reach github.com. Behind a proxy or on an
+offline machine, copy `scripts/UniNetSlicer.py` across (it is one
+dependency-free file) and use the first form; `UNINET_GIT_URL` points the
+source-build fallback at an internal mirror if you keep one.
 
 Afterwards `import uninet` works in any Slicer module. The first install builds
 from source and takes a few minutes; every one after that is a second, because
@@ -1508,7 +1507,7 @@ uninet-discover --interfaces
 ```
 Networks on this machine:
   enp0s31f6        130.79.73.178     broadcast 130.79.73.255
-  wlp0s20f3        10.163.242.240    broadcast 10.163.242.255
+  wlp0s20f3        192.168.1.24      broadcast 192.168.1.255
   docker0          172.18.0.1        broadcast 172.18.255.255
   ...
 ```
