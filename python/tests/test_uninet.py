@@ -412,6 +412,61 @@ def test_blob_sent_from_subscription_handler(net_pair):
     assert sent_id and sent_id[0], "send() reported success from inside the handler"
 
 
+def test_blob_send_survives_concurrent_traffic(net_pair):
+    # Regression: while one side is committing to a long synchronous send (a
+    # Blob from a subscription handler), the OTHER'S inbound event queue used to
+    # be able to fill - czmq caps every actor pipe at ~1000 messages, the queue
+    # reader is the very thread that is busy streaming the blob, and a full
+    # pipe blocks its writer, which stalls the sender of our stream, which
+    # blocks the busy thread again: a deadlock no thread can escape, reported
+    # nowhere. Traffic in flight must never be able to wedge a transfer.
+    a, b = net_pair
+    cfg = uninet.BlobConfig()
+    cfg.chunk_bytes = 8192          # 16k chunks, far beyond a 1000-message pipe
+    tx = uninet.Blob(a, "vol", cfg)
+    rx = uninet.Blob(b, "vol", cfg)
+
+    payload = b"\x00" * (128 * 1024 * 1024)
+
+    got = []
+    failed = []
+    rx.on_received(lambda info, data: got.append(data))
+    rx.on_failed(lambda info, why: failed.append(why))
+
+    traffic = {"count": 0}
+    a.subscribe("traffic.>", lambda env: traffic.__setitem__("count", traffic["count"] + 1))
+
+    sent = {"done": False}
+    def handler(env):
+        tx.send("volume", payload)
+        sent["done"] = True
+    a.subscribe("trigger.>", handler)
+
+    # Keep b's side busy sending for the whole window. Before the fix this
+    # filled the receiving transport's internal queue and nothing ever arrived.
+    # The thread is stopped and joined BEFORE the test returns: leaving a
+    # daemon mid-publish while the fixture tears the sessions down makes the
+    # interpreter abort during finalization.
+    stop = threading.Event()
+    def spam():
+        i = 0
+        while not stop.is_set():
+            b.publish("traffic.x", {"i": i})
+            i += 1
+    thread = threading.Thread(target=spam)
+    thread.start()
+
+    b.publish("trigger.1", {"kick": True})
+    assert wait_until(lambda: got or failed, timeout=90), \
+        "a transfer finishes even when the network is saturated with other traffic"
+    assert not failed, f"transfer failed: {failed}"
+    assert got[0] == payload
+    assert sent["done"], "the handler-side send reported completion"
+    stop.set()
+    thread.join(timeout=5)
+    assert traffic["count"] > 0, "the competing traffic was not dropped"
+
+
 def test_blob_addressed_is_private(request):
     r = realm("blob-dst")
     a = uninet.join("Sender", realm=r)
