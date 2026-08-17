@@ -14,6 +14,7 @@ by running the installer against one (scripts/test-slicer-setup.sh).
 from __future__ import annotations
 
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -122,7 +123,14 @@ def test_running_under_slicers_own_python_finds_the_tree(fake_slicer, monkeypatc
 def test_probe_reports_the_proxied_interpreter(fake_slicer):
     info = setup.probe(fake_slicer / "bin" / "PythonSlicer")
     assert info["version"].startswith("%d.%d" % sys.version_info[:2])
-    assert Path(info["site"]).name == "site-packages"
+    # The purelib directory of the proxied interpreter, whatever that
+    # interpreter is: "site-packages" on most builds, "dist-packages" on
+    # Debian-family system Pythons. Both are honest answers, and the probe is
+    # only ever asked what "this Python" reports about itself.
+    site = Path(info["site"])
+    assert info["site"] and (
+        site.name in ("site-packages", "dist-packages"))
+    assert site.is_dir()
 
 
 def test_probe_on_something_unrunnable_explains(tmp_path):
@@ -146,7 +154,7 @@ def test_a_missing_uninet_is_reported_as_missing(tmp_path):
 def test_a_wheel_for_another_python_is_not_used(tmp_path, monkeypatch):
     wheels = tmp_path / "wheels"
     wheels.mkdir()
-    (wheels / "uninet-0.2.0-cp312-cp312-linux_x86_64.whl").write_bytes(b"")
+    _stamped_wheel(tmp_path, "uninet-0.2.0-cp312-cp312-linux_x86_64.whl", None)
     monkeypatch.setenv("UNINET_WHEEL", str(wheels))
     assert setup.find_wheel({"xy": "3.9"}) is None
 
@@ -154,8 +162,7 @@ def test_a_wheel_for_another_python_is_not_used(tmp_path, monkeypatch):
 def test_a_wheel_for_this_python_is_used(tmp_path, monkeypatch):
     wheels = tmp_path / "wheels"
     wheels.mkdir()
-    wanted = wheels / "uninet-0.2.0-cp39-cp39-linux_x86_64.whl"
-    wanted.write_bytes(b"")
+    wanted = _stamped_wheel(tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", None)
     monkeypatch.setenv("UNINET_WHEEL", str(wheels))
     assert setup.find_wheel({"xy": "3.9"}) == wanted
 
@@ -170,11 +177,102 @@ def test_a_wheel_given_as_a_file_is_used_as_is(tmp_path, monkeypatch):
 def test_the_repository_is_searched_for_a_wheel(tmp_path, monkeypatch):
     dist = tmp_path / "checkout" / "dist"
     dist.mkdir(parents=True)
-    wheel = dist / "uninet-0.2.0-cp39-cp39-linux_x86_64.whl"
-    wheel.write_bytes(b"")
+    wheel = _stamped_wheel(tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", None)
+    wheel.rename(dist / wheel.name)
     monkeypatch.setattr(setup, "find_source", lambda: tmp_path / "checkout")
     monkeypatch.setattr(setup, "_script_dir", lambda: None)
-    assert setup.find_wheel({"xy": "3.9"}) == wheel
+    assert setup.find_wheel({"xy": "3.9"}) == dist / wheel.name
+
+
+# ── integrity: a broken wheel must never be preferred over building ─────────
+
+def test_a_truncated_wheel_is_not_used_with_or_without_a_checkout(tmp_path, monkeypatch):
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    junk = wheels / "uninet-0.2.0-cp39-cp39-linux_x86_64.whl"
+    junk.write_bytes(b"half a wheel, cut off mid-download")
+    monkeypatch.setenv("UNINET_WHEEL", str(wheels))
+    skipped: list = []
+    # no git source at all: still must not trust it
+    assert setup.find_wheel({"xy": "3.9"},
+                            on_skip=lambda w, d: skipped.append(w)) is None
+    assert [Path(w).name for w in skipped] == [junk.name]
+    # with a checkout: same refusal, and the reason is reported, never a crash
+    skipped.clear()
+    monkeypatch.setattr(setup, "_source_commit",
+                        lambda source: "9" * 40 if source else "")
+    assert setup.find_wheel({"xy": "3.9"}, tmp_path / "checkout",
+                            on_skip=lambda w, d: skipped.append(w)) is None
+    assert [Path(w).name for w in skipped] == [junk.name]
+
+
+def test_a_real_wheel_that_survives_the_zip_check_is_usable(tmp_path, monkeypatch):
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    good = _stamped_wheel(tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", "5" * 40)
+    monkeypatch.setenv("UNINET_WHEEL", str(wheels))
+    on_skip = lambda w, d: (_ for _ in ()).throw(AssertionError(f"{w} was skipped"))
+    assert setup.find_wheel({"xy": "3.9"}, on_skip=on_skip) == good
+
+
+# ── repair: a wheel that lost its stamp is fixed, RECORD regenerated ────────
+
+def _wheel_with_record(root: Path, name: str, stamp: str | None) -> Path:
+    """A wheel shaped like one pip actually built: registered members (none
+    for _buildinfo yet) and a dist-info/RECORD that lists them."""
+    import io                                                               # noqa: PLC0415
+    wheels = root / "wheels"
+    wheels.mkdir(exist_ok=True)
+    path = wheels / name
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("uninet/__init__.py", "__version__ = '0.2.0'\n")
+        record = (
+            "uninet/__init__.py,"
+            + setup._sha256_urlsafe(b"__version__ = '0.2.0'\n")
+            + ",24\n"
+            "uninet-0.2.0.dist-info/RECORD,,\n"
+        )
+        archive.writestr("uninet-0.2.0.dist-info/RECORD", record)
+    path.write_bytes(buffer.getvalue())
+    return path
+
+
+def test_a_wheel_that_lost_its_stamp_is_repaired_in_place(tmp_path):
+    wheel = _wheel_with_record(tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", None)
+    before = wheel.read_bytes()
+    assert setup._wheel_commit(wheel) == ""
+    assert setup._ensure_wheel_stamp(wheel, "a" * 40) is True
+    assert setup._wheel_commit(wheel) == "a" * 40
+    # the wheel is still a real, installable zip
+    with zipfile.ZipFile(wheel) as zf:
+        assert zf.testzip() is None
+        members = zf.namelist()
+        assert "uninet/_buildinfo.py" in members
+        # RECORD was regenerated and now covers the stamped member too,
+        # so `pip uninstall` removes every file and leaves nothing behind.
+        record = zf.read("uninet-0.2.0.dist-info/RECORD").decode()
+        lines = [line for line in record.splitlines() if line.strip()]
+        assert "uninet/_buildinfo.py," in record
+        for line in lines[:-1]:
+            path, digest, size = line.rsplit(",", 2)
+            data = zf.read(path)
+            assert setup._sha256_urlsafe(data) == digest, f"bad RECORD line: {line}"
+            assert int(size) == len(data)
+        assert wheel.read_bytes() != before
+
+
+def test_stamping_a_wheel_that_already_matches_is_a_noop(tmp_path):
+    wheel = _stamped_wheel(tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", "b" * 40)
+    before = wheel.read_bytes()
+    assert setup._ensure_wheel_stamp(wheel, "b" * 40) is True
+    assert wheel.read_bytes() == before      # untouched: nothing to repair
+
+
+def test_repair_fails_cleanly_on_a_file_that_is_not_a_wheel(tmp_path):
+    junk = tmp_path / "not-a-wheel.whl"
+    junk.write_bytes(b"raw bytes")
+    assert setup._ensure_wheel_stamp(junk, "c" * 40) is False     # no exception
 
 
 # ── build provenance: refusing a wheel that predates the source ──────────────
