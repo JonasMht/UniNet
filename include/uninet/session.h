@@ -114,6 +114,11 @@ public:
     // reverse order) and a message arriving in that window writes to freed
     // memory. Calling close() before the captured state goes away is the
     // explicit way to be sure.
+    //
+    // REPLIES. A handler may publish() (and may start a Blob transfer) safely:
+    // frames sent from a handler go to the network in order with everything
+    // else, no matter how large the payload. That contract is what Blob relies
+    // on for the server pattern of "reply to a request with a volume".
     void subscribe(const std::string& subject, Node::DataHandler handler);
 
     // ── who else is here ──

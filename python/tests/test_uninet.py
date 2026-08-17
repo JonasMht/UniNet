@@ -376,6 +376,42 @@ def test_blob_empty_payload(net_pair):
     assert got[0] == b""
 
 
+def test_blob_sent_from_subscription_handler(net_pair):
+    # Regression: publish() from inside a subscription handler used to queue
+    # into the network thread's own command pipe, which cannot drain until the
+    # callback returns. A Blob is one publish per chunk, so past the pipe's
+    # message HWM (~1000) send() blocked forever - the blob never started and
+    # nothing was ever received, with no error on either side. It must execute
+    # in place instead.
+    a, b = net_pair
+    cfg = uninet.BlobConfig()
+    cfg.chunk_bytes = 8192          # thousands of chunks from a small payload
+    tx = uninet.Blob(a, "files", cfg)
+    rx = uninet.Blob(b, "files", cfg)
+
+    got = []
+    failed = []
+    rx.on_received(lambda info, data: got.append((info, data)))
+    rx.on_failed(lambda info, why: failed.append(why))
+
+    payload = bytes((i * 131 + 3) & 0xFF for i in range(32 * 1024 * 1024))
+
+    # This handler runs on a's network thread: the exact path that used to hang.
+    sent_id = []
+    def handler(env):
+        sent_id.append(tx.send("callback", payload))
+    a.subscribe("trigger.>", handler)
+
+    b.publish("trigger.1", {"kick": True})
+    assert wait_until(lambda: got or failed, timeout=60), \
+        "transfer from a subscription handler started and finished"
+    assert not failed, f"transfer failed: {failed}"
+    info, data = got[0]
+    assert info.name == "callback"
+    assert data == payload
+    assert sent_id and sent_id[0], "send() reported success from inside the handler"
+
+
 def test_blob_addressed_is_private(request):
     r = realm("blob-dst")
     a = uninet.join("Sender", realm=r)
