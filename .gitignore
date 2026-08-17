@@ -36,3 +36,6 @@ uninet_profile.txt
 wheelhouse/
 examples/android/build/
 examples/android/.debug.keystore
+
+# the local build environment used for development and testing
+.venv/
