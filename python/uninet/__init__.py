@@ -84,6 +84,19 @@ except ImportError as _exc:  # pragma: no cover - only on a broken install
 __version__ = "0.2.0"
 HAS_LZ4 = bool(HAS_LZ4)
 
+# Which source this installed module was built from, when the build stamped it
+# (UniNetSlicer.py embeds the git commit into every wheel it produces). Empty
+# for any other build. This is the difference between "0.2.0" and *this* 0.2.0:
+# the version never changes when fixes land, and without the commit nothing can
+# tell a stale install from a current one.
+__build__ = ""
+try:  # generated at build time; absent in a plain source checkout
+    from . import _buildinfo as _bi
+
+    __build__ = getattr(_bi, "BUILD_GIT", "")
+except Exception:  # noqa: BLE001 - an unreadable stamp must not break import
+    pass
+
 
 def join(
     name: str,
