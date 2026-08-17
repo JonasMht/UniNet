@@ -13,6 +13,7 @@ by running the installer against one (scripts/test-slicer-setup.sh).
 """
 from __future__ import annotations
 
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -361,6 +362,46 @@ def test_this_file_and_pyproject_agree():
     pointless rebuild on every start or accept a version that is too old."""
     root = Path(__file__).resolve().parents[2]
     assert setup.source_version(root) == setup.REQUIRED_VERSION
+
+
+def test_every_packaged_version_declaration_agrees():
+    """The version lives in five places because five different package formats
+    read it from their own file: C++ (CMakeLists.txt), the Python wheel
+    (pyproject.toml and the module), the Slicer installer (REQUIRED_VERSION)
+    and C# (the csproj's <Version>). Nothing stops them drifting except this
+    test and scripts/release.py - and a release where they disagree is a
+    release where the Slicer installer and pip serve '0.2.0' that mean
+    different things.
+    scripts/release.py bump makes all five agree at once."""
+    root = Path(__file__).resolve().parents[2]
+    cmake = re.search(
+        r'project\(UniNet\s+LANGUAGES C CXX VERSION\s+([0-9][^ )]*)',
+        (root / "CMakeLists.txt").read_text(encoding="utf-8"))
+    pyproject = re.search(
+        r'^\s*version\s*=\s*"([^"]+)"',
+        (root / "pyproject.toml").read_text(encoding="utf-8"),
+        re.M)
+    init = re.search(
+        r'__version__\s*=\s*"([^"]+)"',
+        (root / "python" / "uninet" / "__init__.py").read_text(encoding="utf-8"))
+    csproj = re.search(
+        r'<Version>([^<]+)</Version>',
+        (root / "csharp" / "UniNet" / "UniNet.csproj").read_text(encoding="utf-8"))
+
+    declared = {
+        "CMakeLists.txt": cmake.group(1) if cmake else "",
+        "pyproject.toml": pyproject.group(1) if pyproject else "",
+        "python/uninet/__init__.py": init.group(1) if init else "",
+        "csharp/UniNet/UniNet.csproj": csproj.group(1) if csproj else "",
+        "scripts/UniNetSlicer.py (REQUIRED_VERSION)": setup.REQUIRED_VERSION,
+    }
+    reference = declared["pyproject.toml"]
+    assert reference, "pyproject.toml must carry a version"
+    mismatched = {path: value for path, value in declared.items()
+                  if value != reference}
+    assert not mismatched, (
+        "version declarations disagree with pyproject.toml: "
+        + ", ".join(f"{path}={value}" for path, value in mismatched.items()))
 
 
 # ── the startup hook ─────────────────────────────────────────────────────────
