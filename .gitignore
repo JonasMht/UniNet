@@ -22,6 +22,9 @@ obj/
 out/
 *.pyc
 __pycache__/
+# UniNetSlicer.py stamps the build's git commit into this file before building
+# a wheel, and removes it afterwards. Never commit it.
+python/uninet/_buildinfo.py
 .pytest_cache/
 received/
 *.so
