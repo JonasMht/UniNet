@@ -177,6 +177,73 @@ def test_the_repository_is_searched_for_a_wheel(tmp_path, monkeypatch):
     assert setup.find_wheel({"xy": "3.9"}) == wheel
 
 
+# ── build provenance: refusing a wheel that predates the source ──────────────
+
+def _stamped_wheel(root: Path, name: str, commit: str | None) -> Path:
+    """A real zip wheel for the parts of the installer that inspect it. The
+    stamp goes in uninet/_buildinfo.py exactly where a wheel build would put
+    it; None means a wheel from before stamping existed."""
+    import io                                                               # noqa: PLC0415
+    import zipfile                                                          # noqa: PLC0415
+    wheels = root / "wheels"
+    wheels.mkdir(exist_ok=True)
+    path = wheels / name
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        if commit is not None:
+            archive.writestr("uninet/_buildinfo.py",
+                             f'BUILD_GIT = "{commit}"\n')
+    path.write_bytes(buffer.getvalue())
+    return path
+
+
+def test_a_wheel_stamped_with_the_current_source_is_reused(tmp_path, monkeypatch):
+    commit = "1" * 40
+    monkeypatch.setattr(setup, "_source_commit",
+                        lambda source: commit if source else "")
+    wanted = _stamped_wheel(tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", commit)
+    monkeypatch.setenv("UNINET_WHEEL", str(wanted.parent))
+    skipped: list = []
+    assert setup.find_wheel({"xy": "3.9"}, tmp_path / "checkout",
+                            on_skip=lambda w, d: skipped.append(w)) == wanted
+    assert skipped == []
+
+
+def test_a_wheel_from_an_older_source_is_refused_and_said_so(tmp_path, monkeypatch):
+    current = "2" * 40
+    monkeypatch.setattr(setup, "_source_commit",
+                        lambda source: current if source else "")
+    old = _stamped_wheel(
+        tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64_old.whl", "1" * 40)
+    good = _stamped_wheel(
+        tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", current)
+    monkeypatch.setenv("UNINET_WHEEL", str(old.parent))
+    skipped: list = []
+    assert setup.find_wheel({"xy": "3.9"}, tmp_path / "checkout",
+                            on_skip=lambda w, d: skipped.append(w)) == good
+    assert [Path(w).name for w in skipped] == [old.name]
+
+
+def test_an_unstamped_wheel_is_not_trusted_when_a_checkout_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, "_source_commit",
+                        lambda source: "3" * 40 if source else "")
+    wheel = _stamped_wheel(tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", None)
+    monkeypatch.setenv("UNINET_WHEEL", str(wheel.parent))
+    skipped: list = []
+    assert setup.find_wheel({"xy": "3.9"}, tmp_path / "checkout",
+                            on_skip=lambda w, d: skipped.append(w)) is None
+    assert [Path(w).name for w in skipped] == [wheel.name]
+
+
+def test_an_unstamped_wheel_is_used_when_there_is_no_checkout(tmp_path, monkeypatch):
+    """With no git source at hand there is nothing to compare against, and a
+    pre-stamping wheel is all a colleague with a file-only workflow has: using
+    it is the legacy behaviour and must not regress."""
+    wheel = _stamped_wheel(tmp_path, "uninet-0.2.0-cp39-cp39-linux_x86_64.whl", None)
+    monkeypatch.setenv("UNINET_WHEEL", str(wheel.parent))
+    assert setup.find_wheel({"xy": "3.9"}) == wheel
+
+
 # ── versions ─────────────────────────────────────────────────────────────────
 
 def test_versions_compare_numerically_not_as_text():

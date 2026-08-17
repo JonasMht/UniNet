@@ -635,7 +635,13 @@ def find_wheel(info: dict, source: Path | None = None, on_skip=None) -> Path | N
             # The platform tag is left to pip: it knows the whole compatibility
             # set (manylinux, macosx deployment targets), and a wheel it refuses
             # simply falls through to a source build below.
-            if desired and _wheel_commit(wheel) not in ("", desired):
+            if desired and _wheel_commit(wheel) != desired:
+                # With a git checkout in hand a wheel can (and must) be asked
+                # exactly what it was built from, and an unverifiable wheel - no
+                # stamp, built before stamping existed - is treated as stale: a
+                # cached wheel is exactly where a broken old build hides. Only
+                # when there is no checkout to compare against is a wheel
+                # trusted as-is.
                 if on_skip:
                     on_skip(wheel, desired)
                 continue
@@ -766,44 +772,53 @@ def make_wheel(slicer: Path | str | None = None, source: Path | str | None = Non
     had_stamp = stamp_file.exists()
     if commit:
         _stamp_buildinfo(source, commit)
+    try:
+        wheel_dir = cache_dir() / "wheels"
+        wheel_dir.mkdir(parents=True, exist_ok=True)
+        tag = "cp" + info["xy"].replace(".", "")
+        before = set(wheel_dir.glob(f"uninet-*{tag}*.whl"))
 
-    wheel_dir = cache_dir() / "wheels"
-    wheel_dir.mkdir(parents=True, exist_ok=True)
-    tag = "cp" + info["xy"].replace(".", "")
-    before = set(wheel_dir.glob(f"uninet-*{tag}*.whl"))
-
-    say(f"building UniNet for Slicer's Python {info['version']} from {source}")
-    say("the first build fetches and compiles ZeroMQ, czmq and zyre: a few minutes")
-    env = _build_env(pyslicer, info)
-    code = _run_streaming(
-        [str(pyslicer), "-m", "pip", "wheel", "--no-deps", "--no-cache-dir",
-         "--wheel-dir", str(wheel_dir), str(source)],
-        env, on_line,
-    )
-    if not had_stamp:
-        try:
-            stamp_file.unlink()
-        except OSError:
-            pass
-    if code != 0:
-        raise SetupError(
-            "the build failed; the output above says why. The usual causes are "
-            "a missing compiler and no network access to fetch ZeroMQ."
+        say(f"building UniNet for Slicer's Python {info['version']} from {source}")
+        say("the first build fetches and compiles ZeroMQ, czmq and zyre: a few minutes")
+        env = _build_env(pyslicer, info)
+        code = _run_streaming(
+            [str(pyslicer), "-m", "pip", "wheel", "--no-deps", "--no-cache-dir",
+             "--wheel-dir", str(wheel_dir), str(source)],
+            env, on_line,
         )
-    wheels = sorted(wheel_dir.glob(f"uninet-*{tag}*.whl"), key=lambda p: p.stat().st_mtime)
-    if not wheels:
-        raise SetupError("the build reported success but produced no wheel")
-    built = wheels[-1]
-    # Older wheels for the same Python go only now, once there is something to
-    # replace them with: cleaning up first would mean a failed build had thrown
-    # away the working wheel that was there.
-    for stale in before - {built}:
-        stale.unlink()
-    say(f"built {built.name}"
-        + (f" ({commit[:12]})" if commit else ""))
-    for line in _portability_warnings(built):
-        warn(line)
-    return built
+        if code != 0:
+            raise SetupError(
+                "the build failed; the output above says why. The usual causes are "
+                "a missing compiler and no network access to fetch ZeroMQ."
+            )
+        wheels = sorted(wheel_dir.glob(f"uninet-*{tag}*.whl"),
+                       key=lambda p: p.stat().st_mtime)
+        if not wheels:
+            raise SetupError("the build reported success but produced no wheel")
+        built = wheels[-1]
+        # Older wheels for the same Python go only now, once there is something
+        # to replace them with: cleaning up first would mean a failed build had
+        # thrown away the working wheel that was there.
+        for stale in before - {built}:
+            stale.unlink()
+        say(f"built {built.name}"
+            + (f" ({commit[:12]})" if commit else ""))
+        for line in _portability_warnings(built):
+            warn(line)
+        return built
+    finally:
+        # On every path out of this function - including a KeyboardInterrupt or
+        # an unexpected exception - the stamp must not survive in the source
+        # tree: it is only ever meaningful inside a freshly built wheel, and a
+        # leftover copy would mark a later manual `pip wheel` with a stale
+        # commit. (Do not put this file in .gitignore: scikit-build-core
+        # excludes ignored files from the wheel it builds, which would strip the
+        # stamp out of the very artifact that must carry it.)
+        if not had_stamp:
+            try:
+                stamp_file.unlink()
+            except OSError:
+                pass
 
 
 def _portability_warnings(wheel: Path) -> list[str]:
@@ -880,7 +895,25 @@ def install(slicer: Path | str | None = None, source: Path | str | None = None,
     result = {"slicer": str(home), "python": info["version"], "action": "none"}
 
     have = installed_version(pyslicer)
-    if have and not force and _version_tuple(have) >= _version_tuple(REQUIRED_VERSION):
+    current_enough = (have and not force
+                      and _version_tuple(have) >= _version_tuple(REQUIRED_VERSION))
+    local = find_source() if source is None else (Path(source) if source else None)
+    if current_enough:
+        # "Some 0.2.0 is installed" is not "the current build is installed":
+        # the version never changes across fixes. When a git source is at hand
+        # that carries a stamp, an install that does not match it - or carries
+        # no stamp at all - is silently outdated, and install should bring it
+        # up to date rather than report "already installed" and stop. Nothing
+        # is recompiled: a matching stamped wheel is reused, and only a real
+        # divergence triggers a build.
+        desired = _source_commit(local) if local else ""
+        have_build = (installed_build(pyslicer) if desired else "") or ""
+        if desired and have_build != desired:
+            say(f"installed UniNet {have} was built from "
+                f"{have_build[:12] or '(an unstamped, older build)'}; the current "
+                f"source is {desired[:12]}; updating it")
+            current_enough = False
+    if current_enough:
         result.update(version=have, action="already installed")
         # By design install() does not touch an already-installed UniNet of a
         # sufficient version: the version never changes across fixes, so "it is
@@ -896,7 +929,6 @@ def install(slicer: Path | str | None = None, source: Path | str | None = None,
     # caller just pointed at, and their change appears to have done nothing.
     # When a git checkout is available it is also what the staleness check in
     # find_wheel compares any cached wheel against.
-    local = find_source() if source is None else (Path(source) if source else None)
     wheel = None if source else find_wheel(info, local, on_skip=lambda w, want: say(
         f"skipping {Path(w).name}: built from an older source than the current "
         f"checkout (has …{_wheel_commit(w)[:12] or 'no stamp'}, want …{want[:12]})"))
@@ -917,6 +949,7 @@ def install(slicer: Path | str | None = None, source: Path | str | None = None,
         raise SetupError("the freshly built wheel could not be installed")
     result.update(action="built and installed", wheel=str(wheel))
     result["version"] = installed_version(pyslicer, load=True)
+    result["build"] = installed_build(pyslicer)
     return result
 
 
@@ -1220,6 +1253,11 @@ def status(slicer: Path | str | None = None) -> dict:
     report["site_writable"] = _site_is_writable(info)
     version, origin = installed(pyslicer)
     report["installed"] = version or "not installed"
+    # The version number never changes across fixes, so it says nothing about
+    # whether what is installed is the current build. The stamped git commit
+    # does. Empty when the install predates stamping - which is itself the
+    # signal that it is not current.
+    report["installed_build"] = installed_build(pyslicer) if version else None
     if origin:
         report["installed_at"] = origin
         if str(fallback_site(pyslicer)) in origin:
