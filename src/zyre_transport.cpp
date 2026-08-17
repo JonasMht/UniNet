@@ -618,6 +618,25 @@ ZyreTransport::ZyreTransport(std::string name, ZyreConfig cfg) : impl_(new Impl(
     // library, and an application's signal handling is not ours to take over.
     zsys_handler_set(nullptr);
 
+    // Raise the czmq pipe HWM for every pipe UniNet will create from here on
+    // (our actor pipe, Zyre's actor pipe, Zyre's event outbox). czmq defaults
+    // every inproc actor pipe to 1000 messages, and every write into a full
+    // pipe BLOCKS until the far side drains it. That is fine for backpressure
+    // but fatal for the way UniNet drives the network: the network thread is
+    // the single reader of Zyre's event outbox, and it is also the only thread
+    // allowed to send - so whenever the network thread is busy with a long
+    // synchronous job (Blob::send from a subscription handler is the textbook
+    // case), the outbox and command pipes fill against readers that cannot
+    // read, every blocked thread waits on every other, and the process hangs
+    // with no error anywhere.
+    //
+    // The value must be beyond any plausible count of in-flight traffic: a
+    // Blob at 8 KiB chunks is ~125k pipe messages for 1 GiB, and a chatty peer
+    // can add a similar number again. 250000 keeps roughly 2 GiB of 8 KiB
+    // chunks queued before any pipe blocks - far past real usage, while still
+    // being a hard bound so a fully stalled peer cannot grow memory forever.
+    zsys_set_pipehwm(250000);
+
     impl_->node = zyre_new(impl_->name.c_str());
     if (impl_->node) {
         impl_->uuid = zyre_uuid(impl_->node);
