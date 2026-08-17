@@ -464,6 +464,65 @@ void test_blob_empty() {
     check(size.load() == 0, "and arrives empty");
 }
 
+// Regression: sending a large payload from INSIDE a subscription handler.
+// Handlers run on the network thread, and publish() used to post each frame
+// into that same thread's command pipe, which cannot drain until the callback
+// returns. A Blob transfer is one publish per chunk, so past the pipe's message
+// HWM (czmq's default zsys_pipehwm, 1000) send() blocked forever: no beginning
+// was ever emitted, no failure of any kind was reported, and the receiver just
+// never saw the transfer. Publishing from a callback now executes in place on
+// the zyre node instead, so this must complete.
+void test_blob_from_network_thread() {
+    std::printf("large payload from a subscription handler\n");
+    const std::string realm = unique_realm("blobcb");
+
+    uninet::SessionConfig cfg; cfg.realm = realm;
+    auto tx = uninet::Session::join("Callback Sender", cfg);
+    auto rx = uninet::Session::join("Callback Receiver", cfg);
+    check(wait_until([&] { return tx->peers().size() == 1; }, std::chrono::seconds(20)),
+          "nodes paired");
+
+    // Thousands of chunks from a small payload: tests the same deadlock a ~1 GiB
+    // volume used to hit with default chunking, without shipping a GiB to CI.
+    uninet::BlobConfig bcfg;
+    bcfg.chunk_bytes = 8192;
+    uninet::Blob send_side(*tx, "files", bcfg);
+    uninet::Blob recv_side(*rx, "files", bcfg);
+
+    constexpr size_t kSize = 32 * 1024 * 1024;      // 4096 chunks of 8 KiB
+    uninet::Bytes expected(kSize);
+    for (size_t i = 0; i < kSize; ++i) expected[i] = uint8_t((i * 131 + 3) & 0xFF);
+
+    std::mutex mu;
+    uninet::Bytes got;
+    std::string sent_id;
+    std::atomic<bool> arrived{false};
+    StopFirst stop{tx.get(), rx.get()};
+    recv_side.on_received([&](const uninet::BlobInfo& info, const uninet::Bytes& data) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (info.name == "callback") {
+            got = data;
+            arrived.store(true);
+        }
+    });
+
+    // This handler runs on tx's network thread - the exact path that used to
+    // wedge. The transfer must start and finish from inside it.
+    tx->subscribe("trigger.>", [&](const uninet::Envelope&) {
+        std::lock_guard<std::mutex> lk(mu);
+        sent_id = send_side.send("callback", expected, uninet::Cbor::null());
+    });
+    rx->publish("trigger.1", uninet::Cbor::map());
+
+    check(wait_until([&] { return arrived.load(); }, std::chrono::seconds(60)),
+          "a many-chunk transfer started and finished from a network-thread handler");
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        check(!sent_id.empty(), "the handler-side send reported success");
+        check(got == expected, "the bytes are byte-for-byte identical");
+    }
+}
+
 // ── discovery without multicast ───────────────────────────────────────────
 // The path a USB-tethered device or a VPN link takes: no shared broadcast
 // domain, so one node binds a rendezvous endpoint and the other dials it.
@@ -540,6 +599,7 @@ int main() {
     test_blob_addressed();
     test_blob_concurrent();
     test_blob_empty();
+    test_blob_from_network_thread();
     test_gossip_discovery();
     test_close();
 

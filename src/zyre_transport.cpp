@@ -386,6 +386,60 @@ struct ZyreTransport::Impl {
         return zmsg_send(msg, actor) == 0;
     }
 
+    // Execute one command whose verb has already been popped off the wire, and
+    // destroy *msg. The actor loop and publish() share this so that sending a
+    // frame cannot drift between the queued path and the direct path.
+    //
+    // WHY BOTH PATHS EXIST. A command that goes through the pipe is delivered by
+    // the actor loop, which is the only thread allowed to touch the zyre node.
+    // But when the CALLER of publish() already IS the actor thread - every
+    // subscription handler runs there - the pipe cannot drain until the
+    // callback returns, so a publish() made from inside a callback just queues
+    // against a consumer that is busy wrong way around. That used to show up as
+    // a silent hang: a Blob transfer is one pipe message per chunk, and past the
+    // pipe's message HWM (czmq's default zsys_pipehwm value, 1000) zmsg_send
+    // blocks forever, the transfer never starts, and nothing is heard from the
+    // sender. Executing the command in place instead is safe because
+    // zyre_shout/zyre_whisper are still only ever called on the actor thread
+    // either way, and the zyre node cannot be touched by anyone else.
+    bool run_command(const char* verb, zmsg_t** msg) {
+        bool ok = true;
+        if (std::strcmp(verb, "SHOUT") == 0) {
+            char* subject = zmsg_popstr(*msg);
+            zframe_t* body = zmsg_pop(*msg);
+            if (subject && body) {
+                zmsg_t* out = zmsg_new();
+                zmsg_addstr(out, subject);
+                zmsg_append(out, &body);
+                ok = zyre_shout(node, cfg.realm.c_str(), &out) == 0;
+            }
+            freen(subject);
+            zframe_destroy(&body);
+        } else if (std::strcmp(verb, "WHISPER") == 0) {
+            char* peer = zmsg_popstr(*msg);
+            char* subject = zmsg_popstr(*msg);
+            zframe_t* body = zmsg_pop(*msg);
+            if (peer && subject && body) {
+                zmsg_t* out = zmsg_new();
+                zmsg_addstr(out, subject);
+                zmsg_append(out, &body);
+                zyre_whisper(node, peer, &out);
+            }
+            freen(peer);
+            freen(subject);
+            zframe_destroy(&body);
+        }
+        zmsg_destroy(msg);
+        return ok;
+    }
+
+    // True when the calling thread is the network thread, i.e. we are inside a
+    // subscription handler. publish() must then bypass the pipe (see
+    // run_command) or a large blob cannot start.
+    bool on_actor_thread() const {
+        return actor_thread.load() == std::this_thread::get_id();
+    }
+
     // Deliver a received message to every matching subscriber. Handlers run
     // outside the lock so one that publishes (a reply) cannot deadlock.
     void dispatch(const std::string& subject, const Bytes& payload) {
@@ -537,30 +591,8 @@ struct ZyreTransport::Impl {
 
                 if (std::strcmp(verb, "$TERM") == 0) {
                     terminated = true;
-                } else if (std::strcmp(verb, "SHOUT") == 0) {
-                    char* subject = zmsg_popstr(msg);
-                    zframe_t* body = zmsg_pop(msg);
-                    if (subject && body) {
-                        zmsg_t* out = zmsg_new();
-                        zmsg_addstr(out, subject);
-                        zmsg_append(out, &body);
-                        zyre_shout(self->node, self->cfg.realm.c_str(), &out);
-                    }
-                    freen(subject);
-                    zframe_destroy(&body);
-                } else if (std::strcmp(verb, "WHISPER") == 0) {
-                    char* peer = zmsg_popstr(msg);
-                    char* subject = zmsg_popstr(msg);
-                    zframe_t* body = zmsg_pop(msg);
-                    if (peer && subject && body) {
-                        zmsg_t* out = zmsg_new();
-                        zmsg_addstr(out, subject);
-                        zmsg_append(out, &body);
-                        zyre_whisper(self->node, peer, &out);
-                    }
-                    freen(peer);
-                    freen(subject);
-                    zframe_destroy(&body);
+                } else {
+                    self->run_command(verb, &msg);
                 }
                 freen(verb);
                 zmsg_destroy(&msg);
@@ -750,6 +782,20 @@ bool ZyreTransport::publish(const std::string& subject, const uint8_t* data, siz
     zmsg_addstr(m, "SHOUT");
     zmsg_addstr(m, subject.c_str());
     zmsg_addmem(m, data, len);
+    // Publishing from inside a subscription handler would queue against our own
+    // pipe with nobody to drain it; run the command in place instead. See
+    // Impl::run_command for why that is safe and why the alternative hangs.
+    if (impl_->on_actor_thread()) {
+        // run_command expects the verb already removed, exactly as the actor
+        // loop hands it over. The direct path must do the same pop itself:
+        // passing the full command through would make the verb frame read as
+        // the subject and the message would be delivered under the wrong name
+        // and silently dropped by every subscriber.
+        char* verb = zmsg_popstr(m);
+        const bool ok = impl_->run_command(verb, &m);
+        freen(verb);
+        return ok;
+    }
     return impl_->send_cmd(&m);
 }
 
@@ -769,6 +815,12 @@ bool ZyreTransport::publish_to(const std::string& peer_uuid, const std::string& 
     zmsg_addstr(m, peer_uuid.c_str());
     zmsg_addstr(m, subject.c_str());
     zmsg_addmem(m, data, len);
+    if (impl_->on_actor_thread()) {
+        char* verb = zmsg_popstr(m);
+        const bool ok = impl_->run_command(verb, &m);
+        freen(verb);
+        return ok;
+    }
     return impl_->send_cmd(&m);
 }
 
