@@ -923,17 +923,37 @@ python3 scripts/UniNetSlicer.py status       # what is installed, and where
 python3 scripts/UniNetSlicer.py hook         # check at every Slicer start
 ```
 
-**Or with no checkout at all**, pasted into Slicer's Python console:
+**Or with no checkout at all**, pasted into Slicer's Python console
+(`View → Python Console`):
 
 ```python
-import urllib.request as u; exec(u.urlopen("https://raw.githubusercontent.com/"
-    "JonasMht/UniNet/main/scripts/UniNetSlicer.py").read().decode())
+import urllib.request as _u, json as _j, base64 as _b64, time as _t
+_src = None
+for _try in range(3):
+    try:
+        _src = _u.urlopen("https://raw.githubusercontent.com/JonasMht/UniNet/main/scripts/UniNetSlicer.py",
+                          timeout=30).read().decode()
+        break
+    except Exception:
+        if _try < 2:
+            _t.sleep(1.5 **_try)          # transient failures are retried
+if not _src:                              # raw CDN unreachable -> GitHub API
+    _meta = _j.load(_u.urlopen("https://api.github.com/repos/JonasMht/UniNet/contents/scripts/UniNetSlicer.py",
+                               timeout=30))
+    _src = _b64.b64decode(_meta["content"]).decode()
+exec(_src)
 ```
 
-That works on any machine that can reach github.com. Behind a proxy or on an
-offline machine, copy `scripts/UniNetSlicer.py` across (it is one
-dependency-free file) and use the first form; `UNINET_GIT_URL` points the
-source-build fallback at an internal mirror if you keep one.
+This downloads `scripts/UniNetSlicer.py` and runs it. The retries and the API
+fallback are there on purpose: `raw.githubusercontent.com` occasionally answers
+`HTTP 429 Too Many Requests` when its CDN is under load. That is **transient
+throttling, not a broken link** — the file is still at that address, and the
+same fetch succeeds a moment later, so do not "fix" the URL (a wrong branch or
+path would return `HTTP 404`, not 429). If even the GitHub API route fails,
+this machine cannot reach github.com at all. Behind a proxy or on an offline
+machine, copy `scripts/UniNetSlicer.py` across (it is one dependency-free file)
+and use the first form; `UNINET_GIT_URL` points the source-build fallback at an
+internal mirror if you keep one.
 
 Afterwards `import uninet` works in any Slicer module. The first install builds
 from source and takes a few minutes; every one after that is a second, because
