@@ -35,6 +35,8 @@ TRAFFIC = os.environ.get("UNINET_BIG_BLOB_TRAFFIC", "1") not in ("", "0")
 DISCOVERY_TIMEOUT = 25.0
 RECEIVE_TIMEOUT = 300.0
 
+pytestmark = pytest.mark.heavy
+
 
 def _digest(buffer, block: int = 8 * 1024 * 1024) -> str:
     """A modest-memory fingerprint of a large buffer, streamed in blocks."""

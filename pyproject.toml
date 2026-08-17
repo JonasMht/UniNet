@@ -31,6 +31,7 @@ build-dir = "build/py"
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+markers = ["heavy: uses hundreds of MiB of memory and real network traffic; exclude with `-m 'not heavy'`"]
 
 [tool.cibuildwheel]
 # Assert the tiers actually made it into the wheel rather than only printing

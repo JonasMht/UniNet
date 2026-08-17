@@ -1160,6 +1160,48 @@ def refresh_device_list(self):
 
 ---
 
+## Releases: one command for every target
+
+A "version" of UniNet is not one artifact. The same source ships as a Python
+wheel, a self-contained C++ SDK, a C# NuGet package and a Slicer wheel, and
+four of those five package formats read the version number from their own
+file. `scripts/release.py` makes a release a single, verifiable command
+instead of five disconnected ones:
+
+    python3 scripts/release.py check          # versions agree? tree clean? toolchains?
+    python3 scripts/release.py bump 0.3.0     # change the version in every declaration
+    python3 scripts/release.py package        # run the test gate, build every target
+
+`bump` edits `CMakeLists.txt`, `pyproject.toml`, `python/uninet/__init__.py`,
+`scripts/UniNetSlicer.py` (REQUIRED_VERSION) and `csharp/UniNet/UniNet.csproj`
+together, and refuses nothing it cannot prove: `package` will not build from a
+checkout whose five version declarations disagree, and will not build from an
+uncommitted tree unless you say `--allow-dirty` (a release carries a stamped
+source commit, and a dirty tree is silently the wrong one).
+
+`package` does three things in order: it runs the fast test gate (ctest +
+pytest), builds the requested targets with the exact source-commit stamp, and
+writes the artifacts, a MANIFEST and a SHA256SUMS file into
+`dist/release-<version>/`. Every wheel carries the commit inside it
+(`uninet.__build__`), so any artifact can be traced to the tree that made it.
+The Slicer wheel is built by the same hardened machinery as the installer;
+the C++ SDK is self-contained (ZeroMQ/czmq/zyre/lz4 compiled in) and bundles
+the headers, the static library, the C ABI and `uninet-discover`.
+
+Choose what this machine can build, and what it cannot says why:
+
+    python3 scripts/release.py package --targets python,cpp
+    python3 scripts/release.py package --slicer /path/to/Slicer-5.10.0-linux-amd64
+    python3 scripts/release.py package --targets csharp   # fails loudly if dotnet is missing
+
+A target whose toolchain is absent is reported as skipped, never as passed; a
+target you explicitly asked for that could not be produced fails the command
+with the reason. The version-agreement rule is also enforced by the test
+suite (`test_every_packaged_version_declaration_agrees`), so a hand-edited
+version cannot silently drift either.
+
+---
+
 ## Command-line tools
 
 The build leaves these in `build/` (`build\Release\` on Windows). The commands
