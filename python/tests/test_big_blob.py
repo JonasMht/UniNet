@@ -22,7 +22,13 @@ import os
 import threading
 import time
 
-import numpy as np
+import pytest
+
+# numpy is optional in UniNet (payloads are accepted via .tolist() without it).
+# Without numpy this test cannot build a volume, but it must SKIP, not
+# collection-error an entire suite on a machine that merely lacks an optional
+# dependency.
+np = pytest.importorskip("numpy")
 import pytest
 
 import uninet
