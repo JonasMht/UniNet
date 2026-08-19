@@ -111,7 +111,11 @@ std::unique_ptr<Session> Session::join(const std::string& name, SessionConfig cf
     Node* node = s->impl_->node.get();
     ZyreTransport* transport = s->impl_->transport.get();
     Session* self = s.get();
-    transport->on_reconnected([node, transport, self] {
+    // `self` is deliberately NOT captured: the reconnect callback must not
+    // extend the Session's lifetime or touch it after close(); it only
+    // refreshes the snapshot, and capturing it would trip
+    // -Wunused-lambda-capture on clang with warnings as errors.
+    transport->on_reconnected([node, transport] {
         node->set_uuid(transport->uuid());
         // Keep the crash snapshot current. A report showing the network the
         // process was on three reconnects ago would point at the wrong thing.
