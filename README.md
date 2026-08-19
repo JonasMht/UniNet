@@ -1458,12 +1458,16 @@ protocol Wine does not implement. The runner reports that as an *expected stop*,
 never as a pass. Closing it needs a real Windows machine, and MSVC cannot run on
 Linux at all.
 
-**Two pipelines, and they cover different things.**
+**CI is local.** `./scripts/test-all.sh` is the verification entry point:
+the native suites by default, plus `--docker` (the cross-platform MinGW and
+Wine images) and `--sanitizers` (TSan, ASan/UBSan) when asked. There is no
+GitHub Actions workflow; the git history holds the deleted
+`.github/workflows/ci.yml` if its runner recipes are ever needed again.
 
-| | what runs |
-|---|---|
-| `.github/workflows/ci.yml` (GitHub Actions) | Linux (`-DUNINET_WERROR=ON`, ctest, pytest), **macOS 14 on Apple silicon**, and **Windows with real MSVC** - the only place the MSVC compile, link and C ABI test actually happen |
-| `.gitlab-ci.yml` (the ICube forge) | the Linux suite, the sanitizers, both Windows-cross images and the interop test on every push, plus MSVC and macOS jobs that activate once runners with those tags exist |
+**One optional server-side pipeline.** `.gitlab-ci.yml` (the ICube forge)
+runs the Linux suite, the sanitizers, both Windows-cross images and the
+interop test on every push, plus MSVC and macOS jobs that activate once
+runners with those tags exist.
 
 **Sanitizers**, when changing the transport:
 
