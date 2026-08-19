@@ -1,0 +1,15 @@
+# ASan suppressions for noise proven to live in UniNet's dependencies.
+#
+# interceptor_via_fun:strcpy — czmq's zsys_init() passes its own global
+# thread-name-prefix buffer as both source and destination of strcpy()
+# (zsys.c:339 -> zsys.c:1668), reporting strcpy-param-overlap under ASan and
+# aborting the run there. The copy is a no-op; it is czmq's, not ours, and
+# there is nothing to do about it at our pin. Suppressing the interceptor
+# report lets the suite run to completion. If UniNet ever calls strcpy() with
+# overlapping operands this suppression would hide it, which is why the C++
+# code deliberately never does (src/ has no strcpy calls).
+#
+# Anything else reported under ASan is NOT suppressed: findings attributed to
+# UniNet fail the stage, and unsuppressed dependency findings fail it too
+# (with attribution), because a reported error aborts the run mid-suite.
+interceptor_via_fun:strcpy

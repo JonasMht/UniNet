@@ -169,21 +169,45 @@ if [ "$USE_SAN" -eq 1 ]; then
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" >/dev/null 2>&1 \
        && cmake --build "$SAN_ASAN" -j"$(nproc 2>/dev/null || echo 4)" >/dev/null 2>&1; then
         SAN_FAIL=0
-        ASAN_OPTIONS=detect_leaks=1 "$SAN_ASAN/test_roundtrip" >/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
-        ASAN_OPTIONS=detect_leaks=0 "$SAN_ASAN/test_network" >>/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
-        # Findings inside a DEPENDENCY are reported but do not fail the stage.
-        # czmq trips UBSan on misaligned loads in zhash and zmonitor and on a
-        # null memcpy in zrex; those are real, they are not ours, and there is
-        # nothing to do about them here. Failing on them would mean the stage
-        # could never pass, which ends with someone ignoring it entirely.
+        # Dependency findings: UBSan recovers, so its reports are tolerated
+        # and printed as notes; ASan aborts the run, so an unsuppressed ASan
+        # finding fails the stage with attribution - that is the signal to add
+        # a line to scripts/asan.supp. Currently suppressed there: czmq's
+        # zsys_init() strcpying its own global thread-name-prefix buffer onto
+        # itself (strcpy-param-overlap, zsys.c:339 -> :1668), which otherwise
+        # aborts every run mid-suite. czmq's UBSan noise (misaligned loads in
+        # zhash/zmonitor, null memcpy in zrex) is real but not ours and never
+        # fails anything.
+        ASAN_OPTIONS="detect_leaks=1:suppressions=$HERE/scripts/asan.supp" \
+            "$SAN_ASAN/test_roundtrip" >/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
+        ASAN_OPTIONS="detect_leaks=0:suppressions=$HERE/scripts/asan.supp" \
+            "$SAN_ASAN/test_network" >>/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
         grep -E 'ERROR: (Address|Leak)Sanitizer|runtime error' /tmp/uninet-asan.log \
             > /tmp/uninet-asan-findings.log 2>/dev/null || true
-        THEIRS="$(grep -c '_deps/' /tmp/uninet-asan-findings.log || true)"
-        OURS="$(grep -vc '_deps/' /tmp/uninet-asan-findings.log || true)"
+        # Attribute each finding by its FIRST non-interceptor stack frame. The
+        # finding header carries no path, so counting _deps matches on the raw
+        # log misclassified the czmq strcpy above as ours: only its frames
+        # pointed into _deps. The first real frame is the direct caller of the
+        # faulting libc call; that frame decides whose finding it is.
+        awk '/ERROR: (Address|Leak)Sanitizer/ { emitted = 0; next }
+             /runtime error/ { print; emitted = 1; next }
+             /^    #[0-9]+/ {
+                 if (emitted) next
+                 if ($0 ~ /asan_interceptors|__interceptor_/) next
+                 print
+                 emitted = 1
+             }' /tmp/uninet-asan.log > /tmp/uninet-asan-attrib.log 2>/dev/null || true
+        THEIRS="$(grep -c '_deps/' /tmp/uninet-asan-attrib.log || true)"
+        OURS="$(grep -vc '_deps/' /tmp/uninet-asan-attrib.log || true)"
+        # A finding with no stack at all must not vanish: count it as ours.
+        if [ "${THEIRS:-0}" -eq 0 ] && [ "${OURS:-0}" -eq 0 ] \
+                && [ -s /tmp/uninet-asan-findings.log ]; then
+            OURS="$(wc -l < /tmp/uninet-asan-findings.log | tr -d ' ')"
+        fi
         if [ "${OURS:-0}" -gt 0 ]; then SAN_FAIL=1; fi
         if [ "${THEIRS:-0}" -gt 0 ]; then
             echo "note: ${THEIRS} finding(s) inside dependencies, not UniNet:"
-            grep '_deps/' /tmp/uninet-asan-findings.log | sed 's/^/      /' | head -5
+            sed 's/^/      /' /tmp/uninet-asan-attrib.log | head -5
         fi
         if [ "$SAN_FAIL" -eq 0 ]; then pass "asan/ubsan (${OURS:-0} in UniNet)"; else
             grep -v '_deps/' /tmp/uninet-asan-findings.log | head -10
