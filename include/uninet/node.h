@@ -73,7 +73,8 @@ public:
     // while the UI is open" into a diagnosable application-lifetime bug.
     struct Stats {
         uint64_t received = 0;                 // arrived at dispatch
-        uint64_t delivered = 0;                // >=1 handler ran at arrival
+        uint64_t delivered = 0;                // >=1 matching handler existed at
+                                               //   arrival (delivery attempted)
         uint64_t unmatched = 0;                // zero handlers at arrival
         uint64_t buffered_current = 0;         // held for a future subscriber
         size_t   buffered_current_bytes = 0;
