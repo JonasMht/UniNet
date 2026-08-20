@@ -98,6 +98,8 @@ std::unique_ptr<Session> Session::join(const std::string& name, SessionConfig cf
     s->impl_->node = std::make_unique<Node>(name, s->impl_->transport->uuid(),
                                             s->impl_->transport.get(), cfg.compression);
     s->impl_->node->connect();
+    s->impl_->node->set_buffer_limits(cfg.max_buffer_bytes, cfg.max_buffer_messages,
+                                      cfg.buffer_unmatched);
 
     // A network change rebuilds the ZRE node, and ZRE mints a new identity every
     // time. The Node has to adopt it: outgoing messages carry that uuid and
@@ -160,7 +162,22 @@ void Session::on_peer_lost(PeerCallback cb) {
 
 bool Session::connected() const {
     std::shared_lock<std::shared_timed_mutex> lk(impl_->mu);
-    return impl_->transport && impl_->transport->connected();
+    return impl_->node && impl_->node->connected();
+}
+
+Node::Stats Session::stats() const {
+    std::shared_lock<std::shared_timed_mutex> lk(impl_->mu);
+    return impl_->node ? impl_->node->stats() : Node::Stats{};
+}
+
+std::vector<std::string> Session::subscriptions() const {
+    std::shared_lock<std::shared_timed_mutex> lk(impl_->mu);
+    return impl_->node ? impl_->node->subscriptions() : std::vector<std::string>{};
+}
+
+void Session::set_buffer_limits(size_t max_bytes, size_t max_messages, bool enabled) {
+    std::shared_lock<std::shared_timed_mutex> lk(impl_->mu);
+    if (impl_->node) impl_->node->set_buffer_limits(max_bytes, max_messages, enabled);
 }
 const std::string& Session::name() const { return impl_->name; }
 std::string Session::uuid() const {

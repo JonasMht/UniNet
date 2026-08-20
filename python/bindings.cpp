@@ -598,6 +598,14 @@ PYBIND11_MODULE(_uninet, m) {
                        "Rejoin by itself after the network changes (default true).")
         .def_readwrite("reconnect_poll_ms", &SessionConfig::reconnect_poll_ms,
                        "How often to check the interfaces, in ms (default 2000).")
+        .def_readwrite("max_buffer_bytes", &SessionConfig::max_buffer_bytes,
+                       "Byte cap of the unmatched-message buffer (default 8 MiB; 0 = unlimited).")
+        .def_readwrite("max_buffer_messages", &SessionConfig::max_buffer_messages,
+                       "Message cap of the unmatched-message buffer (default 256; 0 = unlimited).")
+        .def_readwrite("buffer_unmatched", &SessionConfig::buffer_unmatched,
+                       "Hold unmatched messages and deliver to the first matching "
+                       "subscription (default true; false = drop in silence, the "
+                       "pre-buffering behavior).")
         .def_readwrite("headers", &SessionConfig::headers);
 
     py::class_<Session>(m, "Session", "A device on the network. Created by uninet.join().")
@@ -618,10 +626,54 @@ PYBIND11_MODULE(_uninet, m) {
         .def("subscribe", [](Session& s, const std::string& subject, py::function cb) {
             auto held = hold(std::move(cb));
             s.subscribe(subject, [held](const Envelope& env) {
-                call_guarded(held, "subscribe", Message{env.subject, env.src_uuid, env.data});
+                // Deliberately NOT call_guarded: the peer callbacks must
+                // swallow (nothing above them catches), but a delivery
+                // handler runs under Node's try/catch, which logs WITH the
+                // subject and counts stats().errored. Swallowing here would
+                // hide the error from every counter. The py exception object
+                // is reduced to a plain string while the GIL is held, so the
+                // throw that reaches the network thread carries no Python
+                // state and cannot deadlock Node's catch.
+                std::string message;
+                {
+                    py::gil_scoped_acquire gil;
+                    try {
+                        (*held)(Message{env.subject, env.src_uuid, env.data});
+                    } catch (const py::error_already_set& e) {
+                        message = e.what();
+                    }
+                }
+                if (!message.empty()) throw std::runtime_error(message);
             });
         }, py::arg("subject"), py::arg("handler"),
            "Receive messages. A subject ending in '>' matches everything below it.")
+        .def("stats", [](Session& s) {
+            const auto st = s.stats();
+            py::dict d;
+            d["received"] = st.received;
+            d["delivered"] = st.delivered;
+            d["unmatched"] = st.unmatched;
+            d["buffered_current"] = st.buffered_current;
+            d["buffered_current_bytes"] = st.buffered_current_bytes;
+            d["buffered_delivered"] = st.buffered_delivered;
+            d["buffered_dropped"] = st.buffered_dropped;
+            d["errored"] = st.errored;
+            return d;
+        }, "Message counters and buffer occupancy. unmatched counts messages "
+           "that arrived with no matching subscription; buffered_* describe "
+           "what happened to them: they are held and delivered to the first "
+           "matching subscription (see SessionConfig.buffer_unmatched), "
+           "evicted once the caps are hit, or still waiting. A persistent "
+           "unmatched count with connected peers means messages are arriving "
+           "for topics nothing subscribes to.")
+        .def("subscriptions", [](Session& s) { return s.subscriptions(); },
+             "The subject patterns currently subscribed.")
+        .def("set_buffer_limits", [](Session& s, size_t max_bytes,
+                                     size_t max_messages, bool enabled) {
+            s.set_buffer_limits(max_bytes, max_messages, enabled);
+        }, py::arg("max_bytes"), py::arg("max_messages"), py::arg("enabled") = true,
+           "Resize or disable the unmatched-message buffer at run time; "
+           "0 means no limit for that dimension.")
         .def("peers", &Session::peers, "Every device currently on the network.")
         .def("on_peer_found", [](Session& s, py::function cb) {
             auto held = hold(std::move(cb));

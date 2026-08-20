@@ -139,8 +139,15 @@ bool Node::publish(const std::string& subject, Cbor data, const std::string& dst
 
 void Node::subscribe(const std::string& subject, DataHandler handler) {
     ensure_watching_();   // app subscribe implies "I want to receive": make sure we're watching
-    std::lock_guard<std::mutex> lk(handlers_mu_);
-    handlers_.emplace_back(subject, std::move(handler));
+    {
+        std::lock_guard<std::mutex> lk(handlers_mu_);
+        handlers_.emplace_back(subject, std::move(handler));
+    }
+    // A new subscription may match messages that arrived before it existed.
+    // They were buffered, not dropped (see on_raw_): deliver them now, in
+    // arrival order, on this (the subscribing) thread. Handlers must already
+    // tolerate the network thread, so any thread is acceptable.
+    drain_buffer_(subject);
 }
 
 void Node::on_raw_(const std::string& subject, const Bytes& payload) {
@@ -198,12 +205,30 @@ void Node::on_raw_(const std::string& subject, const Bytes& payload) {
         }
         return;
     }
+    stat_received_.fetch_add(1, std::memory_order_relaxed);
     std::vector<std::pair<std::string, DataHandler>> snapshot;
+    bool has_matches = false;
     {
         std::lock_guard<std::mutex> lk(handlers_mu_);
         for (auto& [pat, h] : handlers_)
-            if (subject_matches(pat, subject)) snapshot.emplace_back(pat, h);
+            if (subject_matches(pat, subject)) {
+                snapshot.emplace_back(pat, h);
+                has_matches = true;
+            }
     }
+    if (!has_matches) {
+        // Nobody is subscribed to this yet. The transport hears everything
+        // (the internal ">" subscription), so this is never a network loss:
+        // it is an application-lifetime problem -- a subscription registered
+        // later than the first relevant message, or never. Hold the message
+        // for the first matching subscriber instead of discarding it in
+        // silence; "messages only arrive while the UI is open" is this line,
+        // on a machine where the UI was not.
+        stat_unmatched_.fetch_add(1, std::memory_order_relaxed);
+        buffer_unmatched_(subject, *env);
+        return;
+    }
+    stat_delivered_.fetch_add(1, std::memory_order_relaxed);
     for (auto& [pat, h] : snapshot) {
         // Per handler, not per message: without this, the first subscriber that
         // threw silently cancelled delivery to every subscriber after it, and
@@ -213,11 +238,164 @@ void Node::on_raw_(const std::string& subject, const Bytes& payload) {
         try {
             h(*env);
         } catch (const std::exception& e) {
+            stat_errored_.fetch_add(1, std::memory_order_relaxed);
             std::fprintf(stderr, "uninet: exception in a subscriber for '%s': %s\n",
                          subject.c_str(), e.what());
         } catch (...) {
+            stat_errored_.fetch_add(1, std::memory_order_relaxed);
             std::fprintf(stderr, "uninet: unknown exception in a subscriber for '%s'\n",
                          subject.c_str());
+        }
+    }
+}
+
+void Node::buffer_unmatched_(const std::string& subject, const Envelope& env) {
+    std::lock_guard<std::mutex> lk(buffer_mu_);
+    if (!buffer_enabled_) {
+        warn_no_subject_(subject, /*buffering=*/false);
+        return;
+    }
+    // Bounded by bytes as well as count: envelopes can carry multi-megabyte
+    // blobs, and counting messages alone would let a single blob consume the
+    // entire budget. A cap of 0 disables that dimension (see set_buffer_limits).
+    const bool count_capped = max_buffer_messages_ > 0;
+    const bool bytes_capped = max_buffer_bytes_ > 0;
+    while ((count_capped && buffer_.size() >= max_buffer_messages_) ||
+           (bytes_capped && buffer_bytes_ >= max_buffer_bytes_)) {
+        stat_buffered_dropped_.fetch_add(1, std::memory_order_relaxed);
+        buffer_bytes_ -= buffer_.front().env.data.size();
+        warn_evicted_(buffer_.front().subject);
+        buffer_.pop_front();
+    }
+    buffer_.emplace_back(BufferedMessage{subject, env});
+    buffer_bytes_ += env.data.size();
+    warn_no_subject_(subject, /*buffering=*/true);
+}
+
+void Node::drain_buffer_(const std::string& pattern) {
+    if (!buffer_enabled_) return;
+    std::vector<BufferedMessage> matches;
+    {
+        std::lock_guard<std::mutex> lk(buffer_mu_);
+        if (buffer_.empty()) return;
+        for (auto it = buffer_.begin(); it != buffer_.end();) {
+            if (subject_matches(pattern, it->subject)) {
+                buffer_bytes_ -= it->env.data.size();
+                matches.push_back(std::move(*it));
+                it = buffer_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    if (matches.empty()) return;
+    // Same rules as live delivery, on the subscribing thread. Every handler
+    // that matches NOW is newer than the buffered message (any handler
+    // present at arrival would have prevented it from being buffered), so
+    // every matching handler receives it -- exactly once.
+    for (auto& bm : matches) {
+        std::vector<std::pair<std::string, DataHandler>> snapshot;
+        {
+            std::lock_guard<std::mutex> lk(handlers_mu_);
+            for (auto& [pat, h] : handlers_)
+                if (subject_matches(pat, bm.subject)) snapshot.emplace_back(pat, h);
+        }
+        if (snapshot.empty()) continue;
+        stat_buffered_delivered_.fetch_add(1, std::memory_order_relaxed);
+        for (auto& [pat, h] : snapshot) {
+            (void)pat;
+            if (!h) continue;
+            try {
+                h(bm.env);
+            } catch (const std::exception& e) {
+                stat_errored_.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(stderr,
+                             "uninet: exception in a buffered subscriber for '%s': %s\n",
+                             bm.subject.c_str(), e.what());
+            } catch (...) {
+                stat_errored_.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(stderr,
+                             "uninet: unknown exception in a buffered subscriber for '%s'\n",
+                             bm.subject.c_str());
+            }
+        }
+    }
+}
+
+void Node::warn_no_subject_(const std::string& subject, bool buffering) {
+    // Caller holds buffer_mu_.
+    if (warned_no_subject_.count(subject)) return;
+    if (warned_no_subject_.size() >= 64) warned_no_subject_.clear();
+    warned_no_subject_.insert(subject);
+    if (buffering) {
+        std::fprintf(stderr,
+                     "uninet: '%s' has no matching subscriber; holding it in the "
+                     "bounded buffer until one is registered. Register "
+                     "subscriptions at application start, not from a UI "
+                     "callback. See Session::stats().\n", subject.c_str());
+    } else {
+        std::fprintf(stderr,
+                     "uninet: '%s' has no matching subscriber and the buffer is "
+                     "disabled: the message is discarded. Register "
+                     "subscriptions at application start, not from a UI "
+                     "callback; Session::stats().unmatched counts these.\n",
+                     subject.c_str());
+    }
+}
+
+void Node::warn_evicted_(const std::string& subject) {
+    // Caller holds buffer_mu_.
+    if (warned_evicted_.count(subject)) return;
+    if (warned_evicted_.size() >= 64) warned_evicted_.clear();
+    warned_evicted_.insert(subject);
+    std::fprintf(stderr,
+                 "uninet: unmatched '%s' evicted from the subscriber buffer "
+                 "(%zu messages, %zu bytes held): the buffer is bounded, and "
+                 "messages that arrive before any matching subscription can "
+                 "still be lost. Raise the limits or subscribe earlier; "
+                 "Session::stats().buffered_dropped counts these.\n",
+                 subject.c_str(), buffer_.size(), buffer_bytes_);
+}
+
+Node::Stats Node::stats() const {
+    Stats st;
+    st.received = stat_received_.load(std::memory_order_relaxed);
+    st.delivered = stat_delivered_.load(std::memory_order_relaxed);
+    st.unmatched = stat_unmatched_.load(std::memory_order_relaxed);
+    st.buffered_delivered = stat_buffered_delivered_.load(std::memory_order_relaxed);
+    st.buffered_dropped = stat_buffered_dropped_.load(std::memory_order_relaxed);
+    st.errored = stat_errored_.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lk(buffer_mu_);
+        st.buffered_current = buffer_.size();
+        st.buffered_current_bytes = buffer_bytes_;
+    }
+    return st;
+}
+
+std::vector<std::string> Node::subscriptions() const {
+    std::lock_guard<std::mutex> lk(handlers_mu_);
+    std::vector<std::string> out;
+    out.reserve(handlers_.size());
+    for (auto& [pat, h] : handlers_) {
+        (void)h;
+        out.push_back(pat);
+    }
+    return out;
+}
+
+void Node::set_buffer_limits(size_t max_bytes, size_t max_messages, bool enabled) {
+    std::lock_guard<std::mutex> lk(buffer_mu_);
+    max_buffer_bytes_ = max_bytes;
+    max_buffer_messages_ = max_messages;
+    buffer_enabled_ = enabled;
+    if (!enabled) {
+        // Evict everything so the counts stay honest and memory is released
+        // before the app stops subscribing to it.
+        while (!buffer_.empty()) {
+            stat_buffered_dropped_.fetch_add(1, std::memory_order_relaxed);
+            buffer_bytes_ -= buffer_.front().env.data.size();
+            buffer_.pop_front();
         }
     }
 }

@@ -114,6 +114,7 @@ def join(
     compression: Optional[Compression] = None,
     auto_reconnect: bool = True,
     reconnect_poll_ms: int = 2000,
+    subscribe: Optional[Dict[str, Any]] = None,
 ) -> Session:
     """Join the network under ``name`` and return a :class:`Session`.
 
@@ -147,6 +148,14 @@ def join(
             running session (a cable, a new Wi-Fi, a VPN coming up). On by
             default; pass False to handle it yourself.
         reconnect_poll_ms: how often to look at the interfaces, in milliseconds.
+        subscribe: register handlers at join time, atomically with the join:
+            ``join("X", subscribe={"domain.>": handler})``. Subscribing at
+            application start -- never from a UI callback, never after the
+            first relevant messages -- is the pattern this library is built
+            around, and the one that cannot lose messages: anything that
+            arrives before a subscription is buffered by the session and
+            delivered to the first matching one (see SessionConfig
+            ``max_buffer_bytes`` / ``buffer_unmatched`` and ``Session.stats()``).
 
     The returned session is also a context manager::
 
@@ -170,6 +179,9 @@ def join(
     if compression is not None:
         cfg.compression = compression   # bound now; this used to raise
     session = _join(name, cfg)
+    if subscribe:
+        for pattern, handler in subscribe.items():
+            session.subscribe(pattern, handler)
     _live.add(session)
     return session
 

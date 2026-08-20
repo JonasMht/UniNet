@@ -60,6 +60,20 @@ struct SessionConfig {
     bool auto_reconnect = true;
     int  reconnect_poll_ms = 2000;
 
+    // Messages that arrive with no matching subscription are held in a bounded
+    // FIFO and delivered to the first matching subscription, in arrival order
+    // (see Node::Stats). This turns "messages only arrive while my UI is open"
+    // -- a subscription registered later than the first relevant message, or
+    // never -- from silent loss into a buffered, countable, warned-about,
+    // recoverable event. A cap of 0 means "no limit" for that dimension.
+    // Set buffer_unmatched=false for the previous drop-in-silence behavior.
+    // The transport hears everything, so buffering loses nothing that would
+    // otherwise have been delivered: it only delays messages that nobody
+    // could have received anyway.
+    size_t max_buffer_bytes = 8u * 1024u * 1024u;   // 8 MiB
+    size_t max_buffer_messages = 256;
+    bool buffer_unmatched = true;
+
     // Extra key/value advertised to every peer, readable via Peer::header().
     std::map<std::string, std::string> headers;
 };
@@ -120,6 +134,21 @@ public:
     // else, no matter how large the payload. That contract is what Blob relies
     // on for the server pattern of "reply to a request with a volume".
     void subscribe(const std::string& subject, Node::DataHandler handler);
+
+    // Message counters and buffer occupancy; see Node::Stats. Never throws;
+    // safe from any thread. A healthy application that subscribed at start-up
+    // should see unmatched == 0; a large unmatched count with connected peers
+    // means messages are arriving for topics nothing subscribes to.
+    Node::Stats stats() const;
+    // The subject patterns currently subscribed ("trade.>", "status", ...).
+    // Lets an application assert its own contract at start-up -- "I am
+    // subscribed" -- instead of discovering later that it is not.
+    std::vector<std::string> subscriptions() const;
+    // Resize or disable the unmatched-message buffer at run time. A cap of 0
+    // means "no limit" for that dimension. Disabling evicts whatever is held
+    // (counted in stats().buffered_dropped); messages that arrive afterwards
+    // are discarded, unmatched still counts them.
+    void set_buffer_limits(size_t max_bytes, size_t max_messages, bool enabled);
 
     // ── who else is here ──
     std::vector<Peer> peers() const;

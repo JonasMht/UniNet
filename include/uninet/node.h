@@ -7,11 +7,14 @@
 #include "uninet/codec.h"
 #include "uninet/transport.h"
 
-#include <functional>
 #include <atomic>
+#include <cstdint>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace uninet {
@@ -62,6 +65,31 @@ public:
     // envelopes only (own echoes and non-matching dst_uuids are filtered).
     void subscribe(const std::string& subject, DataHandler handler);
 
+    // ── unmatched-message diagnostics and late-subscriber buffer ───────────
+    // A message that arrives with no matching subscription is held in a
+    // bounded FIFO (see on_raw_) and delivered, in arrival order, when a
+    // matching subscription is first registered. Counting and holding it
+    // instead of discarding it in silence is what turns "messages only arrive
+    // while the UI is open" into a diagnosable application-lifetime bug.
+    struct Stats {
+        uint64_t received = 0;                 // arrived at dispatch
+        uint64_t delivered = 0;                // >=1 handler ran at arrival
+        uint64_t unmatched = 0;                // zero handlers at arrival
+        uint64_t buffered_current = 0;         // held for a future subscriber
+        size_t   buffered_current_bytes = 0;
+        uint64_t buffered_delivered = 0;       // drained to a later subscriber
+        uint64_t buffered_dropped = 0;         // evicted before any match
+        uint64_t errored = 0;                  // handler threw
+    };
+    Stats stats() const;
+    std::vector<std::string> subscriptions() const;
+
+    // Change the unmatched-message caps or disable the buffer entirely. A cap
+    // of 0 means "no limit" for that dimension. When disabled, unmatched
+    // messages are discarded (still counted in stats().unmatched, still
+    // warned about once per subject). Safe to call any time, from any thread.
+    void set_buffer_limits(size_t max_bytes, size_t max_messages, bool enabled);
+
 private:
     std::string name_;
     // Written by a reconnect on the network thread, read by publish() on any
@@ -80,11 +108,43 @@ private:
     std::atomic<bool> watching_{false};
     std::mutex watch_mu_;
 
-    std::mutex handlers_mu_;
+    mutable std::mutex handlers_mu_;
     std::vector<std::pair<std::string, DataHandler>> handlers_;
+    // handlers_mu_ is mutable: subscriptions() is const and must read the
+    // handler list while a network thread may be dispatching through it.
+
+    // Held for a future subscriber instead of discarded: see on_raw_.
+    // Envelopes own refcounted Bytes, so holding them is cheap until a cap
+    // is hit.  All of this is guarded by buffer_mu_.
+    struct BufferedMessage {
+        std::string subject;
+        Envelope env;
+    };
+    mutable std::mutex buffer_mu_;
+    std::deque<BufferedMessage> buffer_;
+    size_t buffer_bytes_ = 0;
+    size_t max_buffer_bytes_ = 8u * 1024u * 1024u;  // 8 MiB; 0 = no byte cap
+    size_t max_buffer_messages_ = 256;              // 0 = no count cap
+    bool buffer_enabled_ = true;
+    // Warn once per subject (a flood must not become a log flood), and fail
+    // toward warning: if a set ever saturates it is cleared so warnings
+    // resume. Guarded by buffer_mu_.
+    std::unordered_set<std::string> warned_no_subject_;
+    std::unordered_set<std::string> warned_evicted_;
+    std::atomic<uint64_t> stat_received_{0};
+    std::atomic<uint64_t> stat_delivered_{0};
+    std::atomic<uint64_t> stat_unmatched_{0};
+    std::atomic<uint64_t> stat_buffered_delivered_{0};
+    std::atomic<uint64_t> stat_buffered_dropped_{0};
+    std::atomic<uint64_t> stat_errored_{0};
 
     void ensure_watching_();   // create the internal ">" subscription once the transport is up
     void on_raw_(const std::string& subject, const Bytes& payload);
+    void buffer_unmatched_(const std::string& subject, const Envelope& env);
+    void drain_buffer_(const std::string& pattern);
+    // Warning helpers; callers hold buffer_mu_.
+    void warn_no_subject_(const std::string& subject, bool buffering);
+    void warn_evicted_(const std::string& subject);
 };
 
 // Build a UUID: "<name>_<YYYYmmdd-HHMMSS>_<rand>". Lighter-collision than the

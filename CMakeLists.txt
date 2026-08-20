@@ -346,6 +346,13 @@ add_test(NAME network COMMAND test_network)
 # loaded CI box before calling it a failure.
 set_tests_properties(network PROPERTIES TIMEOUT 90 LABELS uninet)
 
+# Unmatched-message buffering: late subscriptions must receive what arrived
+# before them, in order, and never grow memory without limit.
+add_executable(test_unmatched tests/test_unmatched.cpp)
+target_link_libraries(test_unmatched PRIVATE uninet uninet_warnings)
+add_test(NAME unmatched COMMAND test_unmatched)
+set_tests_properties(unmatched PROPERTIES TIMEOUT 90 LABELS uninet)
+
 # Diagnostics and crash reporting. The crash test really does crash a child
 # process, because a crash handler tested any other way is a crash handler
 # nobody has run.
