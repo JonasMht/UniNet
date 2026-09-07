@@ -21,14 +21,22 @@
 //
 // Echo suppression comes free: ZRE never delivers a node its own SHOUT.
 //
-// Threading: one background thread owns the Zyre socket and runs the event
-// loop. Public methods are safe from any thread. Callbacks fire on that
-// background thread: do not block them.
+// Threading: two background threads. One owns the Zyre socket and runs the
+// event loop; it never runs application code, so it is always free to read the
+// network. The other is the delivery thread, and every subscription and peer
+// callback runs there, one at a time, in arrival order. Public methods are safe
+// from any thread.
+//
+// A handler that blocks therefore costs latency and queue occupancy rather than
+// lost messages -- see ZyreConfig's "keeping the network thread free" and
+// delivery_stats(). Handlers should still return promptly; a handler that
+// blocks for minutes will overflow any finite queue.
 #pragma once
 
 #include "uninet/peer.h"
 #include "uninet/transport.h"
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -116,6 +124,66 @@ struct ZyreConfig {
     // inside the 30 s a peer takes to expire us, so the far side usually never
     // notices the gap.
     int  reconnect_poll_ms = 2000;
+
+    // ── keeping the network thread free ──
+    // Subscription handlers do NOT run on the thread that reads the network.
+    // They run on one dedicated delivery thread, fed by a bounded queue, and
+    // the network thread does nothing but drain Zyre into that queue.
+    //
+    // WHY. The network thread is the only reader of Zyre's event outbox. Every
+    // millisecond it spends inside an application handler is a millisecond it
+    // is not reading, and the pipe behind it is finite: past its high-water
+    // mark, ZeroMQ stops accepting, Zyre's own node thread blocks trying to
+    // hand events over, its inbound router fills, and messages are DROPPED on
+    // the far side of a link that reports itself perfectly healthy. Nothing
+    // errors. The receiver simply misses messages.
+    //
+    // That is not a hypothetical. A handler in an embedded interpreter has to
+    // take the host's lock (the GIL in Python) before it can run at all, so a
+    // busy UI thread stalls delivery for as long as it stays busy -- and a
+    // stall of seconds is ordinary when the UI is computing. Handlers running
+    // on the network thread turn that into lost packets; handlers running here
+    // turn it into queue occupancy, which is bounded, counted, and visible in
+    // delivery_stats().
+    //
+    // Ordering and concurrency are unchanged: one queue, one thread, so
+    // handlers still run one at a time, in arrival order, exactly as they did
+    // when the network thread ran them. Peer found/lost callbacks go through
+    // the same queue, so "peer arrived" cannot overtake that peer's messages.
+    bool deliver_on_network_thread = false;
+
+    // How much undelivered traffic the queue may hold. 0 means "no cap" for
+    // that dimension -- an unbounded queue, which trades dropped messages for
+    // unbounded memory.
+    size_t max_delivery_bytes = 256u * 1024u * 1024u;   // 256 MiB
+    size_t max_delivery_messages = 0;                   // no count cap
+
+    // What happens at the cap: the network thread waits up to this long for the
+    // handlers to make room, and only then discards the oldest entry.
+    //
+    // WHY BOTH, AND IN THIS ORDER. The two failure modes want opposite things
+    // and neither policy alone is correct:
+    //
+    //   * A slower-but-progressing consumer -- a multi-gigabyte Blob arriving
+    //     faster than it can be written -- needs BACKPRESSURE. Dropping there
+    //     corrupts the transfer ("chunk out of order"), and the drop is not
+    //     even necessary: the consumer is keeping up, just not instantly.
+    //     Waiting hands the pressure back down the TCP connection to the
+    //     sender, which is what a reliable transfer is built on.
+    //
+    //   * A consumer that has STOPPED -- a UI handler wedged behind a lock that
+    //     will not come back -- must not be waited for forever. Blocking there
+    //     blocks the network thread, and then discovery, presence and every
+    //     other subject stop with it: the whole node goes deaf to fix one
+    //     subscriber.
+    //
+    // Waiting first and dropping second serves both: real congestion drains and
+    // loses nothing, a dead consumer costs one bounded stall and then keeps the
+    // node alive, and delivery_stats() says which of the two happened.
+    //
+    // Set to 0 to never wait (drop as soon as the cap is reached), which is the
+    // right choice only if every subscriber is known to be lossy-tolerant.
+    int delivery_block_ms = 5000;
 };
 
 enum class LinkKind {
@@ -232,6 +300,40 @@ public:
     // a status line, and in a test: it is the only externally visible proof
     // that a dropout was survived rather than never noticed.
     uint64_t reconnect_count() const;
+
+    // ── the delivery queue ──
+    // What the network thread has handed over and what the handlers have done
+    // with it. This is the one place a "we are losing messages" report can be
+    // settled without a packet capture: `dropped` is non-zero only when this
+    // application's own handlers could not keep up, and `peak_queued` says how
+    // close a run came to that.
+    struct DeliveryStats {
+        uint64_t queued = 0;          // waiting for a handler right now
+        uint64_t queued_bytes = 0;    // their payload bytes
+        uint64_t peak_queued = 0;     // high-water mark since connect()
+        uint64_t peak_queued_bytes = 0;
+        uint64_t delivered = 0;       // handed to the handlers
+        uint64_t dropped = 0;         // evicted at the cap, never delivered
+        // How long the network thread has spent waiting for the handlers to
+        // make room, in microseconds, over the life of the session. Non-zero
+        // means the queue reached its cap and backpressure did its job; a
+        // large value with dropped == 0 is a healthy loaded transfer, and the
+        // signal to raise max_delivery_bytes if the stall itself is a problem.
+        uint64_t blocked_us = 0;
+        // Longest single handler run seen, in microseconds. A handler that
+        // blocks for a second is the reason a queue backs up, and this names
+        // it without a profiler.
+        uint64_t slowest_handler_us = 0;
+        // False when handlers run on the network thread (the escape hatch in
+        // ZyreConfig), which is where dropped-on-the-wire behaviour comes back.
+        bool threaded = true;
+    };
+    DeliveryStats delivery_stats() const;
+
+    // Resize the queue while it is running. 0 means "no cap" for that
+    // dimension. Raising it costs nothing until the traffic arrives; lowering
+    // it below the current occupancy evicts oldest-first, counted as dropped.
+    void set_delivery_limits(size_t max_bytes, size_t max_messages);
 
 private:
     struct Impl;

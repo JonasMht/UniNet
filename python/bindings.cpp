@@ -606,6 +606,19 @@ PYBIND11_MODULE(_uninet, m) {
                        "Hold unmatched messages and deliver to the first matching "
                        "subscription (default true; false = drop in silence, the "
                        "pre-buffering behavior).")
+        .def_readwrite("deliver_on_network_thread",
+                       &SessionConfig::deliver_on_network_thread,
+                       "Run handlers on the thread that reads the network "
+                       "(default False). Leave it False: a handler in Python has "
+                       "to take the GIL before it can run at all, so a busy main "
+                       "thread would stall the network reader and messages would "
+                       "be dropped inside ZeroMQ before UniNet ever saw them.")
+        .def_readwrite("max_delivery_bytes", &SessionConfig::max_delivery_bytes,
+                       "Byte cap of the delivery queue (default 256 MiB; "
+                       "0 = unlimited). At the cap the OLDEST message is "
+                       "discarded and counted in delivery_stats()['dropped'].")
+        .def_readwrite("max_delivery_messages", &SessionConfig::max_delivery_messages,
+                       "Message cap of the delivery queue (default 0 = unlimited).")
         .def_readwrite("headers", &SessionConfig::headers);
 
     py::class_<Session>(m, "Session", "A device on the network. Created by uninet.join().")
@@ -666,6 +679,34 @@ PYBIND11_MODULE(_uninet, m) {
            "evicted once the caps are hit, or still waiting. A persistent "
            "unmatched count with connected peers means messages are arriving "
            "for topics nothing subscribes to.")
+        .def("delivery_stats", [](Session& s) {
+            // Deliberately on Session and not only on the transport: this is
+            // the first thing to look at when someone reports lost messages,
+            // and making them reach through .transport() to find it is how it
+            // goes unlooked-at. Raises on a closed session, like transport().
+            const auto st = s.transport().delivery_stats();
+            py::dict d;
+            d["queued"] = st.queued;
+            d["queued_bytes"] = st.queued_bytes;
+            d["peak_queued"] = st.peak_queued;
+            d["peak_queued_bytes"] = st.peak_queued_bytes;
+            d["delivered"] = st.delivered;
+            d["dropped"] = st.dropped;
+            d["slowest_handler_us"] = st.slowest_handler_us;
+            d["threaded"] = st.threaded;
+            return d;
+        }, "How the delivery queue is coping. This is where a 'we are losing "
+           "messages' report is settled: 'dropped' is non-zero only when this "
+           "application's own handlers could not keep up, 'peak_queued' says "
+           "how close a run came to that, and 'slowest_handler_us' names the "
+           "handler responsible without a profiler. All zero and threaded=True "
+           "means the receiving side is healthy and the loss is elsewhere.")
+        .def("set_delivery_limits", [](Session& s, size_t max_bytes,
+                                       size_t max_messages) {
+            s.transport().set_delivery_limits(max_bytes, max_messages);
+        }, py::arg("max_bytes"), py::arg("max_messages") = 0,
+           "Resize the delivery queue at run time; 0 means no limit for that "
+           "dimension.")
         .def("subscriptions", [](Session& s) { return s.subscriptions(); },
              "The subject patterns currently subscribed.")
         .def("set_buffer_limits", [](Session& s, size_t max_bytes,

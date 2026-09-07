@@ -78,6 +78,10 @@ std::unique_ptr<Session> Session::join(const std::string& name, SessionConfig cf
     zcfg.advertised_endpoint  = cfg.advertised_endpoint;
     zcfg.auto_reconnect       = cfg.auto_reconnect;
     zcfg.reconnect_poll_ms    = cfg.reconnect_poll_ms;
+    zcfg.deliver_on_network_thread = cfg.deliver_on_network_thread;
+    zcfg.max_delivery_bytes        = cfg.max_delivery_bytes;
+    zcfg.max_delivery_messages     = cfg.max_delivery_messages;
+    zcfg.delivery_block_ms         = cfg.delivery_block_ms;
     zcfg.headers   = cfg.headers;
     // Role and app ride the discovery beacon, so a peer list is complete the
     // moment a device appears, no follow-up query to ask what it is.

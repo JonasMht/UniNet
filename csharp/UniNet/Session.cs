@@ -274,6 +274,16 @@ namespace UniNet
         /// through <see cref="Peer.Header"/>.</param>
         /// <param name="compression">Wire compression: 0 none, 1 zlib, 2 LZ4.
         /// -1 keeps the build's default, which is the fastest tier available.</param>
+        /// <param name="maxDeliveryBytes">Cap on the native delivery queue that
+        /// keeps subscription handlers off the thread reading the network.
+        /// -1 keeps the default (256 MiB), 0 removes the cap. Distinct from
+        /// <see cref="MaxPendingEvents"/>, which bounds the managed queue that
+        /// <see cref="Update"/> drains: a message crosses both.</param>
+        /// <param name="maxDeliveryMessages">The same cap counted in messages.
+        /// -1 keeps the default (unlimited).</param>
+        /// <param name="deliveryBlockMs">How long the native network thread
+        /// waits for room before discarding the oldest queued message.
+        /// -1 keeps the default (5000).</param>
         public static Session Join(string name,
                                    string role = "",
                                    string app = "",
@@ -286,7 +296,10 @@ namespace UniNet
                                    string endpoint = "",
                                    string advertisedEndpoint = "",
                                    IReadOnlyDictionary<string, string>? headers = null,
-                                   int compression = -1)
+                                   int compression = -1,
+                                   long maxDeliveryBytes = -1,
+                                   long maxDeliveryMessages = -1,
+                                   int deliveryBlockMs = -1)
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException("a device name is required", nameof(name));
@@ -296,7 +309,9 @@ namespace UniNet
             Native.EnsureLoadable();
 
             IntPtr handle;
-            if (headers != null || compression >= 0)
+            bool wantsDeliveryConfig = maxDeliveryBytes >= 0 || maxDeliveryMessages >= 0 ||
+                                       deliveryBlockMs >= 0;
+            if (headers != null || compression >= 0 || wantsDeliveryConfig)
             {
                 // The config-handle path, which is the only way to reach headers
                 // and compression. join_ex cannot express either.
@@ -321,6 +336,12 @@ namespace UniNet
                         Native.uninet_config_set_compression(cfg, compression) != Status.Ok)
                         throw new ArgumentOutOfRangeException(
                             nameof(compression), "UniNet: " + Native.LastError());
+                    // Passed together, and -1 for any of them means "leave that
+                    // one at its default", so setting one knob does not silently
+                    // reset the other two.
+                    if (wantsDeliveryConfig)
+                        Native.uninet_config_set_delivery(cfg, maxDeliveryBytes,
+                                                          maxDeliveryMessages, deliveryBlockMs);
                     handle = Native.uninet_session_join_cfg(name, cfg);
                 }
                 finally { Native.uninet_config_free(cfg); }
@@ -520,6 +541,46 @@ namespace UniNet
         /// Update() is not being called often enough.
         /// </summary>
         public int PendingEvents => _pending.Count;
+
+        /// <summary>
+        /// How the NATIVE delivery queue is coping: the queue that keeps
+        /// subscription handlers off the thread reading the network.
+        /// </summary>
+        /// <remarks>
+        /// A message crosses two queues on its way to a Unity script: this one,
+        /// inside the native library, and the managed one that
+        /// <see cref="Update"/> drains. They fail differently and this is how to
+        /// tell them apart when messages go missing:
+        ///
+        /// <list type="bullet">
+        /// <item><description><c>Dropped</c> here, with
+        /// <see cref="DroppedEvents"/> at zero: the native handler could not
+        /// keep up. On this binding that handler only copies bytes and
+        /// enqueues, so this should never happen; if it does, the machine is
+        /// starved rather than the code being slow.</description></item>
+        /// <item><description><see cref="DroppedEvents"/> climbing: Update() is
+        /// not being called often enough, or the game loop is stalling. This is
+        /// the usual one.</description></item>
+        /// <item><description>Both zero, and a message still missing: it was
+        /// never received. Look at the sender, the realm, and the network.
+        /// </description></item>
+        /// </list>
+        /// </remarks>
+        public DeliveryStats Delivery
+        {
+            get
+            {
+                ThrowIfDisposed();
+                int rc = Native.uninet_session_delivery_stats(
+                    _handle, out ulong queued, out ulong queuedBytes, out ulong peak,
+                    out ulong delivered, out ulong dropped, out ulong blockedUs,
+                    out ulong slowestUs, out int threaded);
+                if (rc != Status.Ok)
+                    throw new InvalidOperationException("UniNet: " + Native.LastError());
+                return new DeliveryStats(queued, queuedBytes, peak, delivered, dropped,
+                                         blockedUs, slowestUs, threaded != 0);
+            }
+        }
 
         /// <summary>Receive messages. A subject ending in "&gt;" matches everything below it.</summary>
         public void Subscribe(string subject, Action<Message> handler)
@@ -759,5 +820,74 @@ namespace UniNet
         }
 
         ~Session() => Dispose();
+    }
+
+    /// <summary>
+    /// A snapshot of the native delivery queue: what the network thread has
+    /// handed over and what the handlers have done with it.
+    /// </summary>
+    /// <remarks>
+    /// This is what settles a "we are losing messages" report without a packet
+    /// capture. <see cref="Dropped"/> is non-zero only when THIS process
+    /// discarded messages because a handler stopped draining the queue; all
+    /// zero means the receiving side is healthy and the loss is elsewhere.
+    /// See <see cref="Session.Delivery"/> for how it relates to the managed
+    /// queue that <see cref="Session.Update"/> drains.
+    /// </remarks>
+    public readonly struct DeliveryStats
+    {
+        internal DeliveryStats(ulong queued, ulong queuedBytes, ulong peakQueued,
+                               ulong delivered, ulong dropped, ulong blockedUs,
+                               ulong slowestHandlerUs, bool threaded)
+        {
+            Queued = queued;
+            QueuedBytes = queuedBytes;
+            PeakQueued = peakQueued;
+            Delivered = delivered;
+            Dropped = dropped;
+            BlockedMicroseconds = blockedUs;
+            SlowestHandlerMicroseconds = slowestHandlerUs;
+            Threaded = threaded;
+        }
+
+        /// <summary>Messages waiting for a handler right now.</summary>
+        public ulong Queued { get; }
+        /// <summary>Their payload bytes.</summary>
+        public ulong QueuedBytes { get; }
+        /// <summary>High-water mark of <see cref="Queued"/> since the join.</summary>
+        public ulong PeakQueued { get; }
+        /// <summary>Messages handed to the handlers.</summary>
+        public ulong Delivered { get; }
+        /// <summary>
+        /// Messages discarded at the cap, never delivered. Non-zero means a
+        /// handler stopped draining the queue for longer than the configured
+        /// block budget.
+        /// </summary>
+        public ulong Dropped { get; }
+        /// <summary>
+        /// How long the network thread has spent waiting for room, in
+        /// microseconds. Non-zero with <see cref="Dropped"/> at zero is a
+        /// healthy loaded transfer: backpressure did its job and nothing was
+        /// lost.
+        /// </summary>
+        public ulong BlockedMicroseconds { get; }
+        /// <summary>
+        /// The longest single handler run seen, in microseconds. Names the
+        /// handler responsible for a backed-up queue without a profiler.
+        /// </summary>
+        public ulong SlowestHandlerMicroseconds { get; }
+        /// <summary>
+        /// False when handlers run on the network thread, where a slow handler
+        /// costs messages rather than latency. True in every default setup.
+        /// </summary>
+        public bool Threaded { get; }
+
+        /// <summary>One line for a log or a status overlay.</summary>
+        public override string ToString() =>
+            $"queued {Queued} ({QueuedBytes / 1024} KiB), peak {PeakQueued}, " +
+            $"delivered {Delivered}, dropped {Dropped}, " +
+            $"blocked {BlockedMicroseconds / 1000} ms, " +
+            $"slowest handler {SlowestHandlerMicroseconds / 1000} ms" +
+            (Threaded ? "" : ", ON THE NETWORK THREAD");
     }
 }

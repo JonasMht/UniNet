@@ -353,6 +353,17 @@ target_link_libraries(test_unmatched PRIVATE uninet uninet_warnings)
 add_test(NAME unmatched COMMAND test_unmatched)
 set_tests_properties(unmatched PROPERTIES TIMEOUT 90 LABELS uninet)
 
+# The delivery thread: a slow subscription handler must cost latency, never
+# messages. Every other network test has handlers that return instantly, which
+# is exactly why the "we lose packets while the viewer is busy" failure could
+# live in the library for as long as it did.
+add_executable(test_delivery tests/test_delivery.cpp)
+target_link_libraries(test_delivery PRIVATE uninet uninet_warnings)
+add_test(NAME delivery COMMAND test_delivery)
+# Deliberately slow: several sub-tests block a handler for seconds to prove the
+# network thread is unaffected.
+set_tests_properties(delivery PROPERTIES TIMEOUT 180 LABELS uninet)
+
 # Diagnostics and crash reporting. The crash test really does crash a child
 # process, because a crash handler tested any other way is a crash handler
 # nobody has run.

@@ -12,8 +12,11 @@
 #include <zyre.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <cstdio>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -235,6 +238,210 @@ struct ZyreTransport::Impl {
     std::thread watchdog;
     std::atomic<bool> watching{false};
 
+    // ── the delivery queue ────────────────────────────────────────────────
+    // One work item for the delivery thread: a received message, or a peer
+    // appearing or leaving. All three share one queue so that they are handed
+    // to the application in the order the network produced them -- a peer's
+    // ENTER cannot arrive after the first message it sent.
+    struct Work {
+        enum class Kind { Message, PeerFound, PeerLost };
+        Kind        kind = Kind::Message;
+        std::string subject;   // Message only
+        Bytes       payload;   // Message only
+        Peer        peer;      // PeerFound / PeerLost only
+
+        // What this entry costs against max_delivery_bytes. The payload
+        // dominates; a peer event is charged its fixed overhead so that a
+        // storm of them cannot grow the queue without ever hitting the cap.
+        size_t weight() const { return payload.size() + subject.size() + 64; }
+    };
+
+    std::mutex               deliver_mu;
+    // Two conditions on one mutex, deliberately separate: `deliver_cv` wakes
+    // the consumer when work arrives, `deliver_room_cv` wakes the producer when
+    // work leaves. Sharing one would wake the consumer on every dequeue, which
+    // is the thread that just did it.
+    std::condition_variable  deliver_cv;
+    std::condition_variable  deliver_room_cv;
+    std::deque<Work>         deliver_q;
+    size_t                   deliver_bytes = 0;
+    // Copied out of cfg at connect() so set_delivery_limits() can change them
+    // afterwards without racing anything that reads cfg.
+    size_t                   max_deliver_bytes = 0;
+    size_t                   max_deliver_messages = 0;
+    bool                     deliver_stop = false;
+    std::thread              deliver_thread;
+    // The delivery thread's id, so disconnect() can refuse to join itself when
+    // it is called from inside a handler -- the same trap actor_thread guards
+    // against, now that handlers no longer run on the actor thread.
+    std::atomic<std::thread::id> deliver_thread_id{};
+    // Counters. Read without the lock for a cheap stats() call, so they are
+    // atomic; the queue-occupancy pair is read under the lock, where it is
+    // consistent with the deque itself.
+    std::atomic<uint64_t> stat_delivered{0};
+    std::atomic<uint64_t> stat_dropped{0};
+    std::atomic<uint64_t> stat_peak_queued{0};
+    std::atomic<uint64_t> stat_peak_bytes{0};
+    std::atomic<uint64_t> stat_slowest_us{0};
+    std::atomic<uint64_t> stat_blocked_us{0};
+    // Warn once, not once per dropped message: a queue that is overflowing is
+    // overflowing thousands of times a second, and a log line per drop would
+    // itself become the reason the application cannot keep up.
+    std::atomic<bool> warned_dropping{false};
+
+    bool on_deliver_thread() const {
+        return deliver_thread_id.load() == std::this_thread::get_id();
+    }
+
+    // Hand one item to the delivery thread. Called ONLY from the actor thread,
+    // which is what makes "the network thread never blocks" true: this takes an
+    // uncontended mutex, moves the payload, and returns.
+    void enqueue(Work&& work) {
+        // The escape hatch: run it here, on the network thread, exactly as
+        // older versions did. Kept because a caller whose handlers are known to
+        // be trivial may prefer the shorter path, and because it is the one
+        // configuration that reproduces the old behaviour when comparing.
+        if (cfg.deliver_on_network_thread) { run_work(work); return; }
+
+        size_t evicted = 0;
+        {
+            std::unique_lock<std::mutex> lk(deliver_mu);
+            const size_t cost = work.weight();
+
+            // Would this item put the queue over either cap? Both are optional
+            // (0 == unlimited) and are checked independently.
+            //
+            // A queue that is EMPTY always has room, whatever the caps say:
+            // otherwise one item larger than max_delivery_bytes could never be
+            // admitted at all, and the caps would silently discard exactly the
+            // large blobs they exist to make room for.
+            auto has_room = [&] {
+                if (deliver_q.empty()) return true;
+                if (max_deliver_bytes > 0 && deliver_bytes + cost > max_deliver_bytes)
+                    return false;
+                if (max_deliver_messages > 0 && deliver_q.size() + 1 > max_deliver_messages)
+                    return false;
+                return true;
+            };
+
+            // ── backpressure first ──
+            // Wait for the handlers to drain, up to the configured budget. This
+            // is what keeps a large Blob transfer intact: the consumer is
+            // slower than the wire but it IS progressing, so room appears, the
+            // pressure is handed back down the TCP connection to the sender,
+            // and nothing is lost. See ZyreConfig::delivery_block_ms.
+            //
+            // `running` is in the predicate so that disconnect() -- which
+            // clears it before it joins this thread -- cannot deadlock against
+            // a consumer that has stopped draining.
+            if (!has_room() && cfg.delivery_block_ms > 0) {
+                const auto began = std::chrono::steady_clock::now();
+                deliver_room_cv.wait_for(lk,
+                                         std::chrono::milliseconds(cfg.delivery_block_ms),
+                                         [&] { return has_room() || !running.load(); });
+                stat_blocked_us.fetch_add(
+                    uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - began).count()),
+                    std::memory_order_relaxed);
+            }
+
+            // ── then, and only then, drop ──
+            // The wait expired, so the consumer is not merely slow: it has
+            // stopped. Make room by discarding the OLDEST entries, because what
+            // this library carries is live state (a pose, a plan, a temperature
+            // field) and the newest message is the one worth keeping.
+            while (!has_room()) {
+                deliver_bytes -= deliver_q.front().weight();
+                deliver_q.pop_front();
+                ++evicted;
+            }
+
+            deliver_bytes += cost;
+            deliver_q.push_back(std::move(work));
+
+            // High-water marks, under the lock so the pair stays consistent.
+            const uint64_t n = deliver_q.size();
+            if (n > stat_peak_queued.load(std::memory_order_relaxed))
+                stat_peak_queued.store(n, std::memory_order_relaxed);
+            if (deliver_bytes > stat_peak_bytes.load(std::memory_order_relaxed))
+                stat_peak_bytes.store(deliver_bytes, std::memory_order_relaxed);
+        }
+        if (evicted) {
+            stat_dropped.fetch_add(evicted, std::memory_order_relaxed);
+            if (!warned_dropping.exchange(true))
+                std::fprintf(stderr,
+                             "uninet: a subscription handler stopped draining the "
+                             "delivery queue for longer than %d ms, the queue hit "
+                             "its cap, and messages are now being discarded. Make "
+                             "the handler return promptly (hand the work to your "
+                             "own thread), or raise the cap with "
+                             "set_delivery_limits(). Counted in "
+                             "delivery_stats().dropped.\n",
+                             cfg.delivery_block_ms);
+        }
+        deliver_cv.notify_one();
+    }
+
+    // Run one item. Shared by the delivery thread and the escape hatch above so
+    // the two paths cannot drift apart.
+    void run_work(Work& work) {
+        const auto began = std::chrono::steady_clock::now();
+        switch (work.kind) {
+            case Work::Kind::Message:   deliver_message(work.subject, work.payload); break;
+            case Work::Kind::PeerFound: deliver_peer(work.peer, /*found=*/true);  break;
+            case Work::Kind::PeerLost:  deliver_peer(work.peer, /*found=*/false); break;
+        }
+        stat_delivered.fetch_add(1, std::memory_order_relaxed);
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - began).count();
+        if (us > 0 && uint64_t(us) > stat_slowest_us.load(std::memory_order_relaxed))
+            stat_slowest_us.store(uint64_t(us), std::memory_order_relaxed);
+    }
+
+    // Ask the delivery thread to finish what it holds and exit, then join it.
+    // Idempotent, and safe to call when no thread was ever started.
+    void stop_delivery() {
+        if (!deliver_thread.joinable()) return;
+        {
+            std::lock_guard<std::mutex> lk(deliver_mu);
+            deliver_stop = true;
+        }
+        deliver_cv.notify_all();
+        deliver_room_cv.notify_all();   // release a producer waiting on the cap
+        deliver_thread.join();
+        deliver_thread_id.store(std::thread::id{});
+    }
+
+    // The delivery thread. Owns nothing; it only runs application callbacks.
+    void deliver_loop() {
+        deliver_thread_id.store(std::this_thread::get_id());
+        for (;;) {
+            Work work;
+            {
+                std::unique_lock<std::mutex> lk(deliver_mu);
+                deliver_cv.wait(lk, [this] { return deliver_stop || !deliver_q.empty(); });
+                // Stop only once the queue is drained. A message that reached
+                // this thread before close() was called is a message the
+                // application was going to see, and dropping it at shutdown
+                // would make an orderly close lose data that a crash would not.
+                if (deliver_q.empty()) {
+                    if (deliver_stop) return;
+                    continue;
+                }
+                work = std::move(deliver_q.front());
+                deliver_q.pop_front();
+                deliver_bytes -= work.weight();
+            }
+            // Room has been made: let a network thread waiting on the cap in
+            // enqueue() proceed. Notified after the lock is released, and
+            // before the handler runs, so backpressure is relieved by the
+            // dequeue rather than by the handler finishing -- otherwise a slow
+            // handler would hold the network thread for its whole duration.
+            deliver_room_cv.notify_one();
+            run_work(work);       // outside the lock: a handler may publish, or block
+        }
+    }
+
     // Create the ZRE node and put its headers on it. Headers live on the node,
     // so a rebuild has to re-apply them or the device comes back nameless.
     bool build_node() {
@@ -440,9 +647,10 @@ struct ZyreTransport::Impl {
         return actor_thread.load() == std::this_thread::get_id();
     }
 
-    // Deliver a received message to every matching subscriber. Handlers run
-    // outside the lock so one that publishes (a reply) cannot deadlock.
-    void dispatch(const std::string& subject, const Bytes& payload) {
+    // Deliver a received message to every matching subscriber. Runs on the
+    // delivery thread. Handlers run outside the lock so one that publishes (a
+    // reply) cannot deadlock.
+    void deliver_message(const std::string& subject, const Bytes& payload) {
         std::vector<MessageHandler> matched;
         {
             std::lock_guard<std::mutex> lk(mu);
@@ -454,6 +662,17 @@ struct ZyreTransport::Impl {
             // and must never unwind into Zyre's C frames.
             try { if (h) h(subject, payload); } catch (...) {}
         }
+    }
+
+    // Fire one peer callback. Runs on the delivery thread, beside the messages,
+    // so the application sees presence and traffic in one consistent order.
+    void deliver_peer(const Peer& peer, bool found) {
+        PeerCallback cb;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            cb = found ? on_found : on_lost;
+        }
+        if (cb) { try { cb(peer); } catch (...) {} }
     }
 
     // ENTER: a ZRE node appeared on the beacon port. It is NOT yet one of ours -
@@ -486,7 +705,7 @@ struct ZyreTransport::Impl {
     void peer_joined(const char* uuid_c, const char* group_c) {
         if (!uuid_c || !group_c || cfg.realm != group_c) return;
         Peer p;
-        PeerCallback cb;
+        bool have_handler = false;
         {
             std::lock_guard<std::mutex> lk(mu);
             if (peers.count(uuid_c)) return;          // already visible
@@ -497,9 +716,18 @@ struct ZyreTransport::Impl {
                 p.uuid = uuid_c;                      // JOIN before ENTER: rare, survivable
             }
             peers[p.uuid] = p;
-            cb = on_found;
+            have_handler = bool(on_found);
         }
-        if (cb) { try { cb(p); } catch (...) {} }
+        // The peers() table is updated above, synchronously, so a caller
+        // polling it sees the new device immediately; only the callback is
+        // queued. Skipping the queue entirely when nothing is registered keeps
+        // an application that only polls from paying for a queue it never
+        // reads.
+        if (!have_handler) return;
+        Work w;
+        w.kind = Work::Kind::PeerFound;
+        w.peer = std::move(p);
+        enqueue(std::move(w));
     }
 
     // LEAVE our realm, or EXIT the network entirely: either way the peer stops
@@ -508,8 +736,8 @@ struct ZyreTransport::Impl {
     void peer_gone(const char* uuid_c, bool forget) {
         if (!uuid_c) return;
         Peer gone;
-        PeerCallback cb;
         bool was_visible = false;
+        bool have_handler = false;
         {
             std::lock_guard<std::mutex> lk(mu);
             if (forget) seen.erase(uuid_c);
@@ -518,10 +746,14 @@ struct ZyreTransport::Impl {
                 gone = it->second;
                 peers.erase(it);
                 was_visible = true;
-                cb = on_lost;
+                have_handler = bool(on_lost);
             }
         }
-        if (was_visible && cb) { try { cb(gone); } catch (...) {} }
+        if (!was_visible || !have_handler) return;
+        Work w;
+        w.kind = Work::Kind::PeerLost;
+        w.peer = std::move(gone);
+        enqueue(std::move(w));
     }
 
     void handle_event(zyre_event_t* ev) {
@@ -547,9 +779,16 @@ struct ZyreTransport::Impl {
             char* subj = zmsg_popstr(m);
             zframe_t* body = zmsg_pop(m);
             if (subj && body) {
+                // Copy out of the zframe and hand the bytes straight to the
+                // delivery thread. This is all the network thread does with a
+                // message, which is the point: whatever the application's
+                // handlers cost, they cost it somewhere else.
                 const uint8_t* d = zframe_data(body);
-                Bytes payload(d, d + zframe_size(body));
-                dispatch(subj, payload);
+                Work w;
+                w.kind    = Work::Kind::Message;
+                w.subject = subj;
+                w.payload.assign(d, d + zframe_size(body));
+                enqueue(std::move(w));
             }
             freen(subj);
             zframe_destroy(&body);
@@ -700,12 +939,28 @@ bool ZyreTransport::connect() {
     }
 
     impl_->running.store(true);
+
+    // The delivery thread starts BEFORE the actor, so there is a consumer in
+    // place for the very first beacon. Started the other way round, the first
+    // messages would sit in the queue until this line ran -- harmless, but it
+    // would make the queue's occupancy at start-up depend on scheduling.
+    if (!impl_->cfg.deliver_on_network_thread) {
+        {
+            std::lock_guard<std::mutex> lk(impl_->deliver_mu);
+            impl_->deliver_stop = false;
+            impl_->max_deliver_bytes    = impl_->cfg.max_delivery_bytes;
+            impl_->max_deliver_messages = impl_->cfg.max_delivery_messages;
+        }
+        impl_->deliver_thread = std::thread([impl = impl_.get()] { impl->deliver_loop(); });
+    }
+
     // zactor_new blocks until actor_fn signals, so the poller is live before we
     // return and no early beacon is missed.
     impl_->actor = zactor_new(Impl::actor_fn, impl_.get());
     if (!impl_->actor) {
         impl_->running.store(false);
         impl_->set_error("could not start the network thread");
+        impl_->stop_delivery();       // do not leave a thread behind on a failed connect
         zyre_stop(impl_->node);
         return false;
     }
@@ -754,11 +1009,59 @@ uint64_t ZyreTransport::reconnect_count() const {
     return impl_->reconnects.load(std::memory_order_relaxed);
 }
 
+ZyreTransport::DeliveryStats ZyreTransport::delivery_stats() const {
+    DeliveryStats s;
+    s.threaded = !impl_->cfg.deliver_on_network_thread;
+    {
+        // Occupancy is read under the queue's own lock so the count and the
+        // byte total describe the same instant. A caller comparing them (
+        // "1 message holding 200 MB") would otherwise see a torn pair.
+        std::lock_guard<std::mutex> lk(impl_->deliver_mu);
+        s.queued       = impl_->deliver_q.size();
+        s.queued_bytes = impl_->deliver_bytes;
+    }
+    s.peak_queued        = impl_->stat_peak_queued.load(std::memory_order_relaxed);
+    s.peak_queued_bytes  = impl_->stat_peak_bytes.load(std::memory_order_relaxed);
+    s.delivered          = impl_->stat_delivered.load(std::memory_order_relaxed);
+    s.dropped            = impl_->stat_dropped.load(std::memory_order_relaxed);
+    s.slowest_handler_us = impl_->stat_slowest_us.load(std::memory_order_relaxed);
+    s.blocked_us         = impl_->stat_blocked_us.load(std::memory_order_relaxed);
+    return s;
+}
+
+void ZyreTransport::set_delivery_limits(size_t max_bytes, size_t max_messages) {
+    size_t evicted = 0;
+    {
+        std::lock_guard<std::mutex> lk(impl_->deliver_mu);
+        impl_->max_deliver_bytes    = max_bytes;
+        impl_->max_deliver_messages = max_messages;
+        // Apply the new caps to what is already held, oldest first, so that
+        // lowering a cap takes effect now rather than at the next message.
+        while (!impl_->deliver_q.empty() &&
+               ((max_bytes > 0 && impl_->deliver_bytes > max_bytes) ||
+                (max_messages > 0 && impl_->deliver_q.size() > max_messages))) {
+            impl_->deliver_bytes -= impl_->deliver_q.front().weight();
+            impl_->deliver_q.pop_front();
+            ++evicted;
+        }
+    }
+    if (evicted) impl_->stat_dropped.fetch_add(evicted, std::memory_order_relaxed);
+    // Raising a cap can make room for a network thread already waiting on the
+    // old one; without this it would wait out its full budget for nothing.
+    impl_->deliver_room_cv.notify_all();
+}
+
 void ZyreTransport::disconnect() {
     // Calling this from a callback would join the thread we are running on.
     // Refusing loudly beats hanging: the caller gets an explanation from
     // last_error() instead of a process that never returns.
-    if (impl_->actor_thread.load() == std::this_thread::get_id()) {
+    //
+    // BOTH threads are checked. Handlers run on the delivery thread now, so
+    // that is where a close-from-a-callback comes from in practice; the actor
+    // thread stays covered because the escape hatch
+    // (ZyreConfig::deliver_on_network_thread) still runs handlers there.
+    if (impl_->actor_thread.load() == std::this_thread::get_id() ||
+        impl_->on_deliver_thread()) {
         impl_->set_error("disconnect() was called from a UniNet callback, which "
                          "would deadlock; close the session from another thread");
         return;
@@ -777,6 +1080,18 @@ void ZyreTransport::disconnect() {
         std::lock_guard<std::mutex> lk(impl_->pipe_mu);
         if (impl_->actor) zactor_destroy(&impl_->actor);
     }
+
+    // Only now the delivery thread, and only after the actor is gone: while the
+    // actor still ran it could enqueue, and a queue that grows after the drain
+    // has started would never finish draining. In this order the queue has a
+    // producer or a consumer, never a producer and a stopping consumer.
+    //
+    // It drains before it exits (see deliver_loop), so messages that had
+    // already reached this process are delivered rather than discarded by the
+    // act of closing. A handler still running when this is called is waited
+    // for; that is the same contract every other thread join here has.
+    impl_->stop_delivery();
+
     if (impl_->node) zyre_stop(impl_->node);   // sends EXIT: peers drop us at once
 
     // Report the departures instead of silently emptying the table: an app that

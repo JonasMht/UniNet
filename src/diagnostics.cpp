@@ -260,6 +260,28 @@ std::string diagnostics() {
             out += "  uuid " + s->uuid();
             out += "  peers " + std::to_string(s->peers().size());
             out += "  reconnects " + std::to_string(t.reconnect_count());
+
+            // The delivery queue, on its own line. This is the section that
+            // answers "are WE losing messages, or is the other end not sending
+            // them": dropped > 0 means this process discarded them itself, and
+            // everything else on the line says why.
+            const auto d = t.delivery_stats();
+            out += "\n      delivery: ";
+            out += d.threaded ? "own thread" : "ON THE NETWORK THREAD (messages can be lost)";
+            out += ", queued " + std::to_string(d.queued) +
+                   " (" + std::to_string(d.queued_bytes / 1024) + " KiB)"
+                   ", peak " + std::to_string(d.peak_queued) +
+                   ", delivered " + std::to_string(d.delivered);
+            if (d.dropped)
+                out += ", DROPPED " + std::to_string(d.dropped) +
+                       " (a handler stopped draining the queue)";
+            if (d.blocked_us > 1000)
+                out += ", network thread waited " +
+                       std::to_string(d.blocked_us / 1000) + " ms for room";
+            if (d.slowest_handler_us > 1000)
+                out += ", slowest handler " +
+                       std::to_string(d.slowest_handler_us / 1000) + " ms";
+
             const std::string err = t.last_error();
             if (!err.empty()) out += "\n      last error: " + err;
         } catch (const std::exception&) {

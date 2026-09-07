@@ -225,6 +225,9 @@ namespace UniNet
             [MarshalAs(UnmanagedType.LPUTF8Str)] string endpoint,
             [MarshalAs(UnmanagedType.LPUTF8Str)] string advertised);
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_delivery(IntPtr cfg,
+            long maxBytes, long maxMessages, int blockMs);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr uninet_session_join_cfg(
             [MarshalAs(UnmanagedType.LPUTF8Str)] string name, IntPtr cfg);
 
@@ -351,6 +354,12 @@ namespace UniNet
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uninet_diagnostics(byte[] buf, UIntPtr buflen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_session_delivery_stats(IntPtr session,
+            out ulong queued, out ulong queuedBytes, out ulong peakQueued,
+            out ulong delivered, out ulong dropped, out ulong blockedUs,
+            out ulong slowestHandlerUs, out int threaded);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uninet_enable_crash_log(

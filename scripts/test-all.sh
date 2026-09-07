@@ -124,7 +124,7 @@ if [ "$USE_SAN" -eq 1 ]; then
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" >/dev/null 2>&1 \
        && cmake --build "$SAN_TSAN" -j"$(nproc 2>/dev/null || echo 4)" \
-               --target test_network test_reconnect >/dev/null 2>&1; then
+               --target test_network test_reconnect test_delivery >/dev/null 2>&1; then
         # setarch -R: TSan aborts with "unexpected memory mapping" under ASLR
         # often enough to make the stage flaky otherwise.
         # The reconnect test too: it is the most concurrent thing in the tree,
@@ -134,7 +134,12 @@ if [ "$USE_SAN" -eq 1 ]; then
         setarch -R "$SAN_TSAN/test_network" > /tmp/uninet-tsan.log 2>&1; NET_RC=$?
         "$HERE/scripts/test-reconnect.sh" "$SAN_TSAN/test_reconnect" \
             >> /tmp/uninet-tsan.log 2>&1; REC_RC=$?
-        if [ $NET_RC -eq 0 ] && [ $REC_RC -eq 0 ]; then
+        # And the delivery queue, which hands buffers between the network
+        # thread, the delivery thread and the caller, and blocks each of them
+        # on the others by design. A race here would look exactly like the
+        # packet loss the queue exists to remove.
+        setarch -R "$SAN_TSAN/test_delivery" >> /tmp/uninet-tsan.log 2>&1; DEL_RC=$?
+        if [ $NET_RC -eq 0 ] && [ $REC_RC -eq 0 ] && [ $DEL_RC -eq 0 ]; then
             RACES="$(grep -c 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log || true)"
             if [ "${RACES:-0}" -eq 0 ]; then pass "tsan (0 races)"; else
                 grep -A6 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log | head -20
@@ -148,7 +153,7 @@ if [ "$USE_SAN" -eq 1 ]; then
             grep -A6 'WARNING: ThreadSanitizer' /tmp/uninet-tsan.log | head -20
             grep -E 'FATAL|^FAIL' /tmp/uninet-tsan.log | head -5
             if [ "${RACES:-0}" -eq 0 ]; then
-                fail "tsan (no races, but a test exited non-zero: network=$NET_RC reconnect=$REC_RC)"
+                fail "tsan (no races, but a test exited non-zero: network=$NET_RC reconnect=$REC_RC delivery=$DEL_RC)"
             else
                 fail "tsan ($RACES races)"
             fi
@@ -182,6 +187,11 @@ if [ "$USE_SAN" -eq 1 ]; then
             "$SAN_ASAN/test_roundtrip" >/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
         ASAN_OPTIONS="detect_leaks=0:suppressions=$HERE/scripts/asan.supp" \
             "$SAN_ASAN/test_network" >>/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
+        # The delivery queue: the most concurrency-heavy test in the suite, and
+        # the one that hands buffers between three threads (network, delivery,
+        # caller). Worth an ASan pass on its own.
+        ASAN_OPTIONS="detect_leaks=0:suppressions=$HERE/scripts/asan.supp" \
+            "$SAN_ASAN/test_delivery" >>/tmp/uninet-asan.log 2>&1 || SAN_FAIL=1
         grep -E 'ERROR: (Address|Leak)Sanitizer|runtime error' /tmp/uninet-asan.log \
             > /tmp/uninet-asan-findings.log 2>/dev/null || true
         # Attribute each finding by its FIRST non-interceptor stack frame. The

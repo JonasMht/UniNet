@@ -60,6 +60,25 @@ struct SessionConfig {
     bool auto_reconnect = true;
     int  reconnect_poll_ms = 2000;
 
+    // ── where subscription handlers run ──
+    // On a dedicated delivery thread, not on the thread that reads the
+    // network, so a slow handler costs latency instead of lost messages. See
+    // ZyreConfig's "keeping the network thread free" for why that distinction
+    // is the difference between a queue and a packet loss, and
+    // ZyreTransport::delivery_stats() for the counters that prove which one
+    // you are looking at.
+    //
+    // Handlers still run one at a time in arrival order: this decouples them
+    // from the network, it does not make them concurrent.
+    bool deliver_on_network_thread = false;
+    size_t max_delivery_bytes = 256u * 1024u * 1024u;   // 0 = no cap
+    size_t max_delivery_messages = 0;                   // 0 = no cap
+    // At the cap, wait this long for the handlers to make room before
+    // discarding the oldest message. Backpressure for a consumer that is merely
+    // slow (a large Blob arriving faster than it is written), a bounded stall
+    // for one that has stopped. See ZyreConfig::delivery_block_ms.
+    int delivery_block_ms = 5000;
+
     // Messages that arrive with no matching subscription are held in a bounded
     // FIFO and delivered to the first matching subscription, in arrival order
     // (see Node::Stats). This turns "messages only arrive while my UI is open"
@@ -116,9 +135,16 @@ public:
     // `subject` is exact, or ends in ">" to match everything below it
     // ("sensors.>"). ">" alone matches everything.
     //
-    // LIFETIME. The handler runs on the network thread and keeps running until
-    // the session is closed. Anything it captures by reference must outlive the
-    // session:
+    // WHERE IT RUNS. On the session's delivery thread, one handler at a time,
+    // in arrival order -- NOT on the thread that reads the network. A handler
+    // that takes its time therefore costs latency and queue occupancy, not
+    // messages; see SessionConfig's "where subscription handlers run" and
+    // transport().delivery_stats(). It is still worth returning promptly: the
+    // queue is bounded, and past its cap the network thread waits and then
+    // discards.
+    //
+    // LIFETIME. The handler keeps running until the session is closed.
+    // Anything it captures by reference must outlive the session:
     //
     //     std::vector<Msg> received;              // declared BEFORE the session
     //     auto net = Session::join("Viewer");     // so it is destroyed AFTER it
@@ -133,6 +159,11 @@ public:
     // frames sent from a handler go to the network in order with everything
     // else, no matter how large the payload. That contract is what Blob relies
     // on for the server pattern of "reply to a request with a volume".
+    //
+    // THREAD AFFINITY. The delivery thread is UniNet's, not the host's. A
+    // handler that has to touch a UI toolkit, a scene graph or anything else
+    // with a main-thread requirement (Qt, VTK/MRML, Unity) must hand the work
+    // to that thread rather than doing it here.
     void subscribe(const std::string& subject, Node::DataHandler handler);
 
     // Message counters and buffer occupancy; see Node::Stats. Never throws;

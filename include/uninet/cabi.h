@@ -134,6 +134,18 @@ int uninet_config_set_interface(uninet_config_t* cfg, const char* iface);
 int uninet_config_set_port(uninet_config_t* cfg, int port);
 int uninet_config_set_gossip(uninet_config_t* cfg, const char* bind, const char* connect,
                              const char* endpoint, const char* advertised);
+// The delivery queue that keeps subscription handlers off the network thread.
+// `max_bytes` and `max_messages` are caps (0 = unlimited for that dimension);
+// `block_ms` is how long the network thread waits for the handlers to make
+// room before discarding the oldest message. Pass -1 for any of them to leave
+// that one at its default (256 MiB / unlimited / 5000 ms).
+//
+// Almost nobody should call this. It exists because a host with a main-thread
+// requirement -- Unity, Slicer -- may know its handlers are slow and want a
+// deeper queue than the default, and because "how do I stop losing messages
+// while the UI is busy" needs an answer that is not "edit the C++".
+int uninet_config_set_delivery(uninet_config_t* cfg, long long max_bytes,
+                               long long max_messages, int block_ms);
 
 // Join with everything the C++ SessionConfig can express. `cfg` may be NULL,
 // which is then identical to uninet_session_join(name, ...).
@@ -186,6 +198,23 @@ int uninet_blob_on_received(uninet_blob_t* blob, uninet_blob_cb cb, void* user);
 int uninet_blob_on_progress(uninet_blob_t* blob, uninet_blob_progress_cb cb, void* user);
 int uninet_blob_on_failed(uninet_blob_t* blob, uninet_blob_failed_cb cb, void* user);
 int uninet_blob_incoming_count(uninet_blob_t* blob);
+
+// ── the delivery queue ────────────────────────────────────────────────────
+// How the queue that feeds this session's handlers is coping. Plain out
+// parameters rather than a struct, so the layout is not part of the ABI and a
+// caller can pass NULL for anything it does not want.
+//
+// This is what settles a "we are losing messages" report from the C# or Unity
+// side without a packet capture: `dropped` is non-zero only when THIS process
+// discarded them because a handler stopped draining the queue. All zero means
+// the receiving side is healthy and the loss is elsewhere.
+//
+// Returns 0 on success, -1 if `session` is NULL or already closed.
+int uninet_session_delivery_stats(uninet_session_t* session,
+                                  uint64_t* queued, uint64_t* queued_bytes,
+                                  uint64_t* peak_queued, uint64_t* delivered,
+                                  uint64_t* dropped, uint64_t* blocked_us,
+                                  uint64_t* slowest_handler_us, int* threaded);
 
 // ── peer snapshot ─────────────────────────────────────────────────────────
 // A point-in-time list. The returned strings stay valid until the snapshot is

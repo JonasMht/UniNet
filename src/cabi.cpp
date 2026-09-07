@@ -354,6 +354,17 @@ extern "C" int uninet_config_set_gossip(uninet_config_t* cfg, const char* bind,
     });
 }
 
+extern "C" int uninet_config_set_delivery(uninet_config_t* cfg, long long max_bytes,
+                                          long long max_messages, int block_ms) {
+    return with_cfg(cfg, [&](SessionConfig& c) {
+        // -1 means "leave this one alone", so a caller can set the block budget
+        // without also having to restate the two caps.
+        if (max_bytes    >= 0) c.max_delivery_bytes    = size_t(max_bytes);
+        if (max_messages >= 0) c.max_delivery_messages = size_t(max_messages);
+        if (block_ms     >= 0) c.delivery_block_ms     = block_ms;
+    });
+}
+
 extern "C" uninet_session_t* uninet_session_join_cfg(const char* name,
                                                      uninet_config_t* cfg) {
     try {
@@ -496,6 +507,34 @@ extern "C" int uninet_blob_on_failed(uninet_blob_t* blob, uninet_blob_failed_cb 
 extern "C" int uninet_blob_incoming_count(uninet_blob_t* blob) {
     try { return (blob && blob->blob) ? int(blob->blob->incoming_count()) : 0; }
     catch (...) { return 0; }
+}
+
+// ── the delivery queue ────────────────────────────────────────────────────
+
+extern "C" int uninet_session_delivery_stats(uninet_session_t* session,
+                                             uint64_t* queued, uint64_t* queued_bytes,
+                                             uint64_t* peak_queued, uint64_t* delivered,
+                                             uint64_t* dropped, uint64_t* blocked_us,
+                                             uint64_t* slowest_handler_us, int* threaded) {
+    try {
+        if (!session || !session->session || !session->session->open()) {
+            set_error("null or closed session");
+            return UNINET_ERR_ARG;
+        }
+        // transport() throws once the session is closed; open() above makes
+        // that a returned error rather than an exception crossing the ABI.
+        const auto s = session->session->transport().delivery_stats();
+        if (queued)             *queued             = s.queued;
+        if (queued_bytes)       *queued_bytes       = s.queued_bytes;
+        if (peak_queued)        *peak_queued        = s.peak_queued;
+        if (delivered)          *delivered          = s.delivered;
+        if (dropped)            *dropped            = s.dropped;
+        if (blocked_us)         *blocked_us         = s.blocked_us;
+        if (slowest_handler_us) *slowest_handler_us = s.slowest_handler_us;
+        if (threaded)           *threaded           = s.threaded ? 1 : 0;
+        return UNINET_OK;
+    } catch (const std::exception& e) { set_error(e.what()); return UNINET_ERR_ARG; }
+      catch (...) { set_error("internal error"); return UNINET_ERR_ARG; }
 }
 
 // ── peer snapshot ─────────────────────────────────────────────────────────

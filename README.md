@@ -586,10 +586,42 @@ it is `Endpoint`.)
 
 ---
 
+### Where handlers run
+
+On the session's own delivery thread, one at a time, in arrival order - **not**
+on the thread that reads the network. That separation is the difference between
+a slow handler costing latency and a slow handler costing messages: the network
+thread does nothing but drain Zyre into a bounded queue, so it is always free to
+keep reading, and a handler that takes a second makes the queue deeper rather
+than making ZeroMQ discard what it could not hand over.
+
+It still has to be a background thread, and it is still not the host's. Anything
+with a main-thread requirement - Qt, VTK, the MRML scene, the Unity API - must
+be marshalled, exactly as before. C# does it for you (`Session.Update()`); the
+Slicer pattern below shows the Python equivalent.
+
+When messages do go missing, `delivery_stats()` says whether this process is the
+one losing them:
+
+```python
+net.delivery_stats()
+# {'queued': 0, 'queued_bytes': 0, 'peak_queued': 12, 'peak_queued_bytes': 4096,
+#  'delivered': 1503, 'dropped': 0, 'blocked_us': 0,
+#  'slowest_handler_us': 840, 'threaded': True}
+```
+
+`dropped` is non-zero only when a handler here stopped draining the queue for
+longer than `delivery_block_ms` (5 s by default) *and* the queue hit its cap
+(256 MiB by default). All zero, and the loss is somewhere else. `blocked_us`
+climbing with `dropped` at zero is a healthy loaded transfer: the cap applied
+backpressure and nothing was lost. `slowest_handler_us` names the handler
+responsible without a profiler. The same numbers are in `uninet.diagnostics()`
+and, from C#, in `session.Delivery`.
+
 ### One lifetime rule
 
-A handler runs on the network thread and keeps running until the session is
-closed, so anything it captures must outlive the session.
+A handler keeps running until the session is closed, so anything it captures
+must outlive the session.
 
 ```cpp
 std::vector<Msg> received;                 // declared BEFORE the session,
@@ -1091,7 +1123,7 @@ import collections, qt, uninet
 
 class MyModuleLogic:
     def __init__(self):
-        # Filled on UniNet's network thread, drained on Slicer's main thread.
+        # Filled on UniNet's delivery thread, drained on Slicer's main thread.
         self._inbox = collections.deque()
         self._pump = qt.QTimer()                 # created on the main thread
         self._pump.setInterval(16)               # ~60 Hz, same idea as Unity's Update()
@@ -1103,7 +1135,11 @@ class MyModuleLogic:
         self.net.on_peer_found(self.on_peer)
 
     def on_message(self, msg):
-        # Network thread. Do no Slicer work here: just hand it over.
+        # UniNet's delivery thread. Do no Slicer work here: appending to the
+        # deque is all this may do. Anything heavier - a numpy copy, a scene
+        # traversal, a prediction - blocks every later message behind it AND
+        # holds the GIL against the main thread, which is how "we lose packets
+        # while Slicer is busy" starts.
         self._inbox.append(msg.data)
 
     def _drain(self):
