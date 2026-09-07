@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.18)
 project(UniNet LANGUAGES C CXX VERSION 0.2.0)
 
+# ── build provenance ──
+# Records which commit a wheel was built from, so the installed package can say
+# whether it is still the source. Identical file in every Uni* repository; see
+# cmake/UniBuildStamp.cmake and python/uninet/_version.py.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(UniBuildStamp)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Build everything position-independent so the static core (and a fetched zyre)
@@ -515,6 +522,7 @@ if(UNINET_BUILD_PYTHON)
     # The in-tree tests never caught it because they import from python/, where
     # the line above had already put the file.
     install(TARGETS _uninet LIBRARY DESTINATION uninet)
+    uni_build_stamp(uninet)
 endif()
 
 # ── Install rules, so consumers can find_package(UniNet) instead of vendoring
