@@ -65,6 +65,9 @@ TC="$NDK/build/cmake/android.toolchain.cmake"
 COMMON=(-DCMAKE_TOOLCHAIN_FILE="$TC" -DANDROID_ABI="$ABI" -DANDROID_PLATFORM="android-$API"
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX"
         -DCMAKE_FIND_ROOT_PATH="$PREFIX")
+# The ZeroMQ stack with its draft API, as the desktop build has it: discovery on
+# every network (a headset on Wi-Fi AND a VPN) needs zyre_set_beacon_peer_port.
+DRAFTS=(-DENABLE_DRAFTS=ON)
 
 # See note 1: never let pkg-config see the host's libraries.
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
@@ -89,7 +92,7 @@ fi
 if [ ! -f "$PREFIX/lib/libzmq.a" ]; then
     echo "building libzmq..."
     fetch libzmq v4.3.5 https://github.com/zeromq/libzmq.git
-    cmake -S "$WORK/libzmq" -B "$WORK/libzmq/b" "${COMMON[@]}" \
+    cmake -S "$WORK/libzmq" -B "$WORK/libzmq/b" "${COMMON[@]}" "${DRAFTS[@]}" \
           -DBUILD_TESTS=OFF -DBUILD_SHARED=OFF -DBUILD_STATIC=ON \
           -DWITH_PERF_TOOL=OFF -DWITH_DOC=OFF -DENABLE_CURVE=OFF -DWITH_LIBBSD=OFF >/dev/null
     cmake --build "$WORK/libzmq/b" -j"$(nproc)" >/dev/null
@@ -100,7 +103,7 @@ if [ ! -f "$PREFIX/lib/libczmq.a" ]; then
     echo "building czmq..."
     fetch czmq v4.2.1 https://github.com/zeromq/czmq.git
     # Only the library target: czmq's tools do not cross-link and are unused.
-    cmake -S "$WORK/czmq" -B "$WORK/czmq/b" "${COMMON[@]}" \
+    cmake -S "$WORK/czmq" -B "$WORK/czmq/b" "${COMMON[@]}" "${DRAFTS[@]}" \
           -DCZMQ_BUILD_SHARED=OFF -DCZMQ_BUILD_STATIC=ON -DBUILD_TESTING=OFF \
           -DLIBZMQ_LIBRARIES="$PREFIX/lib/libzmq.a" \
           -DLIBZMQ_INCLUDE_DIRS="$PREFIX/include" >/dev/null
@@ -112,7 +115,8 @@ fi
 if [ ! -f "$PREFIX/lib/libzyre.a" ]; then
     echo "building zyre..."
     fetch zyre v2.0.1 https://github.com/zeromq/zyre.git
-    cmake -S "$WORK/zyre" -B "$WORK/zyre/b" "${COMMON[@]}" \
+    (cd "$WORK/zyre" && cmake -P "$HERE/cmake/patch_zyre.cmake")   # same fixes as the desktop build
+    cmake -S "$WORK/zyre" -B "$WORK/zyre/b" "${COMMON[@]}" "${DRAFTS[@]}" \
           -DZYRE_BUILD_SHARED=OFF -DZYRE_BUILD_STATIC=ON -DBUILD_TESTING=OFF \
           -DCZMQ_LIBRARIES="$PREFIX/lib/libczmq.a" -DCZMQ_INCLUDE_DIRS="$PREFIX/include" \
           -DLIBZMQ_LIBRARIES="$PREFIX/lib/libzmq.a" -DLIBZMQ_INCLUDE_DIRS="$PREFIX/include" >/dev/null
@@ -124,13 +128,14 @@ fi
 # czmq and zyre only write their .pc during `install`, which is skipped above.
 for spec in "libzmq:4.3.5:-lzmq" "libczmq:4.2.1:-lczmq -lzmq -lz" "libzyre:2.0.1:-lzyre -lczmq -lzmq -lz"; do
     name="${spec%%:*}"; rest="${spec#*:}"; ver="${rest%%:*}"; libs="${rest#*:}"
-    printf 'prefix=%s\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\n\nName: %s\nDescription: %s\nVersion: %s\nLibs: -L${libdir} %s\nCflags: -I${includedir}\n' \
-        "$PREFIX" "$name" "$name" "$ver" "$libs" > "$PREFIX/lib/pkgconfig/$name.pc"
+    cflags='-I${includedir} -DZMQ_BUILD_DRAFT_API -DCZMQ_BUILD_DRAFT_API -DZYRE_BUILD_DRAFT_API'
+    printf 'prefix=%s\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\n\nName: %s\nDescription: %s\nVersion: %s\nLibs: -L${libdir} %s\nCflags: %s\n' \
+        "$PREFIX" "$name" "$name" "$ver" "$libs" "$cflags" > "$PREFIX/lib/pkgconfig/$name.pc"
 done
 
 echo "building UniNet..."
 cmake -S "$HERE" -B "$OUTDIR" "${COMMON[@]}" \
-      -DUNINET_BUILD_CABI=ON \
+      -DUNINET_BUILD_CABI=ON -DUNINET_SYSTEM_ZYRE=ON \
       -DZLIB_LIBRARY="$PREFIX/lib/libz.a" -DZLIB_INCLUDE_DIR="$PREFIX/include" >/dev/null
 # The test binaries too, not just the library: scripts/test-on-android.sh runs
 # them on the device, and without them it silently skips the half of its work

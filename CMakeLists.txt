@@ -173,7 +173,10 @@ endif()
 # nodes discover each other with a UDP beacon and connect directly. Preferred
 # from the system; built from source when absent, so a fresh machine needs no
 # manual dependency install.
-option(UNINET_SYSTEM_ZYRE "Use a system-installed zyre if present" ON)
+# OFF by default: UniNet builds zyre itself, with the draft API and the fix in
+# cmake/patch_zyre.cmake, both of which discovery on every network needs (see
+# ZyreConfig::iface). A system zyre still works, on one network at a time.
+option(UNINET_SYSTEM_ZYRE "Use a system-installed zyre if present" OFF)
 set(UNINET_ZYRE_TARGET "")
 if(UNINET_SYSTEM_ZYRE)
     find_package(PkgConfig QUIET)
@@ -274,6 +277,7 @@ if(NOT UNINET_ZYRE_TARGET)
     message(STATUS "UniNet: fetching zyre.")
     uninet_add_dependency(zyre
         GIT_REPOSITORY https://github.com/zeromq/zyre.git GIT_TAG v2.0.1
+        PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_zyre.cmake
         ${UNINET_FC_EXCLUDE})
 
     # Link what was fetched plus whatever came from the system.
@@ -307,6 +311,13 @@ target_include_directories(uninet PUBLIC
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(uninet PUBLIC ZLIB::ZLIB ${UNINET_ZYRE_TARGET})
 target_link_libraries(uninet PRIVATE uninet_warnings)
+# zyre's CMake defines ZYRE_BUILD_DRAFT_API with add_definitions(), which is
+# directory-scoped and never reaches this target: zyre.h then hides the draft
+# API from UniNet although the library was built with it. A system zyre built
+# with drafts carries the define in its pkg-config flags instead.
+if(UNINET_ZYRE_TARGET MATCHES "zyre-static")
+    target_compile_definitions(uninet PRIVATE ZYRE_BUILD_DRAFT_API)
+endif()
 if(LZ4_FOUND AND UNINET_LZ4)
     target_link_libraries(uninet PUBLIC ${UNINET_LZ4_TARGET})
     target_compile_definitions(uninet PUBLIC UNINET_HAS_LZ4=1)
