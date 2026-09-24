@@ -699,3 +699,99 @@ def test_blob_survives_being_destroyed_before_its_session(net_pair):
     import gc; gc.collect()
     tx.send("after-free", b"payload")        # must not crash the process
     time.sleep(1.0)
+
+
+# ── ThermoNav v1.1 additions: one message to several peers, headers,
+#    timeouts, and the delivery queue's overflow policy ─────────────────────
+
+def test_publish_many_reaches_only_the_listed_peers():
+    r = realm("many")
+    a = uninet.join("Server", realm=r)
+    b = uninet.join("Headset 1", realm=r)
+    c = uninet.join("Headset 2", realm=r)
+    d = uninet.join("Bystander", realm=r)
+    if not wait_until(lambda: len(a.peers()) == 3):
+        pytest.skip("peers did not discover each other")
+
+    b_got, c_got, d_got = [], [], []
+    b.subscribe("m.>", b_got.append)
+    c.subscribe("m.>", c_got.append)
+    d.subscribe("m.>", d_got.append)
+
+    payload = {"verts": [float(i) * 0.25 for i in range(2000)], "id": "tumour-1"}
+    # The repeat and the empty entry are ignored: each peer once, never a shout.
+    assert a.publish_many("m.mesh", payload, [b.uuid(), c.uuid(), b.uuid(), ""]) == 2
+    assert wait_until(lambda: len(b_got) == 1 and len(c_got) == 1, timeout=10)
+    time.sleep(0.5)
+    assert len(b_got) == 1 and len(c_got) == 1
+    assert b_got[0].data == c_got[0].data == payload
+    assert d_got == []
+
+    assert a.publish_many("m.none", {"n": 0}, []) == 0
+    assert a.publish_many("m.gone", {"n": 0}, ["not-a-peer"]) == 0
+    assert a.publish_many_json("m.json", '{"n": 1}', [c.uuid()]) == 1
+    assert wait_until(lambda: len(c_got) == 2, timeout=10)
+    time.sleep(0.3)
+    assert d_got == [] and len(b_got) == 1
+
+
+def test_custom_discovery_headers_reach_peers(request):
+    r = realm("headers")
+    tn = {"tn.proto": "1.1", "tn.kind": "slicer", "tn.pid": "0123456789abcdef0123456789abcdef",
+          "tn.name": "Slicer (OR 2) Röntgen", "tn.caps": "presence,align,needle.drag"}
+    a = uninet.join("Advertiser", realm=r, headers=tn)
+    b = uninet.join("Reader", realm=r)
+    found = []
+    b.on_peer_found(found.append)
+    if not wait_until(lambda: len(b.peers()) == 1):
+        pytest.skip("peers did not discover each other")
+    peer = b.peers()[0]
+    for k, v in tn.items():
+        assert peer.header(k) == v, k
+        assert peer.headers[k] == v, k
+    assert wait_until(lambda: found, timeout=10)
+    assert found[0].header("tn.caps") == tn["tn.caps"]   # on the event, too
+
+
+def test_timeouts_and_overflow_are_configurable():
+    cfg = uninet.SessionConfig()
+    # The defaults are the ones every earlier version had.
+    assert (cfg.evasive_ms, cfg.expired_ms) == (5000, 30000)
+    assert cfg.delivery_block_ms == 5000
+    assert cfg.delivery_overflow == uninet.DeliveryOverflow.OLDEST
+
+    with pytest.raises(ValueError):
+        uninet.join("Bad", realm=realm("badtimeouts"), evasive_ms=7000, expired_ms=6000)
+
+    s = uninet.join("Live", realm=realm("liveconfig"), evasive_ms=2000, expired_ms=6000,
+                    delivery_block_ms=0,
+                    delivery_overflow=uninet.DeliveryOverflow.OLDEST_SAME_SUBJECT)
+    assert s.connected()
+    s.close()
+
+
+def test_a_killed_peer_is_noticed_within_expired_ms():
+    """With expired_ms=3000 a peer that dies without saying goodbye is reported
+    lost in seconds; the default would take 30."""
+    r = realm("expiry")
+    a = uninet.join("Watcher", realm=r, evasive_ms=1000, expired_ms=3000)
+    lost = []
+    a.on_peer_lost(lost.append)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.dirname(os.path.dirname(uninet.__file__)), env.get("PYTHONPATH", "")]
+    )
+    env["UNINET_BANNER"] = "0"
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         f"import time, uninet\ns = uninet.join('Doomed', realm={r!r})\n"
+         "while True: time.sleep(1)\n"], env=env)
+    try:
+        if not wait_until(lambda: len(a.peers()) == 1):
+            pytest.skip("the child peer was not discovered")
+    finally:
+        child.kill()            # SIGKILL: no goodbye, only the timeout can tell
+        child.wait()
+    t0 = time.monotonic()
+    assert wait_until(lambda: lost, timeout=20)
+    assert time.monotonic() - t0 < 10.0

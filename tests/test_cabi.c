@@ -110,6 +110,32 @@ static void on_blob_progress(const char* id, const char* name, size_t done,
 }
 static int has_peer(void* arg)     { return ((Collected*)arg)->peers_found > 0; }
 
+/* The _ex presence callback: the whole peer, headers included. */
+typedef struct {
+    int  found;
+    char kind[32];
+    char caps[128];
+    int  has_proto;
+} PeerEx;
+
+static void on_peer_ex(uninet_peers_t* peer, void* user) {
+    PeerEx* p = (PeerEx*)user;
+    /* The other receiver appears too, with no tn.* headers: only the sender counts. */
+    if (strcmp(uninet_peers_name(peer, 0), "C Many TX") != 0) return;
+    snprintf(p->kind, sizeof p->kind, "%s", uninet_peers_header(peer, 0, "tn.kind"));
+    snprintf(p->caps, sizeof p->caps, "%s", uninet_peers_header(peer, 0, "tn.caps"));
+    p->has_proto = uninet_peers_has_header(peer, 0, "tn.proto");
+    ++p->found;   /* last: the strings are complete before the count moves */
+}
+static int has_peer_ex(void* arg) { return ((PeerEx*)arg)->found > 0; }
+
+typedef struct { int n; } Count;
+static void count_json(const char* subject, const char* src, const char* json, void* user) {
+    (void)subject; (void)src; (void)json;
+    ++((Count*)user)->n;
+}
+static int count_is_one(void* arg) { return ((Count*)arg)->n == 1; }
+
 typedef struct { uninet_session_t* s; int want; } PeerCount;
 static int peer_count_is(void* arg) {
     PeerCount* pc = (PeerCount*)arg;
@@ -368,6 +394,74 @@ int main(void) {
         uninet_session_free(b);
         uninet_session_free(a);
         check(1, "everything freed cleanly");
+    }
+
+    /* ── publish_many, and headers on the presence event ── */
+    printf("publish_many and headers on presence\n");
+    {
+        char many_realm[160];
+        snprintf(many_realm, sizeof many_realm, "%s-many", realm);
+        PeerEx ex;
+        memset(&ex, 0, sizeof ex);
+        Count b_got, c_got;
+        b_got.n = 0; c_got.n = 0;
+
+        uninet_config_t* cfg = uninet_config_new();
+        uninet_config_set_realm(cfg, many_realm);
+        uninet_config_set_header(cfg, "tn.proto", "1.1");
+        uninet_config_set_header(cfg, "tn.kind", "server");
+        uninet_config_set_header(cfg, "tn.caps", "presence,align");
+        uninet_config_set_timeouts(cfg, 2000, 6000);
+        uninet_session_t* a = uninet_session_join_cfg("C Many TX", cfg);
+        uninet_config_free(cfg);
+        uninet_session_t* b = uninet_session_join("C Many RX1", NULL, NULL, many_realm, NULL, 0);
+        uninet_session_t* c = uninet_session_join("C Many RX2", NULL, NULL, many_realm, NULL, 0);
+        check(a && b && c, "three sessions joined");
+        if (!a || !b || !c) { printf("\nFAIL (cannot continue)\n"); return 1; }
+
+        check(uninet_session_on_peer_found_ex(b, on_peer_ex, &ex) == UNINET_OK,
+              "on_peer_found_ex registered");
+        check(wait_until(has_peer_ex, &ex, 25000), "the presence event arrived");
+        check(strcmp(ex.kind, "server") == 0 && strcmp(ex.caps, "presence,align") == 0 &&
+              ex.has_proto == 1,
+              "and it carries the peer's custom headers, not just role and app");
+
+        PeerCount pc; pc.s = a; pc.want = 2;
+        check(wait_until(peer_count_is, &pc, 25000), "the sender sees both receivers");
+        uninet_session_subscribe_json(b, "m.>", count_json, &b_got);
+        uninet_session_subscribe_json(c, "m.>", count_json, &c_got);
+
+        char ub[128], uc[128];
+        uninet_session_uuid(b, ub, sizeof ub);
+        uninet_session_uuid(c, uc, sizeof uc);
+        const char* dsts[3];
+        dsts[0] = ub; dsts[1] = uc; dsts[2] = ub;
+        size_t sent = 99;
+        check(uninet_session_publish_many_json(a, "m.x", "{\"n\":1}", dsts, 3, &sent) == UNINET_OK &&
+              sent == 2, "publish_many_json handed it to both peers once");
+        check(wait_until(count_is_one, &b_got, 10000) && wait_until(count_is_one, &c_got, 10000),
+              "both received it");
+
+        unsigned char cbor[64]; size_t written = 0;
+        uninet_json_to_cbor("{\"n\":2}", cbor, sizeof cbor, &written);
+        sent = 99;
+        check(uninet_session_publish_many_cbor(a, "m.none", cbor, written, NULL, 0, &sent) ==
+                  UNINET_OK && sent == 0,
+              "an empty list is not an error and sends nothing");
+        const char* bad[2];
+        bad[0] = ub; bad[1] = NULL;
+        check(uninet_session_publish_many_cbor(a, "m.bad", cbor, written, bad, 2, &sent) ==
+                  UNINET_ERR_ARG,
+              "a NULL uuid in the list is reported, not skipped");
+        SLEEP_MS(300);
+        check(b_got.n == 1 && c_got.n == 1, "and neither of those reached anyone");
+
+        uninet_session_close(a);
+        check(uninet_session_publish_many_json(a, "m.x", "{}", dsts, 2, &sent) == UNINET_ERR_STATE,
+              "publish_many on a closed session is an error");
+        uninet_session_free(c);
+        uninet_session_free(b);
+        uninet_session_free(a);
     }
 
     printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",

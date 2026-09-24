@@ -30,6 +30,27 @@ def payload(lang: str) -> dict:
     }
 
 
+# The discovery headers each language advertises; see interop_cpp.cpp.
+def headers_for(lang: str) -> dict:
+    pid = "0" * 30 + {"cpp": "c1", "python": "b2"}.get(lang, "c3")
+    return {
+        "tn.proto": "1.1",
+        "tn.kind": lang,
+        "tn.pid": pid,
+        "tn.name": f"{lang} Röntgen",
+        "tn.caps": f"presence,align,{lang}",
+    }
+
+
+def check_headers(peer, lang: str) -> str:
+    for key, want in headers_for(lang).items():
+        if key not in peer.headers:
+            return f"header '{key}' missing"
+        if peer.headers[key] != want:
+            return f"header '{key}': got {peer.headers[key]!r}, expected {want!r}"
+    return ""
+
+
 def check(got: dict) -> str:
     """Return "" when `got` matches the reference, else the reason it does not."""
     want = payload("x")
@@ -64,12 +85,14 @@ def main() -> int:
     seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 20
     expected = [x for x in (sys.argv[3] if len(sys.argv) > 3 else "cpp,csharp").split(",") if x]
 
-    net = uninet.join("python", role="interop", app="python", realm=realm)
+    net = uninet.join("python", role="interop", app="python", realm=realm,
+                      headers=headers_for("python"))
     if not net.connected():
         print("python: could not join the network", file=sys.stderr)
         return 1
 
     results: dict[str, str] = {}
+    header_results: dict[str, str] = {}
 
     def on_hello(msg):
         data = msg.data
@@ -89,7 +112,11 @@ def main() -> int:
     settle_until = None
     while time.monotonic() < deadline:
         net.publish("interop.hello", payload("python"))
-        if len(results) >= len(expected) and settle_until is None:
+        for peer in net.peers():
+            if peer.name in expected and peer.name not in header_results:
+                header_results[peer.name] = check_headers(peer, peer.name)
+        if (len(results) >= len(expected) and len(header_results) >= len(expected)
+                and settle_until is None):
             settle_until = time.monotonic() + 3.0
         if settle_until is not None and time.monotonic() >= settle_until:
             break
@@ -106,6 +133,16 @@ def main() -> int:
         if lang not in results:
             print(f"python: MISSING never heard from {lang}")
             failures += 1
+    for lang in expected:
+        why = header_results.get(lang)
+        if why is None:
+            print(f"python: MISSING never saw {lang} in the peer list")
+            failures += 1
+        elif why:
+            print(f"python: FAIL headers from {lang}: {why}")
+            failures += 1
+        else:
+            print(f"python: PASS tn.* headers from {lang} matched")
 
     print(f"python: {'ALL OK' if failures == 0 else 'FAILED'}")
     return 0 if failures == 0 else 1

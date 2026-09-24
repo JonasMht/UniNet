@@ -12,6 +12,11 @@
 // installed is passed out of the list rather than counted as a failure: a
 // skipped participant is a gap in coverage, not a defect.
 //
+// Each also advertises the ThermoNav v1.1 discovery headers (tn.proto, tn.kind,
+// tn.pid, tn.name, tn.caps) at join, and checks that every other participant's
+// arrive intact in its peer list: custom headers set in one language must be
+// readable in the other two.
+//
 // Prints one PASS/FAIL line per peer seen, then a verdict. Exit 0 only if every
 // expected peer was seen and every payload matched.
 #include "uninet/json.h"
@@ -61,6 +66,31 @@ bool matches_expected(const uninet::Cbor& got, std::string& why) {
     return true;
 }
 
+// The discovery headers each language advertises. Kept in sync with
+// interop_py.py and InteropCs/Program.cs by hand, like the payload. The name
+// is not ASCII on purpose.
+std::map<std::string, std::string> headers_for(const std::string& lang) {
+    std::string pid = "000000000000000000000000000000";
+    pid += lang == "cpp" ? "c1" : lang == "python" ? "b2" : "c3";
+    return {{"tn.proto", "1.1"},
+            {"tn.kind", lang},
+            {"tn.pid", pid},
+            {"tn.name", lang + " Röntgen"},
+            {"tn.caps", "presence,align," + lang}};
+}
+
+// "" when `peer` carries exactly what `lang` advertises, else the first mismatch.
+std::string check_headers(const uninet::Peer& peer, const std::string& lang) {
+    for (const auto& kv : headers_for(lang)) {
+        auto it = peer.headers.find(kv.first);
+        if (it == peer.headers.end()) return "header '" + kv.first + "' missing";
+        if (it->second != kv.second)
+            return "header '" + kv.first + "': got '" + it->second + "', expected '" +
+                   kv.second + "'";
+    }
+    return "";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -88,6 +118,7 @@ int main(int argc, char** argv) {
     cfg.realm = realm;
     cfg.role  = "interop";
     cfg.app   = "cpp";
+    cfg.headers = headers_for("cpp");
     auto net = uninet::Session::join("cpp", cfg);
 
     if (!net->connected()) {
@@ -97,6 +128,7 @@ int main(int argc, char** argv) {
 
     std::mutex mu;
     std::map<std::string, std::string> results;   // sender -> "" (ok) or reason
+    std::map<std::string, std::string> header_results;   // same, for its headers
 
     net->subscribe("interop.hello", [&](const uninet::Envelope& env) {
         const uninet::Cbor& from = env.data["from"];
@@ -118,9 +150,14 @@ int main(int argc, char** argv) {
     auto settle_until = std::chrono::steady_clock::time_point::max();
     while (std::chrono::steady_clock::now() < deadline) {
         net->publish_json("interop.hello", payload_for("cpp"));
+        for (const auto& peer : net->peers())
+            for (const auto& lang : expected)
+                if (peer.name == lang && !header_results.count(lang))
+                    header_results[lang] = check_headers(peer, lang);
         {
             std::lock_guard<std::mutex> lk(mu);
             if (results.size() >= expected.size() &&
+                header_results.size() >= expected.size() &&
                 settle_until == std::chrono::steady_clock::time_point::max())
                 settle_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         }
@@ -141,6 +178,18 @@ int main(int argc, char** argv) {
     for (const auto& lang : expected) {
         if (!results.count(lang)) {
             std::printf("cpp: MISSING never heard from %s\n", lang.c_str());
+            ++failures;
+        }
+    }
+    for (const auto& lang : expected) {
+        auto it = header_results.find(lang);
+        if (it == header_results.end()) {
+            std::printf("cpp: MISSING never saw %s in the peer list\n", lang.c_str());
+            ++failures;
+        } else if (it->second.empty()) {
+            std::printf("cpp: PASS tn.* headers from %s matched\n", lang.c_str());
+        } else {
+            std::printf("cpp: FAIL headers from %s: %s\n", lang.c_str(), it->second.c_str());
             ++failures;
         }
     }

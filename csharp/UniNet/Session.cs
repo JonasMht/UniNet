@@ -16,8 +16,45 @@
 //     void Update() => net.Update();
 //
 // Pass marshalToCaller: false to opt out and receive events directly on the
-// delivery thread (correct for a console app or a background service, never for
-// Unity).
+// delivery thread (correct for a console app or a background service).
+//
+// ── decoding off Unity's main thread ──────────────────────────────────────
+// With the pump, every message is also DECODED on the main thread, inside
+// Update(), and a frame that receives a mesh pays for parsing it. To move that
+// work off the main thread, join with marshalToCaller: false. Handlers then run
+// on UniNet's delivery thread (never the main thread, one at a time, in
+// arrival order), where decoding is safe; only the RESULT goes to the main
+// thread, through a queue you drain in Update():
+//
+//     readonly ConcurrentQueue<Mesh3> _ready = new ConcurrentQueue<Mesh3>();
+//
+//     net = Session.Join("MR", role: "headset", marshalToCaller: false);
+//     net.SubscribeCbor("thermonav.v1.>", (subject, src, cbor) =>
+//     {
+//         var mesh = MyCbor.DecodeMesh(cbor);   // delivery thread: no Unity API
+//         _ready.Enqueue(mesh);                 // hand the result over
+//     });
+//
+//     void Update()                             // main thread
+//     {
+//         while (_ready.TryDequeue(out var mesh)) ApplyToScene(mesh);
+//     }
+//
+// The rules that make it safe:
+//   * No Unity API in the handler: no GameObject, Transform or Mesh (Debug.Log
+//     is the thread-safe exception). Build plain C# data (arrays, structs,
+//     Vector3 is fine as a value); create Unity objects in Update().
+//   * The handler owns `cbor`: it is a fresh array per message, so it may be
+//     kept or passed on without copying.
+//   * Handlers run one at a time, so a slow decode delays the next message
+//     (the native queue absorbs it; see Delivery). Decode, enqueue, return.
+//   * The switch is per session: PeerFound and PeerLost ALSO arrive on the
+//     delivery thread, and Update() no longer delivers anything. Queue them
+//     the same way.
+//   * Bound your own queue if the main thread can stall for long: nothing
+//     else does, now that the pump is out of the path.
+// tests/interop/InteropCs checks that these handlers run off the calling
+// thread and that the main-thread handoff sees every decoded message.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -209,9 +246,80 @@ namespace UniNet
         }
 
         /// <summary>A device appeared. Also fires for devices already present.</summary>
-        public event Action<Peer>? PeerFound;
+        /// <remarks>
+        /// Every header the peer advertised is on the <see cref="Peer"/>, as in
+        /// <see cref="Peers"/>. On a session joined with
+        /// <c>marshalToCaller: false</c>, adding a handler first replays the
+        /// devices already present to it (on a UniNet thread, like every other
+        /// event in that mode, while the caller waits): a device can appear
+        /// within milliseconds of <see cref="Join"/>, before the next line of
+        /// the application has run, and without the replay that event had
+        /// nowhere to go. The queued mode needs no replay: its events wait for
+        /// <see cref="Update"/>.
+        /// </remarks>
+        public event Action<Peer>? PeerFound
+        {
+            add
+            {
+                if (value == null) return;
+                if (_marshalToCaller)
+                {
+                    lock (_presence) _peerFound += value;
+                    return;
+                }
+                Action addAndReplay = () =>
+                {
+                    // Under the lock, so a device is announced to this handler
+                    // exactly once: by this replay if it was already here, by
+                    // OnPeerFound if it arrives afterwards, and never lost
+                    // between the two or followed by a stale PeerLost.
+                    lock (_presence)
+                    {
+                        _peerFound += value;
+                        foreach (var p in _present.Values)
+                        {
+                            try { value(p); }
+                            catch (Exception e) { Console.Error.WriteLine("UniNet handler threw: " + e); }
+                        }
+                    }
+                };
+                // Added from inside a presence handler, which already holds the
+                // lock on a UniNet thread: a helper thread would wait for it
+                // forever, and this thread is not the application's anyway.
+                if (Monitor.IsEntered(_presence)) addAndReplay();
+                else RunOffCaller(addAndReplay);
+            }
+            remove { lock (_presence) _peerFound -= value; }
+        }
+
         /// <summary>A device left the network.</summary>
-        public event Action<Peer>? PeerLost;
+        public event Action<Peer>? PeerLost
+        {
+            add { lock (_presence) _peerLost += value; }
+            remove { lock (_presence) _peerLost -= value; }
+        }
+
+        private Action<Peer>? _peerFound;
+        private Action<Peer>? _peerLost;
+        // The devices announced so far, for the direct-mode replay above.
+        private readonly object _presence = new object();
+        private readonly Dictionary<string, Peer> _present = new Dictionary<string, Peer>();
+
+        private void Presence(Peer p, bool found)
+        {
+            if (_marshalToCaller)
+            {
+                // Handlers are read when Update() runs the event, as always.
+                Dispatch(() => (found ? _peerFound : _peerLost)?.Invoke(p));
+                return;
+            }
+            lock (_presence)
+            {
+                if (found) _present[p.Uuid] = p;
+                else _present.Remove(p.Uuid);
+                Dispatch(() => (found ? _peerFound : _peerLost)?.Invoke(p));
+            }
+        }
 
         // .NET (Core and later) does not run finalizers at process exit, so
         // ~Session is dead code for the common case and an undisposed session
@@ -262,7 +370,10 @@ namespace UniNet
         /// ("eth0" or an IP), where discovery could otherwise pick the wrong one.</param>
         /// <param name="port">UDP discovery port; 0 keeps the default (5670).</param>
         /// <param name="marshalToCaller">Queue events for Update() instead of
-        /// delivering them on the network thread. Keep this true in Unity.</param>
+        /// delivering them on UniNet's delivery thread. Keep this true in Unity
+        /// unless you want to decode off the main thread, and then hand the
+        /// results over yourself: see "decoding off Unity's main thread" at the
+        /// top of Session.cs.</param>
         /// <param name="gossipBind">Bind a rendezvous endpoint ("tcp://*:5670")
         /// instead of using the UDP beacon. For links with no multicast: a
         /// USB-tethered device behind a port forward, a VPN, a routed network.</param>
@@ -396,8 +507,13 @@ namespace UniNet
             IntPtr self = Pin(this);
             // Checked, not discarded: a failed registration would otherwise mean
             // presence events silently never arrive, with nothing to point at.
-            if (Native.uninet_session_on_peer_found(_handle, PeerFoundThunk, self) != Status.Ok ||
-                Native.uninet_session_on_peer_lost(_handle, PeerLostThunk, self) != Status.Ok)
+            //
+            // The _ex forms, so the Peer handed to PeerFound carries every header
+            // the peer advertised, as Peers() always did: a protocol version or a
+            // capability list is needed at the moment a device appears, not on
+            // the next poll.
+            if (Native.uninet_session_on_peer_found_ex(_handle, PeerFoundThunk, self) != Status.Ok ||
+                Native.uninet_session_on_peer_lost_ex(_handle, PeerLostThunk, self) != Status.Ok)
                 throw new InvalidOperationException(
                     "UniNet: could not register presence callbacks: " + Native.LastError());
         }
@@ -406,14 +522,13 @@ namespace UniNet
         // Static and attributed so IL2CPP can reach them, and rooted in static
         // fields so the GC cannot collect them. See rule 3 in Native.cs for why
         // a lambda here would compile fine and then fail on a Quest.
-        private static readonly Native.PeerCallback PeerFoundThunk = OnPeerFound;
-        private static readonly Native.PeerCallback PeerLostThunk  = OnPeerLost;
+        private static readonly Native.PeerExCallback PeerFoundThunk = OnPeerFound;
+        private static readonly Native.PeerExCallback PeerLostThunk  = OnPeerLost;
         private static readonly Native.JsonCallback JsonThunk      = OnJson;
         private static readonly Native.CborCallback CborThunk      = OnCbor;
 
-        [AOT.MonoPInvokeCallback(typeof(Native.PeerCallback))]
-        private static void OnPeerFound(IntPtr uuid, IntPtr name, IntPtr address,
-                                        IntPtr role, IntPtr app, IntPtr user)
+        [AOT.MonoPInvokeCallback(typeof(Native.PeerExCallback))]
+        private static void OnPeerFound(IntPtr peer, IntPtr user)
         {
             // A managed exception must never cross back over a reverse P/Invoke
             // boundary: it terminates the process.
@@ -421,26 +536,48 @@ namespace UniNet
             {
                 var self = Native.Context<Session>(user);
                 if (self == null) return;
-                var peer = new Peer(Native.Str(uuid), Native.Str(name), Native.Str(address),
-                                    Native.Str(role), Native.Str(app));
-                self.Dispatch(() => self.PeerFound?.Invoke(peer));
+                self.Presence(ReadPeer(peer, 0), found: true);
             }
             catch { }
         }
 
-        [AOT.MonoPInvokeCallback(typeof(Native.PeerCallback))]
-        private static void OnPeerLost(IntPtr uuid, IntPtr name, IntPtr address,
-                                       IntPtr role, IntPtr app, IntPtr user)
+        [AOT.MonoPInvokeCallback(typeof(Native.PeerExCallback))]
+        private static void OnPeerLost(IntPtr peer, IntPtr user)
         {
             try
             {
                 var self = Native.Context<Session>(user);
                 if (self == null) return;
-                var peer = new Peer(Native.Str(uuid), Native.Str(name), Native.Str(address),
-                                    Native.Str(role), Native.Str(app));
-                self.Dispatch(() => self.PeerLost?.Invoke(peer));
+                self.Presence(ReadPeer(peer, 0), found: false);
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Copy entry <paramref name="i"/> of a native peer snapshot, every
+        /// header included. Shared by <see cref="Peers"/> and the presence
+        /// events so the two can never disagree about what a Peer holds.
+        /// </summary>
+        private static Peer ReadPeer(IntPtr snap, int i)
+        {
+            // Every header the peer advertised, not just the three UniNet names
+            // itself: a consumer that publishes headers: {"study": "..."} has to
+            // be able to read it back.
+            var headers = new Dictionary<string, string>();
+            int headerCount = Native.uninet_peers_header_count(snap, i);
+            for (int h = 0; h < headerCount; ++h)
+            {
+                string key = Native.Str(Native.uninet_peers_header_key(snap, i, h));
+                if (key.Length > 0)
+                    headers[key] = Native.Str(Native.uninet_peers_header(snap, i, key));
+            }
+            return new Peer(
+                Native.Str(Native.uninet_peers_uuid(snap, i)),
+                Native.Str(Native.uninet_peers_name(snap, i)),
+                Native.Str(Native.uninet_peers_address(snap, i)),
+                Native.Str(Native.uninet_peers_role(snap, i)),
+                Native.Str(Native.uninet_peers_app(snap, i)),
+                headers);
         }
 
         // One of these is pinned per Subscribe call: the static thunk has no
@@ -618,10 +755,49 @@ namespace UniNet
             ThrowIfDisposed();
             if (handler == null) throw new ArgumentNullException(nameof(handler));
 
-            int rc = Native.uninet_session_subscribe_json(
-                _handle, subject, JsonThunk, Pin(new JsonSub(this, handler)));
-            if (rc != Status.Ok)
-                throw new InvalidOperationException("UniNet subscribe: " + Native.LastError());
+            IntPtr user = Pin(new JsonSub(this, handler));
+            string? err = OffCaller(() => Native.uninet_session_subscribe_json(
+                _handle, subject, JsonThunk, user));
+            if (err != null)
+                throw new InvalidOperationException("UniNet subscribe: " + err);
+        }
+
+        /// <summary>
+        /// Register a native subscription. Returns null on success, else why.
+        /// </summary>
+        /// <remarks>
+        /// Messages that arrived before a subscription existed are held natively
+        /// and handed to the first matching one DURING the registering call, on
+        /// the registering thread. In queued mode that is harmless: the handler
+        /// only enqueues. In direct mode it would run the application's handler
+        /// on its main thread, the one thing marshalToCaller: false promises not
+        /// to do, so the registration is made from a short-lived thread instead
+        /// and the caller waits for it. Handlers then never run on the thread
+        /// that called Subscribe, buffered or not.
+        /// </remarks>
+        private string? OffCaller(Func<int> register)
+        {
+            if (_marshalToCaller)
+                return register() == Status.Ok ? null : Native.LastError();
+            string? err = null;
+            // uninet_last_error is per thread, so it is read on the thread that failed.
+            RunOffCaller(() => { if (register() != Status.Ok) err = Native.LastError(); });
+            return err;
+        }
+
+        /// <summary>Run <paramref name="work"/> on a short-lived thread and wait for it.</summary>
+        private static void RunOffCaller(Action work)
+        {
+            Exception? failure = null;
+            var t = new Thread(() =>
+            {
+                try { work(); }
+                catch (Exception e) { failure = e; }
+            }) { IsBackground = true, Name = "UniNet" };
+            t.Start();
+            t.Join();
+            if (failure != null)
+                throw new InvalidOperationException("UniNet: " + failure.Message, failure);
         }
 
         /// <summary>
@@ -629,15 +805,23 @@ namespace UniNet
         /// Use this when you already have a CBOR library, or to skip the text
         /// conversion on a large payload.
         /// </summary>
+        /// <remarks>
+        /// The handler receives (subject, sender uuid, payload). On a session
+        /// joined with <c>marshalToCaller: false</c> it runs on UniNet's
+        /// delivery thread, which is where a Unity app should decode a large
+        /// payload; see "decoding off Unity's main thread" at the top of this
+        /// file for the handoff back to the main thread.
+        /// </remarks>
         public void SubscribeCbor(string subject, Action<string, string, byte[]> handler)
         {
             ThrowIfDisposed();
             if (handler == null) throw new ArgumentNullException(nameof(handler));
 
-            int rc = Native.uninet_session_subscribe_cbor(
-                _handle, subject, CborThunk, Pin(new CborSub(this, handler)));
-            if (rc != Status.Ok)
-                throw new InvalidOperationException("UniNet subscribe: " + Native.LastError());
+            IntPtr user = Pin(new CborSub(this, handler));
+            string? err = OffCaller(() => Native.uninet_session_subscribe_cbor(
+                _handle, subject, CborThunk, user));
+            if (err != null)
+                throw new InvalidOperationException("UniNet subscribe: " + err);
         }
 
         /// <summary>Send JSON to everyone, or to one peer when <paramref name="dst"/> is a peer uuid.</summary>
@@ -726,27 +910,7 @@ namespace UniNet
             {
                 int n = Native.uninet_peers_count(snap);
                 var list = new List<Peer>(n);
-                for (int i = 0; i < n; ++i)
-                {
-                    // Every header the peer advertised, not just the three
-                    // UniNet names itself: a consumer that publishes
-                    // headers: {"study": "..."} has to be able to read it back.
-                    var headers = new Dictionary<string, string>();
-                    int headerCount = Native.uninet_peers_header_count(snap, i);
-                    for (int h = 0; h < headerCount; ++h)
-                    {
-                        string key = Native.Str(Native.uninet_peers_header_key(snap, i, h));
-                        if (key.Length > 0)
-                            headers[key] = Native.Str(Native.uninet_peers_header(snap, i, key));
-                    }
-                    list.Add(new Peer(
-                        Native.Str(Native.uninet_peers_uuid(snap, i)),
-                        Native.Str(Native.uninet_peers_name(snap, i)),
-                        Native.Str(Native.uninet_peers_address(snap, i)),
-                        Native.Str(Native.uninet_peers_role(snap, i)),
-                        Native.Str(Native.uninet_peers_app(snap, i)),
-                        headers));
-                }
+                for (int i = 0; i < n; ++i) list.Add(ReadPeer(snap, i));
                 return list;
             }
             finally

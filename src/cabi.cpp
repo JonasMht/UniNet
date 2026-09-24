@@ -337,6 +337,49 @@ extern "C" int uninet_session_on_peer_lost(uninet_session_t* session,
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
 }
 
+namespace {
+
+// The _ex forms hand over a one-entry snapshot, so the existing uninet_peers_*
+// accessors read every header without a second way of doing it.
+Session::PeerCallback wrap_peer_ex_cb(uninet_peer_ex_cb cb, void* user) {
+    return [cb, user](const Peer& p) {
+        try {
+            uninet_peers one;
+            one.items.push_back(p);
+            cb(&one, user);
+        } catch (...) {}
+    };
+}
+
+int register_peer_ex(uninet_session_t* session, uninet_peer_ex_cb cb, void* user,
+                     bool found) {
+    try {
+        if (!session || !session->session || !cb) {
+            set_error("null argument");
+            return UNINET_ERR_ARG;
+        }
+        if (!session->session->open()) {
+            set_error("the session is closed");
+            return UNINET_ERR_STATE;
+        }
+        if (found) session->session->on_peer_found(wrap_peer_ex_cb(cb, user));
+        else       session->session->on_peer_lost(wrap_peer_ex_cb(cb, user));
+        return UNINET_OK;
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+}  // namespace
+
+extern "C" int uninet_session_on_peer_found_ex(uninet_session_t* session,
+                                               uninet_peer_ex_cb cb, void* user) {
+    return register_peer_ex(session, cb, user, /*found=*/true);
+}
+
+extern "C" int uninet_session_on_peer_lost_ex(uninet_session_t* session,
+                                              uninet_peer_ex_cb cb, void* user) {
+    return register_peer_ex(session, cb, user, /*found=*/false);
+}
+
 // ── extra configuration ───────────────────────────────────────────────────
 
 struct uninet_config {

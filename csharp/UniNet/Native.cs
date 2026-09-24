@@ -126,6 +126,12 @@ namespace UniNet
         internal delegate void PeerCallback(IntPtr uuid, IntPtr name, IntPtr address,
                                             IntPtr role, IntPtr app, IntPtr user);
 
+        // The whole peer, headers included: `peer` is a one-entry snapshot
+        // (index 0) read with the uninet_peers_* accessors, valid only during
+        // the call and never freed here.
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate void PeerExCallback(IntPtr peer, IntPtr user);
+
         // ── session ──
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr uninet_session_join(
@@ -212,6 +218,14 @@ namespace UniNet
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uninet_session_on_peer_lost(IntPtr session, PeerCallback cb, IntPtr user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_session_on_peer_found_ex(IntPtr session, PeerExCallback cb,
+                                                                   IntPtr user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_session_on_peer_lost_ex(IntPtr session, PeerExCallback cb,
+                                                                  IntPtr user);
 
         // ── configuration ──
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

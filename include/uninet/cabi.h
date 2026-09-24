@@ -131,6 +131,21 @@ int uninet_session_subscribe_cbor(uninet_session_t* session, const char* subject
 int uninet_session_on_peer_found(uninet_session_t* session, uninet_peer_cb cb, void* user);
 int uninet_session_on_peer_lost(uninet_session_t* session, uninet_peer_cb cb, void* user);
 
+// The same events with the whole peer, every header included. uninet_peer_cb
+// carries role and app only, so a header a peer advertised (a protocol
+// version, a capability list) was readable from a uninet_session_peers()
+// snapshot but not from the event announcing the peer. `peer` is a snapshot
+// holding exactly one entry, index 0: read it with the uninet_peers_*
+// accessors. It belongs to UniNet and is valid only during the call; do not
+// free it. For a lost peer it holds what the peer advertised when it joined.
+// A session has one found and one lost callback: registering either form
+// replaces the one registered before, exactly as registering twice always did.
+typedef void (*uninet_peer_ex_cb)(uninet_peers_t* peer, void* user);
+int uninet_session_on_peer_found_ex(uninet_session_t* session, uninet_peer_ex_cb cb,
+                                    void* user);
+int uninet_session_on_peer_lost_ex(uninet_session_t* session, uninet_peer_ex_cb cb,
+                                   void* user);
+
 // ── extra configuration ───────────────────────────────────────────────────
 // Advertise a key/value to every peer, readable through uninet_peers_header.
 // Must be called BEFORE the session joins, so it is set on a config handle
