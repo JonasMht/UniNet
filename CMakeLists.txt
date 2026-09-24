@@ -266,6 +266,7 @@ if(NOT UNINET_ZYRE_TARGET)
         message(STATUS "UniNet: fetching czmq.")
         uninet_add_dependency(czmq
             GIT_REPOSITORY https://github.com/zeromq/czmq.git GIT_TAG v4.2.1
+            PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_czmq.cmake
             ${UNINET_FC_EXCLUDE})
         set(CZMQ_LIBRARIES    czmq-static                      CACHE STRING "" FORCE)
         set(CZMQ_INCLUDE_DIRS "${czmq_SOURCE_DIR}/include"     CACHE STRING "" FORCE)

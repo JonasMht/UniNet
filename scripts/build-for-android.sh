@@ -102,6 +102,7 @@ fi
 if [ ! -f "$PREFIX/lib/libczmq.a" ]; then
     echo "building czmq..."
     fetch czmq v4.2.1 https://github.com/zeromq/czmq.git
+    (cd "$WORK/czmq" && cmake -P "$HERE/cmake/patch_czmq.cmake")   # same fix as the desktop build
     # Only the library target: czmq's tools do not cross-link and are unused.
     cmake -S "$WORK/czmq" -B "$WORK/czmq/b" "${COMMON[@]}" "${DRAFTS[@]}" \
           -DCZMQ_BUILD_SHARED=OFF -DCZMQ_BUILD_STATIC=ON -DBUILD_TESTING=OFF \
