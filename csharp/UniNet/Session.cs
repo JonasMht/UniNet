@@ -8,7 +8,7 @@
 // No address, no port, no broker, no configuration file.
 //
 // ── THREADING, and why Unity needs the pump ───────────────────────────────
-// Messages and presence events arrive on UniNet's network thread. Touching the
+// Messages and presence events arrive on UniNet's delivery thread. Touching the
 // Unity API from there throws or crashes the player, so by default this class
 // queues every event and hands it to you when you call Update(), which you do
 // from MonoBehaviour.Update(), on the main thread:
@@ -16,7 +16,7 @@
 //     void Update() => net.Update();
 //
 // Pass marshalToCaller: false to opt out and receive events directly on the
-// network thread (correct for a console app or a background service, never for
+// delivery thread (correct for a console app or a background service, never for
 // Unity).
 using System;
 using System.Collections.Concurrent;

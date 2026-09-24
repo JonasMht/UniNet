@@ -23,11 +23,12 @@
 // error if it did not fit. Nothing returns a pointer the caller must free
 // except the peer snapshot, which has an explicit free.
 //
-// THREADING. **Callbacks are invoked on UniNet's background network thread, not
-// on the thread that registered them.** In Unity this means you must NOT touch
-// the Unity API from a callback: marshal to the main thread first. The C#
-// wrapper does this for you by default; a raw C consumer must do it itself.
-// Callbacks must not block: the network loop is stalled while one runs.
+// THREADING. **Callbacks are invoked on UniNet's delivery thread, not on the
+// thread that registered them.** It runs them one at a time, in arrival order,
+// and it is not the network thread, so a slow callback delays later callbacks
+// but never the network. In Unity you must NOT touch the Unity API from a
+// callback: marshal to the main thread first. The C# wrapper does this for you
+// by default; a raw C consumer must do it itself.
 //
 // LIFETIME. A callback's `subject`, `src_uuid`, `json` and `data` pointers are
 // valid only for the duration of the call. Copy anything you need to keep.
