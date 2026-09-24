@@ -554,6 +554,7 @@ same way, over the same wire bytes, in all three.
 | join / close | ● | ● | ● |
 | publish (JSON or native) | ● | ● | ● |
 | publish to one peer | ● | ● | ● |
+| publish once to several peers | ● | ● | ● |
 | subscribe (JSON / native) | ● | ● | ● |
 | subscribe to raw CBOR | ● | ● | ● |
 | peers, presence events | ● | ● | ● |
@@ -564,6 +565,8 @@ same way, over the same wire bytes, in all three.
 | compression choice | ● | ● | ● |
 | gossip / non-multicast links | ● | ● | ● |
 | realm isolation | ● | ● | ● |
+| peer timeouts (how fast a vanished device is noticed) | ● | ● | ● |
+| delivery queue: wait and overflow policy | ● | ● | ● |
 | tuning `Blob` (chunk size, limits) | ● | ● | |
 | listing this machine's interfaces | ● | ● | |
 | turning auto-reconnect off / tuning it | ● | ● | |
@@ -576,6 +579,31 @@ all three.
 `publish` tells you when a message could not be sent: C++ and Python return
 false, C# throws. A transfer
 that cannot start says so rather than returning a plausible-looking id.
+
+### One message to several peers
+
+When some peers, but not all, need the same message, `publish_many` encodes and
+compresses it once and whispers the same bytes to each uuid on the list. Nobody
+else receives it. A loop of `publish(..., dst)` does the same thing at one
+encode per peer.
+
+```cpp
+std::vector<std::string> want = {headset_1.uuid, headset_2.uuid};
+size_t n = net->publish_many("app.result", result, want);   // n == 2
+```
+```python
+n = net.publish_many("app.result", result, [h1.uuid, h2.uuid])
+```
+```csharp
+int n = net.PublishMany("app.result", json, new[] { h1.Uuid, h2.Uuid });  // or PublishManyCbor
+```
+
+It returns how many peers the message was handed to. A uuid that is no longer a
+peer is skipped and not counted, repeats and empty strings are ignored, and an
+empty list sends nothing: it never turns into a broadcast. On arrival the
+message looks like any broadcast (no destination in the envelope), which is what
+lets every listed peer receive byte-identical frames. The wire cost is the same
+as the loop: ZRE has no multicast, so N peers are still N sends.
 
 **Names that are the same thing in each language**, since they are the ones
 people mix up: `peer.host()` / `peer.host` / `Peer.Host` is the machine's
@@ -618,6 +646,34 @@ backpressure and nothing was lost. `slowest_handler_us` names the handler
 responsible without a profiler. The same numbers are in `uninet.diagnostics()`
 and, from C#, in `session.Delivery`.
 
+### Real-time traffic and the delivery queue
+
+The queue's default behaviour when it is full is built for `Blob` transfers:
+the network thread **waits up to 5 s** (`delivery_block_ms`) for the handlers to
+make room, handing the pressure back to the sender, and only then drops the
+oldest message. For live state that is the wrong trade. While it waits, the
+network thread reads nothing at all: no other subject, no presence event, from
+any peer. One stuck handler then delays everything by up to 5 s per arriving
+message, and a 30 Hz pose arrives late instead of being replaced by a newer one.
+
+A node that carries only live state can opt out, without changing anyone
+else's defaults:
+
+| | C++ `SessionConfig` | Python `join(...)` | C# `Session.Join(...)` |
+|---|---|---|---|
+| never wait at the cap | `delivery_block_ms = 0` | `delivery_block_ms=0` | `deliveryBlockMs: 0` |
+| drop the oldest message **of the arriving subject** first | `delivery_overflow = DeliveryOverflow::OldestSameSubject` | `delivery_overflow=uninet.DeliveryOverflow.OLDEST_SAME_SUBJECT` | `deliveryOverflow: DeliveryOverflow.OldestSameSubject` |
+
+With both, the network thread never blocks, and a flooding stream evicts its
+own stale copies instead of someone else's one-off message (a lease grant, a
+case change). Only when nothing of that subject is queued does the oldest item
+go. `delivery_stats()` counts every drop, as before. Keep the defaults on a
+node that receives `Blob`s: dropping a chunk fails the transfer.
+
+In C#/Unity the native queue rarely fills at all, because the binding's native
+handler only copies bytes; the managed queue that `Update()` drains
+(`MaxPendingEvents`, drop-oldest) is the one to watch there.
+
 ### One lifetime rule
 
 A handler keeps running until the session is closed, so anything it captures
@@ -657,7 +713,33 @@ for (const uninet::Peer& p : net->peers()) {
 ```
 
 `on_peer_found` also replays the devices already present, so registration order
-never changes what you see.
+never changes what you see. The peer handed to it carries every header, in all
+three languages (C#'s `PeerFound` used to carry role and app only).
+
+### Noticing a device that vanished
+
+A device that leaves cleanly is reported lost at once. One that simply stops -
+a headset walking out of Wi-Fi range, a battery pulled - is pinged after
+`evasive_ms` of silence (5 s) and reported lost after `expired_ms` (30 s).
+Both are settable:
+
+```cpp
+cfg.evasive_ms = 2000; cfg.expired_ms = 6000;             // C++ SessionConfig
+```
+```python
+net = uninet.join("Server", evasive_ms=2000, expired_ms=6000)
+```
+```csharp
+var net = Session.Join("Headset", evasiveMs: 2000, expiredMs: 6000);
+```
+
+2000 / 6000 notices a dropout in about 7 s. Zyre checks once a second and each
+beacon (one a second) counts as hearing from a peer, so going much lower buys
+extra pings, and an `expired_ms` below the silence Wi-Fi power saving produces
+on its own (a second or two) reports dozing devices as lost, which then come
+back with a found event and a resync. The setting decides how fast *this* node
+gives up on others; set it on the node that needs to know, e.g. the server.
+`expired_ms` must stay above `evasive_ms`.
 
 > **`address` is the address the connection actually came from**, not one the
 > peer claims. A device's own idea of its address is wrong behind NAT and
@@ -947,6 +1029,46 @@ aapt dump permissions your.apk | grep MULTICAST
 > **Ethernet or USB tethering on the headset:** the multicast lock applies to
 > Wi-Fi only. On a non-Wi-Fi interface the lock is harmless but does nothing -
 > discovery works because those interfaces do not filter multicast.
+
+**Decoding off the main thread.** With the default pump every message is also
+*decoded* on the main thread, inside `Update()`, so a frame that receives a
+mesh pays for parsing it. To move that work off the main thread, join with
+`marshalToCaller: false`: handlers then run on a UniNet thread, never on the
+thread that called `Join`/`Subscribe`, one at a time and in arrival order.
+Decode there, and hand only the result to the main thread:
+
+```csharp
+readonly ConcurrentQueue<MeshData> _ready = new ConcurrentQueue<MeshData>();
+readonly ConcurrentQueue<Peer> _arrived = new ConcurrentQueue<Peer>();
+
+void Start()
+{
+    UniNetMulticastLock.Acquire();
+    _net = Session.Join("Headset", role: "headset", marshalToCaller: false);
+    _net.PeerFound += p => _arrived.Enqueue(p);           // UniNet thread
+    _net.SubscribeCbor("app.mesh.>", (subject, src, cbor) =>
+        _ready.Enqueue(MyCbor.DecodeMesh(cbor)));         // UniNet thread: no Unity API
+}
+
+void Update()                                             // main thread
+{
+    while (_arrived.TryDequeue(out var p)) OnPeer(p);
+    while (_ready.TryDequeue(out var m)) ApplyToScene(m); // Mesh, GameObject: here only
+}
+```
+
+- **No Unity API in the handler** (Debug.Log is the thread-safe exception):
+  build plain C# data there, create Unity objects in `Update()`.
+- The `byte[]` is the handler's own: keep it or pass it on without copying.
+- The switch is **per session**: `PeerFound`/`PeerLost` arrive on the UniNet
+  thread too and `Update()` delivers nothing, so queue them the same way. A
+  `PeerFound` handler added after `Join` still hears about the devices already
+  there (they are replayed to it), and messages that arrived before
+  `Subscribe*` are held and handed to it - also off the calling thread.
+- Handlers run one at a time: decode, enqueue, return. Bound your own queues if
+  the main thread can stall for long; nothing else does in this mode.
+
+`tests/interop/InteropCs` checks all of this against live C++ and Python peers.
 
 ---
 
@@ -1489,7 +1611,7 @@ PYTHONPATH=python pytest python/tests -v       # Python, and the Slicer installe
 | `python/tests` | dict round-trips, numpy volumes, discovery, wildcards, threading, error handling |
 | `python/tests/test_slicer_setup.py` | every decision the Slicer installer makes - which Slicer, which interpreter, which wheel, what goes into `.slicerrc.py`, what the build environment ends up being - against a directory shaped like a Slicer install. Needs no Slicer and no network; the handful of cases that ask which compiler would be used skip themselves on a machine without one |
 | `scripts/test-slicer-setup.sh` | the same installer against a **real Slicer**: install from nothing, import, two Slicer interpreters exchanging a message, the cached-wheel reinstall, the startup hook surviving a real Slicer start, and that the extension needs no system ZeroMQ |
-| `scripts/test-interop.sh` | a C++, a Python and a C# node in one realm, each verifying the others' payloads field by field |
+| `scripts/test-interop.sh` | a C++, a Python and a C# node in one realm, each verifying the others' payloads field by field and the custom discovery headers (`tn.*`) each advertised; the C# node also checks that `marshalToCaller: false` handlers run off the calling thread |
 | `scripts/test-on-android.sh` | the codec, the C ABI and discovery running **on a connected Android device**, plus two nodes finding each other across the USB cable with no network |
 | `scripts/test-on-emulator.sh` | the same suite on an **emulator**, so it runs with no hardware attached. Downloads the emulator and a system image once (~6 GB) into a scratch directory, boots headless, tests, shuts down. It is real Android userspace, but x86_64 and with emulated Wi-Fi, so it cannot answer questions about the multicast filtering that needs a `MulticastLock`: use a physical device for those |
 | `scripts/check-il2cpp.sh` | compiles the C# binding with Unity's AOT class library and runs the real IL2CPP compiler over it, asserting every callback converts. Catches the Unity-only failure described under [Unity / Meta Quest](#unity--meta-quest), which no ordinary build or test run can see |
