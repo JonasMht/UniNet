@@ -7,12 +7,14 @@
 // function call) and strict about outcomes.
 #include "uninet/blob.h"
 #include "uninet/json.h"
+#include "uninet/profiler.h"
 #include "uninet/session.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -20,6 +22,8 @@
 #include <vector>
 
 #ifndef _WIN32
+  #include <csignal>
+  #include <sys/wait.h>
   #include <unistd.h>      // getpid, for a realm nobody else on this box shares
 #endif
 
@@ -565,6 +569,158 @@ void test_gossip_discovery() {
           "a message crossed the gossip link");
 }
 
+// ── one message, several peers, one encode ───────────────────────────────
+// publish_many exists so a server can send the same result to the peers that
+// want it without framing and compressing it once per peer. Proved three ways:
+// the frames the listed peers receive are byte-identical, the profiler counts
+// one frame for the whole call (against one per peer for a loop of publish),
+// and a peer not on the list receives nothing.
+void test_publish_many() {
+    std::printf("publish_many\n");
+    const std::string realm = unique_realm("many");
+
+    uninet::SessionConfig cfg; cfg.realm = realm;
+    auto a = uninet::Session::join("Server", cfg);
+    auto b = uninet::Session::join("Headset 1", cfg);
+    auto c = uninet::Session::join("Headset 2", cfg);
+    auto d = uninet::Session::join("Bystander", cfg);
+
+    check(wait_until([&] { return a->peers().size() == 3; }, std::chrono::seconds(20)),
+          "the server sees all three peers");
+
+    std::mutex mu;
+    std::vector<uninet::Bytes> b_raw, c_raw;
+    std::vector<std::string> b_dst;
+    std::atomic<int> d_got{0};
+    StopFirst stop{a.get(), b.get(), c.get(), d.get()};
+    // The raw frames, below the Node, so the comparison is of the bytes that
+    // crossed the wire and not of two decodes that merely agree.
+    b->transport().subscribe("many.>", [&](const std::string&, const uninet::Bytes& p) {
+        std::lock_guard<std::mutex> lk(mu); b_raw.push_back(p);
+    });
+    c->transport().subscribe("many.>", [&](const std::string&, const uninet::Bytes& p) {
+        std::lock_guard<std::mutex> lk(mu); c_raw.push_back(p);
+    });
+    b->subscribe("many.>", [&](const uninet::Envelope& e) {
+        std::lock_guard<std::mutex> lk(mu); b_dst.push_back(e.dst_uuid);
+    });
+    d->subscribe("many.>", [&](const uninet::Envelope&) { d_got.fetch_add(1); });
+
+    // Large and compressible, so a second encode would be real work.
+    uninet::Cbor mesh = uninet::Cbor::map();
+    {
+        std::vector<float> v(30000);
+        for (size_t i = 0; i < v.size(); ++i) v[i] = float(i % 97) * 0.25f;
+        mesh.set("verts", uninet::Cbor::f32_array(v.data(), v.size()));
+    }
+
+    uninet::profiler::reset();
+    uninet::profiler::enable(true);
+    const size_t sent = a->publish_many("many.mesh", mesh,
+                                        {b->uuid(), c->uuid(), b->uuid(), ""});
+    const auto one_call = uninet::profiler::snapshot();
+    uninet::profiler::reset();
+    a->publish("many.loop", mesh, b->uuid());
+    a->publish("many.loop", mesh, c->uuid());
+    const auto loop = uninet::profiler::snapshot();
+    uninet::profiler::enable(false);
+
+    auto count = [](const uninet::profiler::Snapshot& s, const char* op) -> size_t {
+        auto it = s.ops.find(op);
+        return it == s.ops.end() ? 0 : it->second.count;
+    };
+    check(sent == 2, "handed to both listed peers; the repeat and the empty uuid are ignored");
+    check(count(one_call, "frame") == 1,
+          "publish_many framed once for two peers (frames: " +
+              std::to_string(count(one_call, "frame")) + ")");
+    check(count(loop, "frame") == 2,
+          "control: a loop of publish frames once per peer (frames: " +
+              std::to_string(count(loop, "frame")) + ")");
+
+    check(wait_until([&] {
+              std::lock_guard<std::mutex> lk(mu); return b_raw.size() == 2 && c_raw.size() == 2;
+          }, std::chrono::seconds(10)),
+          "both listed peers received it");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        check(b_raw.size() == 2 && c_raw.size() == 2,
+              "each listed peer received it exactly once");
+        check(!b_raw.empty() && !c_raw.empty() && b_raw[0] == c_raw[0],
+              "the bytes both peers received are identical (" +
+                  std::to_string(b_raw.empty() ? 0 : b_raw[0].size()) + " bytes)");
+        check(b_raw.size() == 2 && c_raw.size() == 2 && b_raw[1] != c_raw[1],
+              "control: the per-peer loop sends each peer different bytes");
+        check(!b_dst.empty() && b_dst[0].empty(),
+              "it arrives with no destination, like a broadcast");
+    }
+    check(d_got.load() == 0, "a peer not on the list received nothing");
+
+    check(a->publish_many("many.none", uninet::Cbor::map(), {}) == 0,
+          "an empty list sends nothing");
+    check(a->publish_many("many.gone", uninet::Cbor::map(), {"not-a-peer"}) == 0,
+          "a uuid that is not a peer is skipped");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    check(d_got.load() == 0, "and neither became a broadcast");
+    check(a->publish_many_json("many.json", "{\"n\":1}", {c->uuid()}) == 1,
+          "publish_many_json reaches the peer it names");
+    check(a->publish_many_json("many.json", "{not json", {c->uuid()}) == 0,
+          "malformed JSON sends nothing");
+}
+
+// ── a peer that vanishes is noticed as fast as it was configured to be ────
+// A killed process sends no goodbye, so only the timeouts can notice it. With
+// the defaults that takes 30 s; with evasive/expired at 1 s / 3 s it must take
+// a few. The silent peer is a child process killed with SIGKILL, because a
+// session in this process always leaves cleanly.
+#ifndef _WIN32
+int run_silent_peer(const char* realm) {
+    uninet::SessionConfig cfg; cfg.realm = realm;
+    auto s = uninet::Session::join("Doomed", cfg);
+    for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+#endif
+
+void test_fast_expiry(const char* self) {
+    std::printf("fast expiry\n");
+#ifdef _WIN32
+    (void)self;
+    std::printf("  SKIP needs fork/exec\n");
+#else
+    const std::string realm = unique_realm("expiry");
+    uninet::SessionConfig cfg; cfg.realm = realm;
+    cfg.evasive_ms = 1000;
+    cfg.expired_ms = 3000;
+    auto a = uninet::Session::join("Watcher", cfg);
+
+    const pid_t pid = fork();
+    if (pid == 0) {
+        execl(self, self, "--silent-peer", realm.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    check(pid > 0, "started the peer that will vanish");
+    if (pid <= 0) return;
+
+    std::atomic<bool> lost{false};
+    StopFirst stop{a.get()};
+    a->on_peer_lost([&](const uninet::Peer&) { lost.store(true); });
+    const bool found = wait_until([&] { return a->peers().size() == 1; },
+                                  std::chrono::seconds(20));
+    check(found, "the peer appeared");
+
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool gone = found && wait_until([&] { return lost.load(); }, std::chrono::seconds(20));
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.1f", secs);
+    check(gone && secs < 10.0,
+          std::string("a killed peer was reported lost in ") + buf +
+              " s with expired_ms = 3000 (the default would take 30 s)");
+#endif
+}
+
 // ── close() ───────────────────────────────────────────────────────────────
 void test_close() {
     std::printf("close\n");
@@ -585,7 +741,13 @@ void test_close() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+#ifndef _WIN32
+    // The peer test_fast_expiry kills: it joins and waits to be killed.
+    if (argc == 3 && std::strcmp(argv[1], "--silent-peer") == 0)
+        return run_silent_peer(argv[2]);
+#endif
+    (void)argc;
     std::printf("UniNet network tests: %s\n\n", uninet::zyre_version_string().c_str());
 
     test_json_bridge();
@@ -601,6 +763,8 @@ int main() {
     test_blob_empty();
     test_blob_from_network_thread();
     test_gossip_discovery();
+    test_publish_many();
+    test_fast_expiry(argv[0]);
     test_close();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",

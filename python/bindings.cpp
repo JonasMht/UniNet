@@ -661,6 +661,22 @@ PYBIND11_MODULE(_uninet, m) {
             py::gil_scoped_release unlock;
             return s.publish_json(subject, json, dst);
         }, py::arg("subject"), py::arg("json"), py::arg("dst") = "")
+        .def("publish_many", [](Session& s, const std::string& subject,
+                                const py::object& data, const std::vector<std::string>& dsts) {
+            Cbor c = py_to_cbor(data);
+            py::gil_scoped_release unlock;
+            return s.publish_many(subject, std::move(c), dsts);
+        }, py::arg("subject"), py::arg("data"), py::arg("dsts"),
+           "Send one message to the peers whose uuids are in dsts: encoded "
+           "once, the same bytes whispered to each, nobody else receives it. "
+           "Returns how many peers it was handed to; a uuid that is not a peer "
+           "is skipped, so an empty list sends nothing (never a broadcast).")
+        .def("publish_many_json", [](Session& s, const std::string& subject,
+                                     const std::string& json,
+                                     const std::vector<std::string>& dsts) {
+            py::gil_scoped_release unlock;
+            return s.publish_many_json(subject, json, dsts);
+        }, py::arg("subject"), py::arg("json"), py::arg("dsts"))
         .def("subscribe", [](Session& s, const std::string& subject, py::function cb) {
             auto held = hold(std::move(cb));
             s.subscribe(subject, [held](const Envelope& env) {

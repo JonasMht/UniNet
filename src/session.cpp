@@ -148,6 +148,21 @@ bool Session::publish_json(const std::string& subject, const std::string& json,
     return impl_->node && impl_->node->publish(subject, std::move(data), dst);
 }
 
+size_t Session::publish_many(const std::string& subject, Cbor data,
+                             const std::vector<std::string>& dsts) {
+    std::shared_lock<std::shared_timed_mutex> lk(impl_->mu);
+    return impl_->node ? impl_->node->publish_many(subject, std::move(data), dsts) : 0;
+}
+
+size_t Session::publish_many_json(const std::string& subject, const std::string& json,
+                                  const std::vector<std::string>& dsts) {
+    bool ok = false;
+    Cbor data = from_json(json, &ok);
+    if (!ok) return 0;
+    std::shared_lock<std::shared_timed_mutex> lk(impl_->mu);
+    return impl_->node ? impl_->node->publish_many(subject, std::move(data), dsts) : 0;
+}
+
 void Session::subscribe(const std::string& subject, Node::DataHandler handler) {
     std::shared_lock<std::shared_timed_mutex> lk(impl_->mu);
     if (impl_->node) impl_->node->subscribe(subject, std::move(handler));

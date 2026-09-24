@@ -660,6 +660,59 @@ namespace UniNet
                 throw new InvalidOperationException("UniNet publish: " + Native.LastError());
         }
 
+        /// <summary>
+        /// Send one JSON message to a chosen set of peers: encoded once, the
+        /// same bytes whispered to each uuid in <paramref name="dsts"/>, nobody
+        /// else receives it.
+        /// </summary>
+        /// <returns>How many peers it was handed to. A uuid that is no longer a
+        /// peer is skipped and not counted; empty and repeated entries are
+        /// ignored, so an empty list sends nothing and never broadcasts.</returns>
+        /// <remarks>What a loop of <see cref="Publish"/> calls with a
+        /// <c>dst</c> would do, without encoding and compressing the payload
+        /// once per peer. Receivers see an ordinary message: nothing on arrival
+        /// says it was addressed.</remarks>
+        /// <exception cref="InvalidOperationException">Not on the network, or
+        /// the JSON is malformed.</exception>
+        public int PublishMany(string subject, string json, IEnumerable<string> dsts)
+        {
+            ThrowIfDisposed();
+            if (dsts == null) throw new ArgumentNullException(nameof(dsts));
+            var list = new List<string>(dsts);
+            IntPtr[] native = Native.Utf8Array(list);
+            try
+            {
+                int rc = Native.uninet_session_publish_many_json(
+                    _handle, subject, json, native, (UIntPtr)native.Length, out UIntPtr sent);
+                if (rc != Status.Ok)
+                    throw new InvalidOperationException("UniNet publish: " + Native.LastError());
+                return (int)sent.ToUInt64();
+            }
+            finally { Native.FreeUtf8Array(native); }
+        }
+
+        /// <summary>
+        /// <see cref="PublishMany"/> for a payload that is already CBOR.
+        /// </summary>
+        public int PublishManyCbor(string subject, byte[] cbor, IEnumerable<string> dsts)
+        {
+            ThrowIfDisposed();
+            if (cbor == null) throw new ArgumentNullException(nameof(cbor));
+            if (dsts == null) throw new ArgumentNullException(nameof(dsts));
+            var list = new List<string>(dsts);
+            IntPtr[] native = Native.Utf8Array(list);
+            try
+            {
+                int rc = Native.uninet_session_publish_many_cbor(
+                    _handle, subject, cbor, (UIntPtr)cbor.Length, native,
+                    (UIntPtr)native.Length, out UIntPtr sent);
+                if (rc != Status.Ok)
+                    throw new InvalidOperationException("UniNet publish: " + Native.LastError());
+                return (int)sent.ToUInt64();
+            }
+            finally { Native.FreeUtf8Array(native); }
+        }
+
         /// <summary>Every device currently on the network.</summary>
         public IReadOnlyList<Peer> Peers()
         {

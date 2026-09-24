@@ -104,8 +104,23 @@ int uninet_session_publish_json(uninet_session_t* session, const char* subject,
 int uninet_session_publish_cbor(uninet_session_t* session, const char* subject,
                                 const uint8_t* cbor, size_t len, const char* dst);
 
+// Send one message to a chosen set of peers: encoded once, the same bytes
+// whispered to each of the `ndsts` uuids in `dsts`, nobody else receives it.
+// `sent` (may be NULL) receives how many peers it was handed to: a uuid that is
+// not a peer is skipped, empty and repeated ones are ignored, so an empty list
+// sends nothing and never broadcasts. UNINET_OK even when some were skipped;
+// UNINET_ERR_STATE when not on the network. Receivers see an ordinary message
+// with no destination (see Session::publish_many).
+int uninet_session_publish_many_json(uninet_session_t* session, const char* subject,
+                                     const char* json, const char* const* dsts,
+                                     size_t ndsts, size_t* sent);
+int uninet_session_publish_many_cbor(uninet_session_t* session, const char* subject,
+                                     const uint8_t* cbor, size_t len,
+                                     const char* const* dsts, size_t ndsts,
+                                     size_t* sent);
+
 // Receive. `subject` is exact, or ends in ">" to match everything below it.
-// The callback fires on the network thread (see THREADING above).
+// The callback fires on the delivery thread (see THREADING above).
 int uninet_session_subscribe_json(uninet_session_t* session, const char* subject,
                                   uninet_json_cb cb, void* user);
 int uninet_session_subscribe_cbor(uninet_session_t* session, const char* subject,

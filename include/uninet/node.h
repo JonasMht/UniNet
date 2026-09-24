@@ -61,6 +61,20 @@ public:
     // during a network outage indistinguishable from a successful one.
     bool publish(const std::string& subject, Cbor data, const std::string& dst_uuid = "");
 
+    // Publish ONE message to several peers: encoded and compressed once, then
+    // the same bytes whispered to each uuid in `dst_uuids`. Nobody else
+    // receives it. Returns how many of them it was handed to; a uuid that is
+    // not (or no longer) a peer is skipped and not counted, as are empty and
+    // repeated entries, so an empty list sends nothing rather than
+    // broadcasting.
+    //
+    // The frame carries no destination (dst_uuid is empty on arrival), which
+    // is what lets every listed peer receive identical bytes: whispering is
+    // what restricts who gets it. On a transport that cannot address a single
+    // peer (loopback) it falls back to one publish() per uuid.
+    size_t publish_many(const std::string& subject, Cbor data,
+                        const std::vector<std::string>& dst_uuids);
+
     // Subscribe to a subject (exact or wildcard). The handler receives accepted
     // envelopes only (own echoes and non-matching dst_uuids are filtered).
     void subscribe(const std::string& subject, DataHandler handler);

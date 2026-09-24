@@ -159,6 +159,24 @@ public:
     bool publish_json(const std::string& subject, const std::string& json,
                       const std::string& dst = "");
 
+    // One message to a chosen set of peers: encoded once, the same bytes
+    // whispered to each uuid in `dsts`, nobody else receives it. What a server
+    // wants when several peers (but not all) need the same result: a loop of
+    // publish(..., dst) would encode and compress it once per peer.
+    //
+    // Returns how many peers it was handed to. A uuid that is not a peer (it
+    // left) is skipped and not counted, and empty or repeated entries are
+    // ignored, so an empty list sends nothing -- it never becomes a broadcast.
+    // 0 as well when not on the network.
+    //
+    // On arrival the message looks like a broadcast (Envelope::dst_uuid is
+    // empty): that is what makes the bytes identical for every receiver.
+    size_t publish_many(const std::string& subject, Cbor data,
+                        const std::vector<std::string>& dsts);
+    // Same, from JSON text. 0 for malformed JSON as well.
+    size_t publish_many_json(const std::string& subject, const std::string& json,
+                             const std::vector<std::string>& dsts);
+
     // ── receiving ──
     // `subject` is exact, or ends in ">" to match everything below it
     // ("sensors.>"). ">" alone matches everything.

@@ -137,6 +137,46 @@ bool Node::publish(const std::string& subject, Cbor data, const std::string& dst
     return transport_->publish(subject, wire.data(), wire.size());
 }
 
+size_t Node::publish_many(const std::string& subject, Cbor data,
+                          const std::vector<std::string>& dst_uuids) {
+    if (!transport_ || !transport_->connected()) return 0;
+    // Each peer once, and never "" -- which everywhere else means broadcast.
+    std::vector<const std::string*> targets;
+    {
+        std::unordered_set<std::string> seen;
+        for (const auto& d : dst_uuids)
+            if (!d.empty() && seen.insert(d).second) targets.push_back(&d);
+    }
+    if (targets.empty()) return 0;
+
+    if (!transport_->can_address()) {
+        // Receivers can only be told apart by the dst in the frame, so each
+        // needs its own. Correct, not cheap; only loopback lands here.
+        size_t sent = 0;
+        for (const auto* d : targets)
+            if (publish(subject, data, *d)) ++sent;
+        return sent;
+    }
+
+    Envelope env;
+    env.compression = compress_;
+    env.src_uuid = uuid();
+    // No dst: the frame is the same for every target, and a receiver accepts
+    // a frame with no dst. The whisper below is what keeps it private.
+    env.subject = subject;
+    env.data = std::move(data);
+    static thread_local Scratch scratch;
+    static thread_local Bytes wire;
+    profiler::ScopedOp _("node.publish_many");
+    frame_into(env, wire, scratch);
+    _.set_bytes_in(wire.size());
+    _.set_bytes_out(wire.size() * targets.size());
+    size_t sent = 0;
+    for (const auto* d : targets)
+        if (transport_->publish_to(*d, subject, wire.data(), wire.size())) ++sent;
+    return sent;
+}
+
 void Node::subscribe(const std::string& subject, DataHandler handler) {
     ensure_watching_();   // app subscribe implies "I want to receive": make sure we're watching
     {

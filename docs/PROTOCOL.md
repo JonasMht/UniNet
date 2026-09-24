@@ -31,7 +31,8 @@ There are two layers, and they are independent:
 | Grouping | every UniNet node joins one ZRE **group**, named after the realm (default `uninet`) |
 | Broadcast | `SHOUT` to the group |
 | Unicast | `WHISPER` to one peer uuid |
-| Presence | `ENTER` / `JOIN` / `LEAVE` / `EXIT` events |
+| To several peers (`publish_many`) | one frame with `dst` empty, `WHISPER`ed unchanged to each listed peer |
+| Presence | `ENTER` / `JOIN` / `LEAVE` / `EXIT` events; a silent peer is pinged after `evasive_ms` (default 5 s) and removed after `expired_ms` (default 30 s), both per node (`SessionConfig`) |
 | Identity | a 32-hex-character uuid assigned by ZRE, stable for the process |
 | Metadata | ZRE **headers**, sent once with the beacon: UniNet uses `role`, `app`, plus anything the application sets |
 
@@ -84,7 +85,10 @@ decompress and decode a frame just to decide whether to keep it.
 `src`, `dst` and `compression` are reconstructed from the binary header; they are
 not in the CBOR core.
 
-A receiver accepts a frame when `dst == ""` or `dst == self`. (Echo suppression
+A receiver accepts a frame when `dst == ""` or `dst == self`. A frame sent to
+several peers at once carries `dst == ""` and relies on the WHISPER for its
+privacy, so every recipient gets the same bytes; a receiver cannot tell it
+from a broadcast, and nothing on the wire changed to allow it. (Echo suppression
 is unnecessary; see above.
 
 ## Subjects

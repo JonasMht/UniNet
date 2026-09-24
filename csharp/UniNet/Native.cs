@@ -175,6 +175,26 @@ namespace UniNet
             byte[] cbor, UIntPtr len,
             [MarshalAs(UnmanagedType.LPUTF8Str)] string dst);
 
+        // `dsts` is an array of UTF-8 C strings built by Utf8Array(), not a
+        // string[] with an ArraySubType: how an array of strings is marshalled
+        // is one more thing AOT backends disagree about, and an IntPtr[] is
+        // blittable everywhere.
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_session_publish_many_json(
+            IntPtr session,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string subject,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string json,
+            IntPtr[] dsts,
+            UIntPtr ndsts, out UIntPtr sent);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_session_publish_many_cbor(
+            IntPtr session,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string subject,
+            byte[] cbor, UIntPtr len,
+            IntPtr[] dsts,
+            UIntPtr ndsts, out UIntPtr sent);
+
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uninet_session_subscribe_json(
             IntPtr session,
@@ -390,6 +410,37 @@ namespace UniNet
             var buf = new byte[len];
             Marshal.Copy(p, buf, 0, len);
             return System.Text.Encoding.UTF8.GetString(buf);
+        }
+
+        /// <summary>
+        /// The other direction, for an array: each string as a NUL-terminated
+        /// UTF-8 copy in unmanaged memory. Release with FreeUtf8Array.
+        /// </summary>
+        internal static IntPtr[] Utf8Array(System.Collections.Generic.IList<string> items)
+        {
+            var ptrs = new IntPtr[items.Count];
+            try
+            {
+                for (int i = 0; i < items.Count; ++i)
+                {
+                    byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(items[i] ?? string.Empty);
+                    ptrs[i] = Marshal.AllocHGlobal(utf8.Length + 1);
+                    Marshal.Copy(utf8, 0, ptrs[i], utf8.Length);
+                    Marshal.WriteByte(ptrs[i], utf8.Length, 0);
+                }
+                return ptrs;
+            }
+            catch
+            {
+                FreeUtf8Array(ptrs);
+                throw;
+            }
+        }
+
+        internal static void FreeUtf8Array(IntPtr[] ptrs)
+        {
+            foreach (var p in ptrs)
+                if (p != IntPtr.Zero) Marshal.FreeHGlobal(p);
         }
 
         /// <summary>

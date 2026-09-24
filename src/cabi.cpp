@@ -176,6 +176,74 @@ extern "C" int uninet_session_publish_cbor(uninet_session_t* session, const char
     } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
 }
 
+namespace {
+
+// Both publish_many forms validate the destination list the same way. A NULL
+// entry is a caller bug, not an empty uuid to skip: it says so.
+bool read_dsts(const char* const* dsts, size_t ndsts, std::vector<std::string>& out) {
+    if (ndsts && !dsts) { set_error("dsts is null but ndsts is not 0"); return false; }
+    out.reserve(ndsts);
+    for (size_t i = 0; i < ndsts; ++i) {
+        if (!dsts[i]) { set_error("dsts[" + std::to_string(i) + "] is null"); return false; }
+        out.emplace_back(dsts[i]);
+    }
+    return true;
+}
+
+int finish_publish_many(uninet_session_t* session, size_t n, size_t* sent) {
+    if (sent) *sent = n;
+    // Nothing handed over and not connected: the whole call failed, which is
+    // what publish_json reports as UNINET_ERR_STATE too. Some or all peers
+    // skipped while connected is not a failure; `sent` says how many.
+    if (n == 0 && !session->session->connected()) {
+        set_error("not on the network, or the transport refused the message");
+        return UNINET_ERR_STATE;
+    }
+    return UNINET_OK;
+}
+
+}  // namespace
+
+extern "C" int uninet_session_publish_many_json(uninet_session_t* session,
+                                                const char* subject, const char* json,
+                                                const char* const* dsts, size_t ndsts,
+                                                size_t* sent) {
+    try {
+        if (sent) *sent = 0;
+        if (!session || !session->session || !subject || !json) {
+            set_error("null session, subject or payload");
+            return UNINET_ERR_ARG;
+        }
+        std::vector<std::string> to;
+        if (!read_dsts(dsts, ndsts, to)) return UNINET_ERR_ARG;
+        bool ok = false;
+        Cbor data = from_json(json, &ok);
+        if (!ok) { set_error("payload is not valid JSON"); return UNINET_ERR_PARSE; }
+        return finish_publish_many(
+            session, session->session->publish_many(subject, std::move(data), to), sent);
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
+extern "C" int uninet_session_publish_many_cbor(uninet_session_t* session,
+                                                const char* subject, const uint8_t* cbor,
+                                                size_t len, const char* const* dsts,
+                                                size_t ndsts, size_t* sent) {
+    try {
+        if (sent) *sent = 0;
+        if (!session || !session->session || !subject || (!cbor && len)) {
+            set_error("null session, subject or payload");
+            return UNINET_ERR_ARG;
+        }
+        std::vector<std::string> to;
+        if (!read_dsts(dsts, ndsts, to)) return UNINET_ERR_ARG;
+        bool ok = false;
+        Cbor data = decode(cbor, len, &ok);
+        if (!ok) { set_error("payload is not valid CBOR"); return UNINET_ERR_PARSE; }
+        return finish_publish_many(
+            session, session->session->publish_many(subject, std::move(data), to), sent);
+    } catch (...) { set_error("internal error"); return UNINET_ERR_INTERNAL; }
+}
+
 extern "C" int uninet_session_subscribe_json(uninet_session_t* session, const char* subject,
                                              uninet_json_cb cb, void* user) {
     try {
