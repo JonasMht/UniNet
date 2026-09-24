@@ -147,6 +147,31 @@ int uninet_config_set_gossip(uninet_config_t* cfg, const char* bind, const char*
 // while the UI is busy" needs an answer that is not "edit the C++".
 int uninet_config_set_delivery(uninet_config_t* cfg, long long max_bytes,
                                long long max_messages, int block_ms);
+// Which message the delivery queue discards once it is full and `block_ms` has
+// run out. UNINET_DELIVERY_OLDEST (the default) is the oldest item;
+// UNINET_DELIVERY_OLDEST_SAME_SUBJECT is the oldest message on the subject of
+// the one arriving, and only when there is none, the oldest item.
+//
+// For a node that carries only live state (poses, drags at 30 Hz), the
+// default block_ms of 5000 is the wrong trade: while the network thread waits
+// for room it reads nothing, so one stuck handler delays every subject and
+// every presence event by seconds. Pair this with block_ms = 0:
+//
+//     uninet_config_set_delivery(cfg, -1, -1, 0);
+//     uninet_config_set_delivery_overflow(cfg, UNINET_DELIVERY_OLDEST_SAME_SUBJECT);
+//
+// Leave both alone on a node that receives Blobs, which need the backpressure.
+#define UNINET_DELIVERY_OLDEST               0
+#define UNINET_DELIVERY_OLDEST_SAME_SUBJECT  1
+int uninet_config_set_delivery_overflow(uninet_config_t* cfg, int policy);
+
+// How long a silent peer has before it is pinged (`evasive_ms`) and then
+// reported lost (`expired_ms`). Pass -1 to leave either at its default
+// (5000 / 30000 ms). Lower them to notice a device that dropped off the
+// network sooner, e.g. 2000 / 6000; see SessionConfig::evasive_ms for why
+// going much lower reports sleeping Wi-Fi devices as lost. expired_ms must end
+// up greater than evasive_ms.
+int uninet_config_set_timeouts(uninet_config_t* cfg, int evasive_ms, int expired_ms);
 
 // Join with everything the C++ SessionConfig can express. `cfg` may be NULL,
 // which is then identical to uninet_session_join(name, ...).

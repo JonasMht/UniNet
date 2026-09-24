@@ -258,6 +258,16 @@ PYBIND11_MODULE(_uninet, m) {
         .value("ZLIB", Compression::Zlib)
         .value("LZ4",  Compression::Lz4);
 
+    // Upper case for the same reason, and to read like Compression.
+    py::enum_<DeliveryOverflow>(m, "DeliveryOverflow",
+        "Which message the delivery queue discards once it is full and "
+        "delivery_block_ms has run out.")
+        .value("OLDEST", DeliveryOverflow::Oldest,
+               "The oldest queued item, whatever it is (the default).")
+        .value("OLDEST_SAME_SUBJECT", DeliveryOverflow::OldestSameSubject,
+               "The oldest queued message on the arriving message's subject, "
+               "and only when there is none, the oldest item.");
+
     // ── Cbor: available, never required ──
     py::class_<Cbor> cbor(m, "Cbor",
         "The wire value type. You rarely need it: publish() takes a dict.");
@@ -619,6 +629,21 @@ PYBIND11_MODULE(_uninet, m) {
                        "discarded and counted in delivery_stats()['dropped'].")
         .def_readwrite("max_delivery_messages", &SessionConfig::max_delivery_messages,
                        "Message cap of the delivery queue (default 0 = unlimited).")
+        .def_readwrite("delivery_block_ms", &SessionConfig::delivery_block_ms,
+                       "At the cap, how long the network thread waits for the "
+                       "handlers to make room before discarding (default 5000). "
+                       "While it waits it reads nothing, on any subject: a node "
+                       "carrying only live state should use 0 with "
+                       "DeliveryOverflow.OLDEST_SAME_SUBJECT.")
+        .def_readwrite("delivery_overflow", &SessionConfig::delivery_overflow,
+                       "Which message to discard at the cap (default "
+                       "DeliveryOverflow.OLDEST).")
+        .def_readwrite("evasive_ms", &SessionConfig::evasive_ms,
+                       "Milliseconds of silence before a peer is pinged (default 5000).")
+        .def_readwrite("expired_ms", &SessionConfig::expired_ms,
+                       "Milliseconds of silence before a peer is reported lost "
+                       "(default 30000). Lower both, e.g. 2000 / 6000, to notice "
+                       "a device that dropped off the network sooner.")
         .def_readwrite("headers", &SessionConfig::headers);
 
     py::class_<Session>(m, "Session", "A device on the network. Created by uninet.join().")

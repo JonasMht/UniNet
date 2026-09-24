@@ -358,6 +358,23 @@ struct ZyreTransport::Impl {
             // stopped. Make room by discarding the OLDEST entries, because what
             // this library carries is live state (a pose, a plan, a temperature
             // field) and the newest message is the one worth keeping.
+            //
+            // With OldestSameSubject, the oldest entries on the arriving
+            // message's own subject go first: the stream that is flooding pays
+            // for its own backlog. The erase is from the middle of the deque,
+            // which is linear, but it only ever runs at the cap.
+            if (cfg.delivery_overflow == DeliveryOverflow::OldestSameSubject &&
+                work.kind == Work::Kind::Message) {
+                for (auto it = deliver_q.begin(); it != deliver_q.end() && !has_room();) {
+                    if (it->kind == Work::Kind::Message && it->subject == work.subject) {
+                        deliver_bytes -= it->weight();
+                        it = deliver_q.erase(it);
+                        ++evicted;
+                    } else {
+                        ++it;
+                    }
+                }
+            }
             while (!has_room()) {
                 deliver_bytes -= deliver_q.front().weight();
                 deliver_q.pop_front();

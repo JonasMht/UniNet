@@ -45,6 +45,25 @@
 
 namespace uninet {
 
+// What the delivery queue discards when it is full and the wait for room
+// (ZyreConfig::delivery_block_ms) has run out.
+//
+//   Oldest             the oldest queued item, whatever it is. The default,
+//                      and what every version before this one did.
+//   OldestSameSubject  the oldest queued message on the SAME subject as the one
+//                      arriving, and only when there is none, the oldest item.
+//                      A 30 Hz stream that floods the queue then evicts its own
+//                      stale copies instead of another subject's one-off
+//                      message, and presence events are never evicted ahead of
+//                      it. Opt in on a node carrying live state; see
+//                      ZyreConfig::delivery_block_ms for the pairing.
+//
+// Values are fixed: the C ABI passes them as an int (0, 1).
+enum class DeliveryOverflow : int {
+    Oldest = 0,
+    OldestSameSubject = 1,
+};
+
 struct ZyreConfig {
     // The ZRE group this node joins. Peers only ever see peers in the same
     // realm; it is the one knob that separates two setups sharing a network.
@@ -71,6 +90,7 @@ struct ZyreConfig {
     // A peer that has said nothing for this long is pinged (evasive), then
     // declared gone (expired). The defaults declare a yanked cable in ~30 s;
     // lower them for a room where a device vanishing should be noticed fast.
+    // SessionConfig carries the same two fields; see there for what to pick.
     int evasive_ms = 5000;
     int expired_ms = 30000;
 
@@ -186,7 +206,28 @@ struct ZyreConfig {
     //
     // Set to 0 to never wait (drop as soon as the cap is reached), which is the
     // right choice only if every subscriber is known to be lossy-tolerant.
+    //
+    // THE COST OF THE DEFAULT, for live traffic. While the network thread
+    // waits here it reads nothing: no message on any subject, no presence
+    // event, from any peer. A handler that stops for longer than the budget
+    // therefore stalls the whole node for up to 5 s at a time, once per
+    // arriving message, and a 30 Hz pose stream arrives up to 5 s late
+    // rather than dropped. That is the right trade for a Blob and the wrong
+    // one for real-time state, where a late pose is worth less than none.
+    // A node that carries only live state, whose handlers can afford to lose
+    // a stale message, is better served by
+    //
+    //     delivery_block_ms = 0;                              // never wait
+    //     delivery_overflow = DeliveryOverflow::OldestSameSubject;
+    //
+    // which never blocks the network thread and, at the cap, discards the
+    // stale copy of the stream that is flooding rather than someone else's
+    // one-off message. Keep the default on a node that receives Blobs.
     int delivery_block_ms = 5000;
+
+    // Which message to discard once the wait above is over and the queue is
+    // still full. See DeliveryOverflow.
+    DeliveryOverflow delivery_overflow = DeliveryOverflow::Oldest;
 };
 
 enum class LinkKind {

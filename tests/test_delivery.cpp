@@ -333,6 +333,93 @@ void test_cap_drops_oldest_and_counts() {
           "the most recent message survived; the stale ones are what went");
 }
 
+// ── opt-in: never wait, and let a flooding stream pay for itself ─────────
+// The default waits up to delivery_block_ms at the cap, and while it waits the
+// network thread reads nothing, on any subject. For live state that is the
+// wrong trade, so a node can opt out of the wait and choose what goes: with
+// OldestSameSubject a 30 Hz stream evicts its own stale copies, and a one-off
+// message on another subject survives the flood. Run twice, so the test also
+// proves the default really would have lost that message.
+struct OverflowRun {
+    bool once_survived = false;
+    bool newest_survived = false;
+    uint64_t dropped = 0;
+    uint64_t blocked_us = 0;
+    bool paired = false;
+};
+
+OverflowRun run_overflow(uninet::DeliveryOverflow policy, const char* tag) {
+    OverflowRun r;
+    std::atomic<bool> release{false};
+    std::atomic<int>  entered{0};
+    std::mutex mu;
+    std::vector<std::string> got;   // "subject:n"
+
+    uninet::SessionConfig cfg;
+    cfg.realm = unique_realm(tag);
+    cfg.max_delivery_messages = 4;
+    cfg.delivery_block_ms = 0;          // never wait: the real-time setting
+    cfg.delivery_overflow = policy;
+    auto tx = uninet::Session::join("sender", cfg);
+    auto rx = uninet::Session::join("receiver", cfg);
+    StopFirst stop{{tx.get(), rx.get()}};
+
+    rx->subscribe("t.>", [&](const uninet::Envelope& e) {
+        if (entered.fetch_add(1) == 0)
+            while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::lock_guard<std::mutex> lk(mu);
+        got.push_back(e.subject + ":" + std::to_string(e.data["n"].as_uint()));
+    });
+
+    if (!wait_until([&] { return !tx->peers().empty() && !rx->peers().empty(); },
+                    std::chrono::seconds(10))) {
+        release.store(true);
+        return r;
+    }
+    r.paired = true;
+
+    // Wedge the handler first, so everything after it is provably queued.
+    tx->publish("t.wedge", numbered(0));
+    wait_until([&] { return entered.load() == 1; }, std::chrono::seconds(10));
+    tx->publish("t.once", numbered(1));            // the message that matters
+    for (int n = 2; n < 22; ++n)                    // the flood, 5x the cap
+        tx->publish("t.stream", numbered(n));
+    wait_until([&] { return rx->transport().delivery_stats().dropped >= 17; },
+               std::chrono::seconds(10));
+
+    release.store(true);
+    wait_until([&] { return rx->transport().delivery_stats().queued == 0; },
+               std::chrono::seconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto stats = rx->transport().delivery_stats();
+    r.dropped = stats.dropped;
+    r.blocked_us = stats.blocked_us;
+    std::lock_guard<std::mutex> lk(mu);
+    for (const auto& g : got) {
+        if (g == "t.once:1") r.once_survived = true;
+        if (g == "t.stream:21") r.newest_survived = true;
+    }
+    return r;
+}
+
+void test_overflow_same_subject() {
+    std::printf("\nopt-in: no wait at the cap, and a flood evicts its own subject\n");
+
+    const OverflowRun same = run_overflow(uninet::DeliveryOverflow::OldestSameSubject, "ovf-same");
+    if (!same.paired) { check(false, "the two nodes found each other"); return; }
+    check(same.dropped > 0, "the flood overflowed the queue and it was counted");
+    check(same.blocked_us == 0, "with delivery_block_ms = 0 the network thread never waited");
+    check(same.once_survived, "the one-off message on another subject survived the flood");
+    check(same.newest_survived, "the newest message of the flooding stream survived");
+
+    const OverflowRun oldest = run_overflow(uninet::DeliveryOverflow::Oldest, "ovf-oldest");
+    if (!oldest.paired) { check(false, "the two nodes found each other"); return; }
+    check(!oldest.once_survived,
+          "control: under the default policy the same flood evicts the one-off message");
+    check(oldest.newest_survived, "control: and still keeps the newest");
+}
+
 // ── the escape hatch still works ──────────────────────────────────────────
 // Running handlers on the network thread is still available for a caller who
 // wants the shorter path and knows their handlers are trivial. It has to be
@@ -430,6 +517,7 @@ int main() {
     test_network_thread_stays_live();
     test_backpressure_beats_dropping();
     test_cap_drops_oldest_and_counts();
+    test_overflow_same_subject();
     test_inline_delivery_still_works();
     test_close_drains();
 

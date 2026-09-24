@@ -228,6 +228,11 @@ namespace UniNet
         internal static extern int uninet_config_set_delivery(IntPtr cfg,
             long maxBytes, long maxMessages, int blockMs);
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_delivery_overflow(IntPtr cfg, int policy);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int uninet_config_set_timeouts(IntPtr cfg, int evasiveMs,
+                                                              int expiredMs);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr uninet_session_join_cfg(
             [MarshalAs(UnmanagedType.LPUTF8Str)] string name, IntPtr cfg);
 

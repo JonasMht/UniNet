@@ -264,6 +264,16 @@ int main(void) {
               "an out-of-range compression is rejected, not cast blindly");
         check(uninet_config_set_port(cfg, 70000) == UNINET_ERR_ARG, "an out-of-range port is rejected");
         check(uninet_config_set_header(NULL, "k", "v") == UNINET_ERR_ARG, "null config is an error");
+        check(uninet_config_set_timeouts(cfg, 2000, 6000) == UNINET_OK, "set_timeouts(2000, 6000)");
+        check(uninet_config_set_timeouts(cfg, -1, -1) == UNINET_OK, "-1 keeps both as they are");
+        check(uninet_config_set_timeouts(cfg, 7000, -1) == UNINET_ERR_ARG,
+              "an evasive timeout above the expired one is rejected");
+        check(uninet_config_set_timeouts(cfg, 0, 6000) == UNINET_ERR_ARG,
+              "a zero timeout is rejected");
+        check(uninet_config_set_delivery_overflow(cfg, UNINET_DELIVERY_OLDEST_SAME_SUBJECT) == UNINET_OK,
+              "set_delivery_overflow(same subject)");
+        check(uninet_config_set_delivery_overflow(cfg, 7) == UNINET_ERR_ARG,
+              "an unknown overflow policy is rejected, not cast blindly");
         uninet_config_free(cfg);
         uninet_config_free(NULL);
         check(1, "config free is safe");

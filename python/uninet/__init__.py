@@ -34,6 +34,7 @@ try:
         BlobInfo,
         Cbor,
         Compression,
+        DeliveryOverflow,
         Envelope,
         LoopbackTransport,
         Message,
@@ -169,6 +170,10 @@ def join(
     max_delivery_bytes: Optional[int] = None,
     max_delivery_messages: Optional[int] = None,
     deliver_on_network_thread: bool = False,
+    delivery_block_ms: Optional[int] = None,
+    delivery_overflow: Optional[DeliveryOverflow] = None,
+    evasive_ms: Optional[int] = None,
+    expired_ms: Optional[int] = None,
     banner: Optional[bool] = None,
 ) -> Session:
     """Join the network under ``name`` and return a :class:`Session`.
@@ -224,6 +229,23 @@ def join(
             network reader and messages are dropped inside ZeroMQ before UniNet
             can see them -- which is exactly the "we lose packets while the UI
             is busy" failure the delivery thread exists to remove.
+        delivery_block_ms: at the cap, how long the network thread waits for
+            the handlers to make room before discarding (default 5000). While
+            it waits it reads nothing at all, on any subject, which is right
+            for a Blob transfer and wrong for live state: a node carrying only
+            live state should pass 0 together with
+            ``delivery_overflow=DeliveryOverflow.OLDEST_SAME_SUBJECT``.
+        delivery_overflow: which message to discard at the cap. ``OLDEST``
+            (default) is the oldest queued item; ``OLDEST_SAME_SUBJECT`` is the
+            oldest one on the arriving message's subject, so a flooding stream
+            evicts its own stale copies rather than someone else's message.
+        evasive_ms: milliseconds of silence before a peer is pinged (default
+            5000).
+        expired_ms: milliseconds of silence before a peer is reported lost
+            (default 30000). Lower both, e.g. 2000 / 6000, to notice a device
+            that dropped off the network within seconds; much lower reports a
+            device whose Wi-Fi is merely dozing as lost. Keep it above
+            ``evasive_ms``.
         banner: print the version banner again, in full. Importing uninet
             already printed the one-line version (see :func:`print_banner`), so
             the default (None) prints nothing here. Pass True for the several-
@@ -271,6 +293,20 @@ def join(
         cfg.max_delivery_bytes = int(max_delivery_bytes)
     if max_delivery_messages is not None:
         cfg.max_delivery_messages = int(max_delivery_messages)
+    if delivery_block_ms is not None:
+        cfg.delivery_block_ms = int(delivery_block_ms)
+    if delivery_overflow is not None:
+        cfg.delivery_overflow = delivery_overflow
+    if evasive_ms is not None:
+        cfg.evasive_ms = int(evasive_ms)
+    if expired_ms is not None:
+        cfg.expired_ms = int(expired_ms)
+    if cfg.evasive_ms <= 0 or cfg.expired_ms <= cfg.evasive_ms:
+        # The C ABI refuses the same; saying so here beats a peer list that
+        # empties itself every second.
+        raise ValueError(
+            f"expired_ms ({cfg.expired_ms}) must be greater than evasive_ms "
+            f"({cfg.evasive_ms}), and both positive")
     if compression is not None:
         cfg.compression = compression   # bound now; this used to raise
     session = _join(name, cfg)
@@ -361,6 +397,7 @@ __all__ = [
     "BlobConfig",
     "Cbor",
     "Compression",
+    "DeliveryOverflow",
     "Envelope",
     "Node",
     "Transport",

@@ -365,6 +365,40 @@ extern "C" int uninet_config_set_delivery(uninet_config_t* cfg, long long max_by
     });
 }
 
+extern "C" int uninet_config_set_delivery_overflow(uninet_config_t* cfg, int policy) {
+    // Validated rather than cast, like compression: an out-of-range enum
+    // would silently behave as neither policy.
+    if (policy != UNINET_DELIVERY_OLDEST && policy != UNINET_DELIVERY_OLDEST_SAME_SUBJECT) {
+        set_error("delivery overflow policy must be 0 (oldest) or 1 (oldest on the same subject)");
+        return UNINET_ERR_ARG;
+    }
+    return with_cfg(cfg, [&](SessionConfig& c) {
+        c.delivery_overflow = static_cast<DeliveryOverflow>(policy);
+    });
+}
+
+extern "C" int uninet_config_set_timeouts(uninet_config_t* cfg, int evasive_ms,
+                                          int expired_ms) {
+    if (!cfg) { set_error("null config"); return UNINET_ERR_ARG; }
+    if (evasive_ms < -1 || evasive_ms == 0 || expired_ms < -1 || expired_ms == 0) {
+        set_error("timeouts must be positive milliseconds, or -1 to keep the default");
+        return UNINET_ERR_ARG;
+    }
+    // Checked on the result, so setting one alone is judged against the other
+    // one's current value, and a refused call changes nothing.
+    const int evasive = evasive_ms > 0 ? evasive_ms : cfg->cfg.evasive_ms;
+    const int expired = expired_ms > 0 ? expired_ms : cfg->cfg.expired_ms;
+    if (expired <= evasive) {
+        set_error("expired_ms (" + std::to_string(expired) + ") must be greater than "
+                  "evasive_ms (" + std::to_string(evasive) + ")");
+        return UNINET_ERR_ARG;
+    }
+    return with_cfg(cfg, [&](SessionConfig& c) {
+        c.evasive_ms = evasive;
+        c.expired_ms = expired;
+    });
+}
+
 extern "C" uninet_session_t* uninet_session_join_cfg(const char* name,
                                                      uninet_config_t* cfg) {
     try {

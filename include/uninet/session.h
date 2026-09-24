@@ -60,6 +60,26 @@ struct SessionConfig {
     bool auto_reconnect = true;
     int  reconnect_poll_ms = 2000;
 
+    // ── noticing a device that vanished ──
+    // A peer that leaves cleanly is reported lost at once. One that simply
+    // stops -- a headset walking out of Wi-Fi range, a battery pulled -- is
+    // pinged after `evasive_ms` of silence and reported lost after
+    // `expired_ms`. The defaults are Zyre's own and every earlier version's.
+    //
+    // Lower both to notice a dropout sooner, for instance 2000 / 6000 to see a
+    // headset go within about 7 s. Zyre checks its peers once a second and
+    // every beacon (one a second) counts as hearing from a peer, so the
+    // resolution is a second and an evasive_ms under ~2000 buys extra pings
+    // rather than speed. The floor for expired_ms is the worst silence the
+    // network produces on its own: Wi-Fi power saving and a busy access point
+    // can hold packets for a second or two, and a value below that reports a
+    // device lost that is merely asleep (it then comes back: a lost and a
+    // found event, and a resync, which cost more than the delay saved). The
+    // setting is per node: it decides how fast THIS node gives up on others,
+    // not how fast others give up on it. Keep expired_ms above evasive_ms.
+    int evasive_ms = 5000;
+    int expired_ms = 30000;
+
     // ── where subscription handlers run ──
     // On a dedicated delivery thread, not on the thread that reads the
     // network, so a slow handler costs latency instead of lost messages. See
@@ -77,7 +97,15 @@ struct SessionConfig {
     // discarding the oldest message. Backpressure for a consumer that is merely
     // slow (a large Blob arriving faster than it is written), a bounded stall
     // for one that has stopped. See ZyreConfig::delivery_block_ms.
+    //
+    // For real-time traffic that default is the wrong trade: while it waits,
+    // the network thread reads nothing at all, so one stuck handler delays
+    // every subject and every presence event by up to 5 s per message. A node
+    // that carries only live state should set delivery_block_ms = 0 and
+    // delivery_overflow = DeliveryOverflow::OldestSameSubject; see
+    // ZyreConfig::delivery_block_ms. Defaults unchanged.
     int delivery_block_ms = 5000;
+    DeliveryOverflow delivery_overflow = DeliveryOverflow::Oldest;
 
     // Messages that arrive with no matching subscription are held in a bounded
     // FIFO and delivered to the first matching subscription, in arrival order

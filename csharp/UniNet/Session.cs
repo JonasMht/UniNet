@@ -283,7 +283,20 @@ namespace UniNet
         /// -1 keeps the default (unlimited).</param>
         /// <param name="deliveryBlockMs">How long the native network thread
         /// waits for room before discarding the oldest queued message.
-        /// -1 keeps the default (5000).</param>
+        /// -1 keeps the default (5000). While it waits it reads nothing, on
+        /// any subject; a session carrying only live state (poses, drags)
+        /// should pass 0 together with
+        /// <see cref="UniNet.DeliveryOverflow.OldestSameSubject"/>.</param>
+        /// <param name="deliveryOverflow">Which message the native queue
+        /// discards once it is full and the wait is over. null keeps the
+        /// default, <see cref="UniNet.DeliveryOverflow.Oldest"/>.</param>
+        /// <param name="evasiveMs">Milliseconds of silence before a peer is
+        /// pinged. -1 keeps the default (5000).</param>
+        /// <param name="expiredMs">Milliseconds of silence before a peer is
+        /// reported lost (<see cref="PeerLost"/>). -1 keeps the default
+        /// (30000). Lower both, e.g. 2000 / 6000, to notice a headset that
+        /// dropped off Wi-Fi within seconds; much lower reports a device whose
+        /// Wi-Fi is merely dozing as lost. Must end up above evasiveMs.</param>
         public static Session Join(string name,
                                    string role = "",
                                    string app = "",
@@ -299,7 +312,10 @@ namespace UniNet
                                    int compression = -1,
                                    long maxDeliveryBytes = -1,
                                    long maxDeliveryMessages = -1,
-                                   int deliveryBlockMs = -1)
+                                   int deliveryBlockMs = -1,
+                                   DeliveryOverflow? deliveryOverflow = null,
+                                   int evasiveMs = -1,
+                                   int expiredMs = -1)
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException("a device name is required", nameof(name));
@@ -311,10 +327,13 @@ namespace UniNet
             IntPtr handle;
             bool wantsDeliveryConfig = maxDeliveryBytes >= 0 || maxDeliveryMessages >= 0 ||
                                        deliveryBlockMs >= 0;
-            if (headers != null || compression >= 0 || wantsDeliveryConfig)
+            bool wantsTimeouts = evasiveMs >= 0 || expiredMs >= 0;
+            if (headers != null || compression >= 0 || wantsDeliveryConfig ||
+                deliveryOverflow.HasValue || wantsTimeouts)
             {
-                // The config-handle path, which is the only way to reach headers
-                // and compression. join_ex cannot express either.
+                // The config-handle path, which is the only way to reach headers,
+                // compression, the queue and the timeouts. join_ex cannot express
+                // any of them.
                 IntPtr cfg = Native.uninet_config_new();
                 if (cfg == IntPtr.Zero)
                     throw new InvalidOperationException("UniNet: " + Native.LastError());
@@ -342,6 +361,17 @@ namespace UniNet
                     if (wantsDeliveryConfig)
                         Native.uninet_config_set_delivery(cfg, maxDeliveryBytes,
                                                           maxDeliveryMessages, deliveryBlockMs);
+                    if (deliveryOverflow.HasValue &&
+                        Native.uninet_config_set_delivery_overflow(cfg, (int)deliveryOverflow.Value) != Status.Ok)
+                        throw new ArgumentOutOfRangeException(
+                            nameof(deliveryOverflow), "UniNet: " + Native.LastError());
+                    // -1 for either keeps that one at its default, as above.
+                    if (wantsTimeouts &&
+                        Native.uninet_config_set_timeouts(cfg, evasiveMs < 0 ? -1 : evasiveMs,
+                                                          expiredMs < 0 ? -1 : expiredMs) != Status.Ok)
+                        throw new ArgumentOutOfRangeException(
+                            evasiveMs >= 0 ? nameof(evasiveMs) : nameof(expiredMs),
+                            "UniNet: " + Native.LastError());
                     handle = Native.uninet_session_join_cfg(name, cfg);
                 }
                 finally { Native.uninet_config_free(cfg); }
@@ -820,6 +850,22 @@ namespace UniNet
         }
 
         ~Session() => Dispose();
+    }
+
+    /// <summary>
+    /// Which message the native delivery queue discards once it is full and
+    /// the wait for room (<c>deliveryBlockMs</c>) is over. Same values as the
+    /// C++ <c>uninet::DeliveryOverflow</c>.
+    /// </summary>
+    public enum DeliveryOverflow
+    {
+        /// <summary>The oldest queued item, whatever it is. The default.</summary>
+        Oldest = 0,
+        /// <summary>The oldest queued message on the subject of the one
+        /// arriving, and only when there is none, the oldest item: a flooding
+        /// stream evicts its own stale copies rather than another subject's
+        /// message.</summary>
+        OldestSameSubject = 1,
     }
 
     /// <summary>
