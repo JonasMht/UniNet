@@ -304,7 +304,8 @@ add_library(uninet STATIC
     src/profiler.cpp
     src/diagnostics.cpp
     src/session.cpp
-    src/zyre_transport.cpp)
+    src/zyre_transport.cpp
+    src/beacon_fanout.cpp)
 set_target_properties(uninet PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(uninet PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -366,6 +367,13 @@ set_tests_properties(network PROPERTIES TIMEOUT 90 LABELS uninet)
 
 # Unmatched-message buffering: late subscriptions must receive what arrived
 # before them, in order, and never grow memory without limit.
+# Discovery on every network: where the beacon goes on a LAN, a VPN, a bridge.
+add_executable(test_beacon_fanout tests/test_beacon_fanout.cpp)
+target_include_directories(test_beacon_fanout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_beacon_fanout PRIVATE uninet uninet_warnings)
+add_test(NAME beacon_fanout COMMAND test_beacon_fanout)
+set_tests_properties(beacon_fanout PROPERTIES TIMEOUT 30 LABELS uninet)
+
 add_executable(test_unmatched tests/test_unmatched.cpp)
 target_link_libraries(test_unmatched PRIVATE uninet uninet_warnings)
 add_test(NAME unmatched COMMAND test_unmatched)

@@ -8,6 +8,8 @@
 // publishing from ten threads costs ten inproc sends, not ten contended mutexes.
 #include "uninet/zyre_transport.h"
 
+#include "beacon_fanout.h"
+
 #include <czmq.h>
 #include <zyre.h>
 
@@ -109,6 +111,8 @@ LinkKind classify(const std::string& name) {
 
 }  // namespace
 
+LinkKind link_kind(const std::string& interface_name) { return classify(interface_name); }
+
 bool Interface::is_private() const {
     unsigned a = 0, b = 0, c = 0, d = 0;
     if (std::sscanf(address.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return false;
@@ -209,6 +213,10 @@ struct ZyreTransport::Impl {
     // to be lock-free on the grounds that nothing wrote it once the node was
     // running, which stopped being true the moment reconnection was added.
     Interface    chosen_interface;
+    // Discovery on every network (see ZyreConfig::iface): the beacon sender,
+    // alive while the node is. Null in gossip mode or on one named interface.
+    std::unique_ptr<detail::BeaconFanout> fanout;
+    std::atomic<bool> every_network{false};
 
     // Guards everything below, which the actor thread writes and callers read.
     mutable std::mutex mu;
@@ -479,6 +487,22 @@ struct ZyreTransport::Impl {
             zyre_set_port(node, cfg.port);
         }
         std::string chosen = cfg.iface;
+        // No interface named: discover on every network at once. The mailbox is
+        // bound on all interfaces ("*") at a port chosen here, because the
+        // beacon BeaconFanout sends on each network has to carry it and the
+        // stable Zyre API never reveals the port it picked by itself.
+        uint16_t mailbox_port = 0;
+#ifdef ZYRE_BUILD_DRAFT_API
+        if (chosen.empty() && !gossip) mailbox_port = detail::free_tcp_port();
+        if (mailbox_port) {
+            zyre_set_beacon_peer_port(node, mailbox_port);
+            chosen = "*";
+            std::lock_guard<std::mutex> lk(mu);
+            chosen_interface = Interface{};
+            chosen_interface.name = "*";
+        }
+#endif
+        // Without the draft API (a system Zyre), fall back to the one best network.
         if (chosen.empty() && !gossip) {
             const Interface best = best_interface(local_interfaces());
             if (!best.name.empty()) {
@@ -531,8 +555,17 @@ struct ZyreTransport::Impl {
             zyre_stop(node);
             return false;
         }
+        if (mailbox_port) {
+            fanout = std::make_unique<detail::BeaconFanout>(
+                detail::zre_beacon(zyre_uuid(node), mailbox_port), (uint16_t)cfg.port,
+                BEACON_INTERVAL_MS);
+        }
+        every_network.store(mailbox_port != 0);
         return true;
     }
+
+    // Zyre's own beacon interval, which the fan-out matches.
+    static constexpr int BEACON_INTERVAL_MS = 1000;
 
     std::atomic<bool> rebuild_requested{false};
 
@@ -553,6 +586,7 @@ struct ZyreTransport::Impl {
         if (on_lost)
             for (const auto& p : gone) { try { on_lost(p); } catch (...) {} }
 
+        fanout.reset();
         zyre_stop(node);
         zyre_destroy(&node);
 
@@ -961,6 +995,7 @@ bool ZyreTransport::connect() {
         impl_->running.store(false);
         impl_->set_error("could not start the network thread");
         impl_->stop_delivery();       // do not leave a thread behind on a failed connect
+        impl_->fanout.reset();
         zyre_stop(impl_->node);
         return false;
     }
@@ -969,7 +1004,11 @@ bool ZyreTransport::connect() {
     // Gossip mode is excluded on purpose: it has no beacon and no bound
     // interface to lose, and its TCP connections are reconnected by ZeroMQ
     // itself. Rebuilding there would drop working links to fix nothing.
-    if (impl_->cfg.auto_reconnect && !gossip) {
+    //
+    // Discovery on every network is excluded too: its sockets are bound to all
+    // interfaces and the fan-out re-reads the links every second, so a network
+    // that comes or goes is followed without replacing the node.
+    if (impl_->cfg.auto_reconnect && !gossip && !impl_->every_network.load()) {
         impl_->watching.store(true);
         impl_->watchdog = std::thread([impl = impl_.get()] {
             // What the node is on now. A rebuild is warranted when this stops
@@ -1092,6 +1131,7 @@ void ZyreTransport::disconnect() {
     // for; that is the same contract every other thread join here has.
     impl_->stop_delivery();
 
+    impl_->fanout.reset();
     if (impl_->node) zyre_stop(impl_->node);   // sends EXIT: peers drop us at once
 
     // Report the departures instead of silently emptying the table: an app that

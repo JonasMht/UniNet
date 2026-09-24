@@ -54,10 +54,14 @@ struct ZyreConfig {
     // clusters on one physical network.
     int port = 5670;
 
-    // Which network interface to beacon on. Empty lets CZMQ choose, which is
-    // right on a single-homed machine. On a box with several interfaces (wired
-    // to the navigation switch AND on hospital Wi-Fi) name the one you mean -
-    // "eth0" or "192.168.1.10", or discovery may pick the wrong network.
+    // Which network to discover on. Empty, the default, means every network at
+    // once: Wi-Fi, wired, a USB tether and a VPN together. The beacon goes out
+    // as a directed broadcast on each LAN and to every address of each
+    // point-to-point subnet (WireGuard, OpenVPN tun), so devices find each other
+    // over a VPN with no rendezvous node and no address to configure. This needs
+    // the Zyre UniNet builds itself; with a system Zyre it falls back to the one
+    // best network. Name an interface ("eth0", "192.168.1.10") to keep
+    // discovery on that network only, e.g. to stay off a hospital LAN.
     //
     // NOT named `interface`: <objbase.h> defines that as a macro on Windows
     // (#define interface struct), which breaks every translation unit that
@@ -70,12 +74,11 @@ struct ZyreConfig {
     int evasive_ms = 5000;
     int expired_ms = 30000;
 
-    // ── discovery over a link with no multicast ──
-    // The UDP beacon above needs peers to share a broadcast domain. Some links
-    // do not provide one: a USB-tethered device reached through a port forward,
-    // a VPN, a routed network, a cloud host. For those, ZRE offers gossip
-    // discovery: one node binds a rendezvous endpoint and the others connect to
-    // it, so no multicast is involved at all.
+    // ── discovery through a rendezvous node ──
+    // A VPN needs none of this: see `iface`. Gossip is for what the beacon can
+    // never reach: a device behind a port forward (adb reverse), a routed
+    // network, a cloud host. One node binds a rendezvous endpoint and the others
+    // connect to it, so no broadcast is involved at all.
     //
     // Setting either of these switches this node from beacon to gossip mode.
     // At least one node in the group must bind; every other node connects.
@@ -198,6 +201,9 @@ enum class LinkKind {
 
 const char* link_kind_name(LinkKind kind);
 
+// What kind of link an interface is, judged by its name ("wlan0", "docker0").
+LinkKind link_kind(const std::string& interface_name);
+
 // One network this machine could discover on.
 struct Interface {
     std::string name;        // "wlan0", "eth0", "Wi-Fi"
@@ -211,9 +217,9 @@ struct Interface {
     // are all private; a campus or hospital address usually is not.
     bool is_private() const;
 
-    // Whether discovery is worth attempting here at all. False for loopback,
-    // container bridges and point-to-point VPN links, none of which have a
-    // broadcast domain with other UniNet devices on it.
+    // Whether the one-network fallback would choose this link. False for
+    // loopback, container bridges and VPNs. Discovery on every network, the
+    // default, still reaches a VPN, by sweeping its subnet.
     bool is_discoverable() const;
 };
 

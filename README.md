@@ -663,6 +663,30 @@ never changes what you see.
 > peer claims. A device's own idea of its address is wrong behind NAT and
 > forgeable everywhere.
 
+### Every network at once
+
+A device discovers on **all** of its networks together, with nothing to
+configure: Wi-Fi, wired, a USB tether and a VPN. A headset on Wi-Fi and a
+WireGuard VPN finds a server that is only on the VPN, and a laptop on both
+finds each of them.
+
+The beacon goes out as a directed broadcast on each LAN, and as one datagram
+to each address of the subnet on each point-to-point link (WireGuard, OpenVPN
+`tun`), which is how a VPN, with no broadcast at all, is covered without a
+rendezvous node. A subnet larger than a /22 is not swept, and container bridges
+are skipped. `uninet::diagnostics()` lists what happens on each network:
+
+```
+beacon on every network:
+  enp209s0f1np1  broadcast
+  Edel1  sweep of 253
+  docker0  skipped: container bridge
+```
+
+Name an interface (`cfg.iface`, `interface=`, `iface:`) to stay on that one
+network, for instance to keep a device off a hospital LAN. This needs the Zyre
+that UniNet builds itself (the default); a system Zyre falls back to one network.
+
 ---
 
 > **`uninet.*` is reserved** for the library's own traffic (large transfers use
@@ -696,11 +720,11 @@ invisible, not merely unreachable.
 
 ## Links without multicast (USB tether, VPN, routed networks)
 
-Discovery uses a UDP beacon, which needs the devices to share a broadcast
-domain. Some links do not provide one:
+A VPN needs nothing here: discovery sweeps a point-to-point subnet by itself
+(see [Every network at once](#every-network-at-once)). What the beacon can never
+reach is a peer with no direct path to it:
 
 - a device tethered over USB and reached through a port forward
-- a VPN
 - two subnets separated by a router
 - a cloud host
 
@@ -714,18 +738,18 @@ fixed value: it depends entirely on the link.
 | link | what `RENDEZVOUS_ADDR` is |
 |---|---|
 | same LAN | the machine's LAN address, e.g. `192.168.1.10` |
-| VPN (WireGuard, Tailscale, ...) | its **VPN** address, not its LAN one, e.g. `10.0.0.10` |
 | USB via `adb reverse` | always `127.0.0.1`, because the tunnel makes the far end look local |
 | cloud host | its public address or DNS name |
 
-`tcp://*:PORT` on the binding side means "every interface on this machine" and
-never changes.
+`tcp://*:PORT` is fine for `gossip_bind`, which only listens. It is wrong for
+`endpoint`: that is the address the rendezvous hands to everyone else, and a
+wildcard is handed out as `0.0.0.0`, which every other node dials as itself.
 
 ```cpp
 // the rendezvous node: binds, so it uses * and needs no address of its own
 uninet::SessionConfig host;
 host.gossip_bind = "tcp://*:5670";
-host.endpoint    = "tcp://*:5671";
+host.endpoint    = "tcp://RENDEZVOUS_ADDR:5671";   // a real address, never *
 auto a = uninet::Session::join("Recorder", host);
 
 // every other node: dials, so it needs the rendezvous machine's address
@@ -735,7 +759,7 @@ auto b = uninet::Session::join("Laptop", peer);
 ```
 
 ```python
-a = uninet.join("Recorder", gossip_bind="tcp://*:5670", endpoint="tcp://*:5671")
+a = uninet.join("Recorder", gossip_bind="tcp://*:5670", endpoint="tcp://RENDEZVOUS_ADDR:5671")
 b = uninet.join("Laptop",   gossip_connect="tcp://RENDEZVOUS_ADDR:5670")
 ```
 
@@ -1595,12 +1619,12 @@ cfg.reconnect_poll_ms  = 500;     // notice sooner
 worth putting in a status line: a number that climbs steadily means the machine
 is flapping between networks, not that UniNet is misbehaving.
 
-**This machine has several networks and discovery is using the wrong one.**
-This is the most common cause of "it just does not find anything" on a laptop,
-and nothing on screen points at it. Discovery binds **one** interface. A machine
-with a wired connection, Wi-Fi, a VPN and a couple of container bridges has
-five or six, and the default is not necessarily the one you are thinking of.
-Ask:
+**A network is not being searched.** By default discovery covers every
+network, so first check what it does on each: the "beacon on every network"
+section of `uninet::diagnostics()` says, per network, whether the beacon is
+broadcast, swept, or skipped and why. If the application named an interface,
+or runs on a system Zyre, discovery covers **one** network only, and it may not
+be the one you are thinking of. Ask:
 
 ```bash
 uninet-discover --interfaces

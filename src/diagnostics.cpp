@@ -11,6 +11,8 @@
 #include "uninet/session.h"
 #include "uninet/zyre_transport.h"
 
+#include "beacon_fanout.h"
+
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -238,7 +240,16 @@ std::string diagnostics() {
         out += "\n";
     }
     const Interface best = best_interface(ifaces);
-    out += "  -> would choose: " + (best.name.empty() ? std::string("(none)") : best.name) + "\n";
+    out += "  -> on one network only, would choose: " + (best.name.empty() ? std::string("(none)") : best.name) + "\n";
+
+    // Every network at once (the default): where the beacon goes on each link.
+    // A VPN shows up here and not above, because czmq lists no point-to-point
+    // link; "skipped" says why a network cannot be reached.
+    out += "\nbeacon on every network:\n";
+    const auto routes = detail::beacon_routes(detail::ipv4_links());
+    if (routes.empty()) out += "  (no network)\n";
+    for (const auto& r : routes)
+        out += "  " + r.link.name + "  " + r.how + "\n";
 
     out += "\nsessions:\n";
     std::vector<const Session*> live;
@@ -255,8 +266,9 @@ std::string diagnostics() {
         out += s->connected() ? "  connected" : "  NOT connected";
         try {
             const auto& t = m->transport();
-            out += "  on " + (t.chosen_interface().name.empty()
-                                  ? std::string("(unset/gossip)") : t.chosen_interface().name);
+            const std::string on = t.chosen_interface().name;
+            out += "  on " + (on == "*" ? std::string("every network")
+                              : on.empty() ? std::string("(unset/gossip)") : on);
             out += "  uuid " + s->uuid();
             out += "  peers " + std::to_string(s->peers().size());
             out += "  reconnects " + std::to_string(t.reconnect_count());
