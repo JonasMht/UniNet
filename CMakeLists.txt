@@ -348,6 +348,18 @@ if(WIN32)
     endif()
 endif()
 
+# ── Tests and benchmarks ──
+# Built when UniNet is the project being built, not when another project pulls
+# it in with add_subdirectory(): there its test targets would share the parent's
+# output directory and collide with the parent's own (test_roundtrip, say).
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    set(UNINET_TESTS_DEFAULT ON)
+else()
+    set(UNINET_TESTS_DEFAULT OFF)
+endif()
+option(UNINET_BUILD_TESTS "Build UniNet's tests and benchmarks" ${UNINET_TESTS_DEFAULT})
+if(UNINET_BUILD_TESTS)
+
 # ── Tests ──
 enable_testing()
 add_executable(test_roundtrip tests/test_roundtrip.cpp)
@@ -422,6 +434,7 @@ set_target_properties(benchmark_codec PROPERTIES OUTPUT_NAME uninet-benchmark-co
 add_executable(benchmark_network tests/benchmark_network.cpp)
 target_link_libraries(benchmark_network PRIVATE uninet uninet_warnings)
 set_target_properties(benchmark_network PROPERTIES OUTPUT_NAME uninet-benchmark)
+endif()
 
 # ── The CLI and the demo ──
 # uninet-discover answers "what is on my network?"; uninet-demo is two or more
@@ -563,6 +576,7 @@ if(UNINET_BUILD_CABI)
                              RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
+if(UNINET_BUILD_TESTS)
 # ── Cross-language interop ──
 # The C++ participant of scripts/test-interop.sh, which runs a C++, a Python and
 # a C# node in one realm and checks that each decodes the others' payloads
@@ -570,3 +584,4 @@ endif()
 # the shell script drives it and reports which languages were actually covered.
 add_executable(interop_cpp tests/interop/interop_cpp.cpp)
 target_link_libraries(interop_cpp PRIVATE uninet uninet_warnings)
+endif()
