@@ -170,7 +170,8 @@ void test_network_thread_stays_live() {
         while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     });
 
-    if (!wait_until([&] { return !rx->peers().empty(); }, std::chrono::seconds(10))) {
+    if (!wait_until([&] { return !tx->peers().empty() && !rx->peers().empty(); },
+                    std::chrono::seconds(10))) {
         check(false, "the two nodes found each other");
         release.store(true);
         return;
@@ -236,7 +237,8 @@ void test_backpressure_beats_dropping() {
         got.push_back(int(e.data["n"].as_uint()));
     });
 
-    if (!wait_until([&] { return !rx->peers().empty(); }, std::chrono::seconds(10))) {
+    if (!wait_until([&] { return !tx->peers().empty() && !rx->peers().empty(); },
+                    std::chrono::seconds(10))) {
         check(false, "the two nodes found each other");
         return;
     }
@@ -298,7 +300,8 @@ void test_cap_drops_oldest_and_counts() {
         got.push_back(int(e.data["n"].as_uint()));
     });
 
-    if (!wait_until([&] { return !rx->peers().empty(); }, std::chrono::seconds(10))) {
+    if (!wait_until([&] { return !tx->peers().empty() && !rx->peers().empty(); },
+                    std::chrono::seconds(10))) {
         check(false, "the two nodes found each other");
         release.store(true);
         return;
@@ -352,7 +355,8 @@ void test_inline_delivery_still_works() {
         got.push_back(int(e.data["n"].as_uint()));
     });
 
-    if (!wait_until([&] { return !rx->peers().empty(); }, std::chrono::seconds(10))) {
+    if (!wait_until([&] { return !tx->peers().empty() && !rx->peers().empty(); },
+                    std::chrono::seconds(10))) {
         check(false, "the two nodes found each other");
         return;
     }
@@ -390,7 +394,8 @@ void test_close_drains() {
             while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     });
 
-    if (!wait_until([&] { return !rx->peers().empty(); }, std::chrono::seconds(10))) {
+    if (!wait_until([&] { return !tx->peers().empty() && !rx->peers().empty(); },
+                    std::chrono::seconds(10))) {
         check(false, "the two nodes found each other");
         release.store(true);
         rx->close();
